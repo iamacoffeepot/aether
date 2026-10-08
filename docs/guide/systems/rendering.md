@@ -58,6 +58,9 @@ the `RenderCapability` actor. It handles these payload kinds:
 | `aether.render.write_texture_layer` | `{ texture_id, layer, pixels }` | replace every level of one layer of a texture array, in place; fire-and-forget |
 | `aether.render.create_texture_volume` | `{ format, width, height, depth, pixels }` → `create_texture_volume_result` | register a volume texture with its whole contents; reply carries the `texture_id` |
 | `aether.render.draw_textured_quads` | `{ texture_id, space, clip, blend, quads }` | per-tick textured alpha-blended quads; accumulates into the frame |
+| `aether.render.create_font` | `{ bytes }` → `create_font_result` | register a font from a blob of its file's bytes; reply carries the `font_id` ([Text](text.md)) |
+| `aether.render.font_metrics` | `{ font_id }` → `font_metrics_result` | a registered font's size-independent metrics table |
+| `aether.render.draw_text` | `{ clip, space, runs }` | per-tick strings laid out into one textured batch over the reserved glyph atlas; accumulates into the frame |
 | `aether.render.draw_screen_triangles` | `{ space, clip, triangles }` | per-tick pixel-space triangles at any orientation; accumulates into the frame |
 | `aether.render.draw_shapes` | `{ space, clip, shapes }` | per-tick rounded, stroked, shadowed, optionally textured boxes evaluated as a distance field; accumulates into the frame |
 | `aether.render.material.textured` | `{ texture_id, blend, rects }` | per-tick depth-tested world-space textured rects |
@@ -149,15 +152,48 @@ contract matches `draw_triangle`: resend the batch every frame it should appear.
 The batch's `space` selects the projection — `Screen` rects are window pixels
 drawn under an ortho derived from the surface size; `World` anchors the quad in
 the scene through the camera's `view_proj` and reads its coordinates as pixel
-offsets from the projected anchor. All three overlay verbs carry the same
-field with the same meaning. Sprites, HUD images, and the `aether.text`
-capability all compose this surface.
+offsets from the projected anchor. Every overlay verb carries the same
+field with the same meaning. Sprites and HUD images compose this surface, and
+so does the renderer's own text: a `draw_text` becomes one textured batch
+over the glyph atlas ([Text](text.md)).
+
+**Overlay order between actors is lineage order**
+([ADR-0248](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0248-lineage-is-an-ordered-tree.md)).
+The four overlay verbs (`draw_textured_quads`, `draw_screen_triangles`,
+`draw_shapes`, `draw_text`) share one painter order, and it has two parts.
+Inside one actor it is submission order: the batches that actor sent, in the
+order it sent them. Between two actors it is the order of the actor tree: a
+child's draws lie over its parent's, and a later sibling's over an earlier
+one's, where "later" is creation order and the root actors count as siblings.
+The order the mail reaches the renderer in plays no part, so two actors that
+draw on the same `Tick` lie the same way on every frame. The renderer files
+each batch at its sender's place, read with `NativeCtx::lineage_order` when
+the batch arrives, and sorts once, when the frame commits. Nothing states an
+order: there is no z-index, layer number, or reorder verb. An actor that must
+lie over another is created after it, or beneath a parent created after it;
+a parent that needs fixed places creates its layers first, as empty children
+in the order it wants, and spawns content beneath the right one.
+
+A draw that is not mail from an ordinary actor sorts by the same rule, with
+no special case:
+
+| Draws from | Sender the renderer reads | Where it lies |
+|---|---|---|
+| MCP `send_mail`, `send_mail_traced` | `aether.rpc.server` | At that root's place in boot order: under every boot-list component and every later load |
+| `capture_frame` pre-mails and after-mails | `aether.render` itself | At the render capability's place in boot order, under every component |
+| SubstrateHarness sends | none | Under everything |
+| A driver root push with no reply inbox | none | Under everything |
+
+So a debug shape mailed straight to the renderer from a session lies under
+every component's overlay draws. A session that wants a draw in front loads
+or spawns an actor that draws: a root created later is last.
 
 **Screen triangles are the overlay's free-form primitive.**
 `draw_screen_triangles` takes triangles whose three corners are pixels — one
 linear RGBA per corner interpolated across the face — and records them in the
-same overlay pass, through the same pipeline, in submission order with the quad
-batches. Either winding draws; the batch carries the same optional `clip`
+same overlay pass, through the same pipeline, in the one painter order they
+share with the quad batches: submission order inside one actor, lineage order
+between actors. Either winding draws; the batch carries the same optional `clip`
 scissor and the same `space`, so a gauge or a graph edge can hang off a
 world-space anchor exactly as a label does. It exists because 2D content built from
 rotated geometry had no aspect-correct path: a quad is `{x, y, width, height}`
@@ -182,11 +218,12 @@ fill), or a soft halo (a shadow with neither) at any scale. The batch takes the
 same painter position and the same `clip` scissor as any other overlay batch,
 through its own pipeline: one more overlay draw, not a pass and not a layer.
 The vocabulary is fixed and substrate-owned — callers supply parameters, never
-WGSL — so the overlay lane stays a closed contract the widget set's hole
-cutting can reason about. A `corner_radius` of `0.0` with a `fill` alone is a
-flat rectangle, which is why there is no separate flat-quad verb: the overlay's
-three verbs are one per fragment stage — sample a texture, evaluate a distance
-field, rasterize caller geometry.
+WGSL — so the overlay lane stays a closed contract a caller can reason
+about. A `corner_radius` of `0.0` with a `fill` alone is a
+flat rectangle, which is why there is no separate flat-quad verb: the overlay
+has one verb per fragment stage — sample a texture, evaluate a distance
+field, rasterize caller geometry — and `draw_text`, which lays strings out
+into the first.
 
 A shape's optional `texture { texture_id, u0, v0, u1, v1, blend }` draws an
 image *inside* the fill's coverage, so the corner radius, the circle, and the
@@ -273,6 +310,28 @@ preserving each window path and occlusion flag together with the shared GPU and
 wireframe overlay. If any later surface fails, none of the staged surfaces or
 device state becomes live and the whole render capability becomes unusable.
 
+**A window surface's present mode is chosen from what the surface offers,
+never fallen back to.** The window's owner tells render one of two things
+about a surface (`SurfacePresent`), on `attach_window` and again on
+`set_window_present`, and render maps it over the present modes the surface
+reports:
+
+| Asked | wgpu mode chosen | When the surface lacks it |
+|---|---|---|
+| `InStep`: the present waits for the display | `Fifo` | `Err` naming the modes the surface offers |
+| `Unsynced`: the present returns at once | `Immediate`, else `Mailbox` | `Err` naming the modes the surface offers |
+
+A refusal leaves the surface configured as it was. wgpu's `AutoVsync` and
+`AutoNoVsync` are not used, because each is a fallback chain and the second
+ends in `Fifo`: a window asked to run unsynced would be paced by the display
+with no word to its owner. `FifoRelaxed` is not used either: it is `Fifo`
+that tears when a frame is late. The chosen mode is logged at info under
+`aether_substrate::render`, since `Unsynced` is served by `Immediate` (which
+may tear) on one platform and `Mailbox` (which does not) on another. Render
+knows nothing of window kinds or frame rates: the desktop driver maps a
+window's [presentation](window.md#presentation) onto these two values, and a
+device replacement asks each rebuilt surface for the value it last had.
+
 Public ids do not change across a successful replacement. Sampled textures
 upload again from their retained CPU pixels, texture arrays from the retained
 blob of each written layer, volume textures from the blob they were created
@@ -310,9 +369,10 @@ hook:
 
 ```rust
 // In an `#[actor(depends(LifecycleCapability, RenderCapability))]` block.
-fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
     ctx.subscribe::<LifecycleCapability, Tick>();
     ctx.subscribe::<LifecycleCapability, Render>();
+    Ok(())
 }
 
 #[handler::event]
@@ -323,8 +383,10 @@ fn on_render(&mut self, ctx: &mut WasmCtx<'_>, _render: Render) {
 
 A ctx that omits its actor is typed by it: the macro reads `WasmCtx<'_>` as
 `WasmCtx<'_, Self>`, so the ctx reaches only the actors the component declares
-with `depends(R)`. The actor is the first parameter, the reply mode the second
-(`WasmCtx<'_, Self, Unchecked>`); spell `WasmCtx<'_, Erased>` for the untyped view.
+with `depends(R)`. The ctx's type arguments are receiver, sender, mode: the actor first, the
+sender the handler requires second (`Anyone` when it states none), and the
+reply mode third (`WasmCtx<'_, Self, Anyone, Unchecked>`); spell
+`WasmCtx<'_, Erased>` for the untyped view.
 
 Address the cap by type — `ctx.send::<RenderCapability>(..)` — and send
 `DrawTriangle`s. If you're a camera, be a view source: handle `ViewSubscribe` by
@@ -342,46 +404,79 @@ required `window` names the render target (the window's actor path as
 tool never guesses a primary or focused window), its `mails` bundle dispatches before the readback (the state that should
 appear) and `after_mails` after (cleanup), all around one synchronous PNG read.
 So to see a
-camera change, stage the `aether.kit.camera.*` driver mail (or a `DrawTriangle`
-directly) in `mails` and read the frame back inline. The renderer's retained
+camera change, stage an `aether.kit.camera.pose` or `.frame` addressed to the
+camera instance (or a `DrawTriangle` directly) in `mails` and read the frame
+back inline. The renderer's retained
 geometry means a capture that doesn't advance a tick still shows the last live
 frame.
 
 ## How to extend or reuse it
 
-- **A new camera mode** is component work, not substrate work. `aether-kit`'s
-  `camera` export is the worked example: it hosts N named cameras, advances each
-  on `Tick`, and publishes the active one's `view_proj` on `Render`. It boots a
-  default `"main"` camera in orbit mode and exposes driver kinds —
-  `aether.kit.camera.{create, destroy, set_active, set_mode, orbit.set, topdown.set}`
-  — for adding cameras and poking their parameters live. A new mode (follow,
-  cinematic, free-fly) is a new `view_proj` computation in a camera component;
-  the renderer needs no change because it only ever applies the matrix it's
-  handed. Peers that need the current eye send the source-bound
-  `aether.kit.camera.eye` request. Its `aether.kit.camera.eye_result` reply
-  carries the active orbit or top-down eye as world-space `(x, y, z)`, or
-  `None` while the active binding is absent or no longer live. This is a
-  request/reply read-back, not a subscription stream; the camera still
-  publishes only `view_proj` to `aether.render`. Loaded by the
-  `aether_kit@aether.kit.camera` selector, the camera answers at
-  `aether.kit.camera`, its published name — the address `LoadResult.path` hands
-  back.
-- **Driving a camera from the keyboard** is a peer component's job, not the
-  camera's. `aether-kit`'s `camera-controller` export subscribes `Key` /
-  `KeyRelease` / `Tick`, keeps a shadow of the pose it drives, and mails
-  `aether.kit.camera.orbit.set` / `aether.kit.camera.topdown.set` deltas to a peer
-  camera — WASD pan the target across the ground, the arrows yaw and pitch, Z/X
-  dolly the distance, and an idle tick produces no mail. It loads by the
-  `aether_kit@aether.kit.camera-controller` selector with an
-  `aether.kit.camera-controller.config` init-config that picks the target
-  camera, mode, per-tick rates, and clamps, so the camera stays a pure
-  projection state machine while the keyboard policy lives in the controller.
-  The config's optional `seed` (`{ target, yaw, pitch, distance }`) replaces the
-  compiled starting orbit pose, a three-quarter overhead look at the origin
-  from 12 units back. The controller seeds its own shadow with it, so a subject
-  framed at boot stays framed once a key is pressed, where an
-  `aether.kit.camera.orbit.set` sent from elsewhere would snap back to the
-  shadow on the first held key. It applies in orbit mode only.
+- **A camera** is component work, not substrate work, and `aether-kit`'s
+  `camera` export is the one to use: an instanced actor, one camera per
+  instance at `aether.kit.camera:<key>`, spawned with an
+  `aether.kit.camera.config` (`{ lens, viewport, pose }`) and removed by
+  dropping the instance. It is a view source: it publishes its
+  `ViewProjection` to its subscribers when the view changes and at no other
+  time, and the renderer is one once `aether.render.view_from` names it, so
+  the active camera is whichever one the renderer follows.
+  - **One pose and one lens.** A pose is `{ target, yaw, pitch, distance }`:
+    the eye sits `distance` from `target` and looks back at it. A lens is
+    `Perspective { fov }` or `Orthographic { extent }`, where `extent` is the
+    half-height at the target per unit of distance. The view is the inverse of
+    the eye's rigid transform, so a pitch of `-PI/2` (straight down) is an
+    ordinary pose, and top-down is that pitch with an orthographic lens. The
+    scalars are validated: a pitch outside `[-PI/2, PI/2]`, a distance or an
+    extent that is not above zero, or a field of view outside `(0, PI)` does
+    not decode.
+  - **Depth follows distance.** A perspective lens puts the planes at
+    `distance / 100` and `distance * 100`, an orthographic one at
+    `∓distance * 100`, and `ViewProjection`'s `near` and `far` carry them. A
+    scene a thousand units across needs no tuning; a drawer that knows better
+    bounds can still send its own `ViewProjection`.
+  - **The viewport** is `Fixed { width, height }` or `Window(path)`. A window
+    camera follows its window's size and publishes nothing until it has
+    learned it.
+  - **Mail.** `aether.kit.camera.pose` sets the pose; `.frame { bounds }`
+    looks at a box from far enough back to see all of it; `.glide { to,
+    over_millis }` eases to a pose, stepping on `Tick` only while it runs;
+    `.where` is answered with the current pose; `.ray { pixel }` is answered
+    with the world-space ray through a pixel (`ray_result`), ready for
+    `aether-math`'s `Ray::plane_hit`.
+  - **A republish** of the kit module keeps a camera's pose, glide and learned
+    viewport size and drops its viewers, which the camera logs at warn: send
+    `aether.render.view_from` again, and have any other viewer subscribe
+    again.
+- **Driving a camera with the mouse and the keyboard** is a peer component's
+  job, not the camera's. `aether-kit`'s `camera-controller` export, an
+  instance at `aether.kit.camera-controller:<key>`, subscribes the window's
+  key, mouse and focus events and `Tick`, and sends the camera only
+  `aether.kit.camera.pose`, the message a script or an agent sends: at most
+  one a tick, and none while nothing is held.
+  - **Controls.** Left-drag orbits. The wheel zooms, multiplying the distance
+    per step within the config's `nearest` and `farthest`. Right-drag or
+    middle-drag pans with the grabbed point staying under the cursor. WASD
+    and the arrows pan the target across the ground at a rate that scales
+    with the camera's distance, and Q/E turn the camera about its target.
+    Key rates use the tick's elapsed time.
+  - **It reads before it writes.** A gesture starts when input arrives while
+    nothing is held: the controller asks the camera
+    `aether.kit.camera.where` and steps from the answer, and it forgets the
+    pose when the last key and button are released. A `pose`, `frame` or
+    `glide` sent from elsewhere between gestures stands, and the next
+    gesture continues from wherever the camera is.
+  - **It is a viewer of its camera.** It sends the camera
+    `aether.render.view_subscribe` and casts a drag pan's rays through the
+    view the drag began in, so the pan is exact for either lens with no
+    request per mouse move.
+  - **One window.** Its `aether.kit.camera-controller.config` names the
+    camera (`"camera": "aether.kit.camera:main"`) and the window whose input
+    it reads (`"window": "aether.window/aether.window.instance:main"`), and
+    sets the rates and the zoom range. Input from any other window is
+    ignored, and when its window loses focus it drops every held key and
+    button, whose releases went to another window.
+  - Load the camera first: a controller whose camera is not live fails its
+    load.
 - **A new drawing component** subscribes the `Render` stage and emits
   `DrawTriangle`s in world space, with `z` chosen against the depth convention
   (backdrop at `z = 0`, movers above). Multiple components can draw into one

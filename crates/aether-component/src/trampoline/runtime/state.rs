@@ -6,7 +6,7 @@ use aether_kinds::{ComponentCapabilities, DropResult};
 use aether_substrate::InboundMail;
 use aether_substrate::actor::native::envelope::Envelope;
 use aether_substrate::actor::native::{Held, NativeCtx};
-use aether_substrate::actor::wasm::component::{Component, ComponentCtx, StateBundle};
+use aether_substrate::actor::wasm::component::{Component, ComponentCtx, HookFault, StateBundle};
 use aether_substrate::actor::wasm::module::{Module, ModuleCache};
 use aether_substrate::mail::MailId;
 use aether_substrate::mail::outbound::HubOutbound;
@@ -67,29 +67,33 @@ pub enum Slot {
     /// One guest runs and receives its mail.
     Live(Box<Component>),
     /// A republish prepared a candidate beside the running guest, which is
-    /// kept, unwired and dehydrated, with the state it saved, until a commit
-    /// installs the candidate or an abort reinstates it and hands that state
-    /// back.
+    /// kept, dehydrated, with the state it saved, until a commit installs
+    /// the candidate or an abort reinstates it and hands that state back.
     Prepared(Box<PreparedSlot>),
     /// No guest is resident: the transient a republish step holds while it
-    /// moves a guest, and the state the trampoline's close leaves.
+    /// moves a guest, the state the trampoline's close leaves, and the state
+    /// a reinstatement leaves, ahead of that close, when the kept guest
+    /// refused its own saved state (ADR-0249 §4).
     Released,
 }
 
 /// A republish member between prepare and commit or abort: the guest kept
-/// for an abort, the candidate built and rehydrated for a commit, what the
-/// trampoline records once the candidate commits, and the mail its inbox
-/// gate queued meanwhile.
+/// for an abort, the candidate built, rehydrated and wired for a commit,
+/// what the trampoline records once the candidate commits, and the mail its
+/// inbox gate queued meanwhile.
 pub struct PreparedSlot {
-    /// The guest that ran until prepare. It has run `unwire` and
-    /// `on_dehydrate`, and its reply table and correlation cursor moved to
-    /// the candidate. An abort reinstates it with [`Self::saved`].
+    /// The guest that ran until prepare. It has run `on_dehydrate`, which
+    /// returned `Ok`, and its reply table, correlation cursor and watches
+    /// moved to the candidate. An abort reinstates it with [`Self::saved`].
     pub(crate) old: Component,
     /// The state the kept guest saved in `on_dehydrate`, which the candidate
     /// rehydrated from. An abort hands it back to the kept guest through its
-    /// `on_rehydrate`, so what the dehydrate moved out returns to it.
+    /// `on_rehydrate`, so what the dehydrate moved out returns to it; a kept
+    /// guest that returns an error from it closes.
     pub(crate) saved: Option<StateBundle>,
-    /// The candidate, whose outbox is held: nothing it sent has left.
+    /// The candidate, whose outbox is held: nothing it sent has left. Its
+    /// `wire` returned `Ok`, so an abort and a close while prepared run its
+    /// `unwire`.
     pub(crate) candidate: Component,
     /// The candidate's module, which becomes resident on commit.
     pub(crate) module: Module,
@@ -105,25 +109,39 @@ pub struct PreparedSlot {
     pub(crate) gated: VecDeque<InboundMail>,
 }
 
+/// Whether a candidate that lost owes `unwire` (ADR-0249 §4): what wired
+/// unwires.
+pub enum CandidateUnwire {
+    /// Its `wire` ran and returned, with `Ok` or with an error.
+    Owed,
+    /// Its `wire` never ran, or trapped, after which it runs no more code.
+    NotOwed,
+}
+
+/// A prepare the candidate refused after the old guest's hooks ran.
+pub struct CandidateRefusal {
+    /// What the republish is refused with.
+    pub(crate) error: String,
+    /// Whether the reinstatement runs the candidate's `unwire`.
+    pub(crate) unwire: CandidateUnwire,
+}
+
 impl WasmTrampolineState {
     /// Run a guest's `wire` hook and publish the inline-child aliases it
-    /// staged. A birth runs it once, and a reinstated guest runs it again
-    /// (ADR-0241 §7), since its `unwire` ran at prepare.
-    pub(crate) fn wire_guest(ctx: &mut NativeCtx<'_, WasmTrampoline>, component: &mut Component, root: Option<MailId>) {
-        if let Err(e) = component.wire(root) {
-            tracing::error!(
-                target: "aether_component",
-                error = format!("{e:#}"),
-                "wasm guest `wire` hook returned error",
-            );
-        }
-        // ADR-0163 §3 (#3984): the asset load window closes when `wire`
-        // returns — it lets go of the module's code so
-        // `asset_fetch_p32` traps thereafter, retaining the catalog
-        // metadata for the instance's life. Runs whether or not `wire`
-        // errored; the window's job (init + wire) is done either way.
-        component.close_load_window();
+    /// staged. A birth runs it once (ADR-0249 §3).
+    ///
+    /// A fault is the caller's to act on (ADR-0247 rule 3): a birth fails
+    /// with it. The aliases a faulted guest staged are not published; they
+    /// go with the guest.
+    pub(crate) fn wire_guest(
+        ctx: &mut NativeCtx<'_, WasmTrampoline>,
+        component: &mut Component,
+        root: Option<MailId>,
+    ) -> Result<(), HookFault> {
+        let wired = component.wire(root);
+        wired?;
         Self::stage_guest_aliases(ctx, component);
+        Ok(())
     }
 
     /// Deliver one envelope to a guest, then publish the inline-child
@@ -153,20 +171,33 @@ impl WasmTrampolineState {
     }
 
     /// Put `old` back as the live guest after its candidate lost (ADR-0241
-    /// §7), shared by a refused prepare and an abort. The candidate's held
-    /// mail is discarded, and its staged aliases drop with it, so nothing it
-    /// did leaves. The reply table and correlation cursor it took over move
-    /// back, past every id it minted. `old` then gets back the state its
-    /// `on_dehydrate` saved, `saved`, through its own `on_rehydrate`, so a
-    /// value the dehydrate moved out, a held reply among it, returns to it
-    /// (ADR-0016 §4). It runs `wire` again, since its `unwire` ran at
-    /// prepare, and then receives the mail its gate queued, in order. Only
-    /// teardown outside that saved state and outside what `wire` rebuilds
-    /// stays gone.
+    /// §7), shared by a refused prepare and an abort. The candidate is
+    /// unwired exactly when `unwire` says it owes it (ADR-0249 §4); its held mail is discarded, and its staged
+    /// aliases drop with it, so nothing it did leaves. The reply table and
+    /// correlation cursor it took over move back, past every id it minted,
+    /// and so do the watches, less the ones it added (ADR-0079 §8). `old`
+    /// then gets back the state its `on_dehydrate` saved, `saved`, through
+    /// its own `on_rehydrate`, so a value the dehydrate moved out, a held
+    /// reply among it, returns to it (ADR-0016 §4), the context of each watch
+    /// among it. The old guest never runs `wire` again: its `unwire` never
+    /// ran, so it is still wired. Then it receives the mail its gate queued,
+    /// in order, a departure notice for a watched actor that closed meanwhile
+    /// among it. Only teardown outside that saved state and outside what
+    /// `wire` built stays gone.
     ///
     /// A trap in the old guest's `on_rehydrate` aborts the substrate
     /// (ADR-0063), as a trap in delivery does: there is no other guest to
     /// fall back to.
+    ///
+    /// The old guest's `on_rehydrate` returning an error closes the instance
+    /// (ADR-0249 §4): it is intact, and it has said it cannot take its state
+    /// back, with no operation left to refuse. It is not put back in
+    /// `Slot::Live`, whose close would run `unwire` on a guest that never
+    /// unwired at prepare. Each reply it holds is answered `unanswered`, it
+    /// is dropped with the slot left `Released`, the gated mail drops and each
+    /// chain settles, and the trampoline is asked to shut down. The close
+    /// that follows finds no guest, clears the accept set, answers any drop
+    /// request, and the name tombstones.
     pub(crate) fn reinstate(
         &mut self,
         ctx: &mut NativeCtx<'_, WasmTrampoline>,
@@ -174,21 +205,43 @@ impl WasmTrampolineState {
         mut candidate: Component,
         saved: Option<StateBundle>,
         gated: VecDeque<InboundMail>,
+        unwire: CandidateUnwire,
     ) {
+        match unwire {
+            CandidateUnwire::Owed => candidate.unwire(),
+            CandidateUnwire::NotOwed => {}
+        }
         candidate.discard_held_outbox();
         old.resume_replies(candidate.take_pending_replies());
         old.resume_correlations(candidate.correlation_cursor());
+        old.resume_watches(candidate.take_watches());
         drop(candidate);
+        // A watch of the kept guest that still waited for its watcher's
+        // alias when the table moved registers now if that alias was
+        // published while the slot was prepared.
+        old.register_published_watches();
 
-        if let Some(bundle) = saved
-            && let Err(e) = old.call_on_rehydrate(&bundle)
-        {
-            ctx.fatal_abort(format!(
-                "component {} trapped restoring its state after an aborted republish: {e}",
+        let restored = saved.map_or(Ok(()), |bundle| old.call_on_rehydrate(&bundle));
+        match restored {
+            Ok(()) => {}
+            Err(HookFault::Trapped(trap)) => ctx.fatal_abort(format!(
+                "component {} trapped restoring its state after an aborted republish: {trap:#}",
                 ctx.path()
-            ));
+            )),
+            Err(HookFault::Returned(error)) => {
+                tracing::error!(
+                    target: "aether_component",
+                    actor = %ctx.path(),
+                    %error,
+                    "the guest refused its own saved state after an aborted republish; the instance closes",
+                );
+                old.answer_held_at_close();
+                drop(old);
+                drop(gated);
+                ctx.shutdown();
+                return;
+            }
         }
-        Self::wire_guest(ctx, &mut old, None);
         self.slot = Slot::Live(Box::new(old));
         self.release_gated(ctx, gated);
     }
@@ -212,17 +265,22 @@ impl WasmTrampolineState {
     /// (ADR-0079 amended), and then each reply it still holds is answered
     /// with the `unanswered` value it registered (ADR-0243 §6): closing
     /// saves no guest state, so no ticket survives to answer a held slot.
-    /// The answers come after `unwire`, which may still answer handles
-    /// itself (#6409). Engine teardown answers nothing. The `Component` then
-    /// drops, tearing down linear memory.
+    /// The answers come after `unwire`, which answers nothing at commit
+    /// since its rows already moved (ADR-0249 §7). Engine teardown answers
+    /// nothing. The `Component` then drops, tearing down linear memory.
     ///
-    /// A prepared slot discards its candidate, which restores any slot a
-    /// held answer reserved, moves the reply table the candidate took over
-    /// back to the kept guest, and answers from there. The kept guest is not
-    /// wired again and its `unwire` does not run again: it ran `unwire` at
-    /// prepare (ADR-0241 §7), and an abort here would wire it and deliver
-    /// its gated mail inside the close. The gated mail drops, and each chain
-    /// settles as it does.
+    /// A prepared slot unwires the candidate, which wired, discards
+    /// its held outbox, which restores any slot a held answer reserved, moves
+    /// the reply table the candidate took over back to the kept guest, runs
+    /// the kept guest's `unwire`, and answers from there. The kept guest gets
+    /// no `on_rehydrate` first: it is closing, and `unwire` after
+    /// `on_dehydrate` is the order every replaced guest runs (ADR-0249 §4).
+    /// The gated mail drops, and each chain settles as it does.
+    ///
+    /// Every watch the mailbox holds is released as its guest drops
+    /// (ADR-0079 §8): the watch table goes with the `Component` that holds
+    /// it, the candidate's in a prepared slot, and each registration with
+    /// it, whether or not the guest's `unwire` ran or trapped.
     ///
     /// A trap in the guest's `unwire` is logged where it is caught and the
     /// close goes on, so the held replies still settle and the name still
@@ -246,8 +304,10 @@ impl WasmTrampolineState {
             }
             Slot::Prepared(prepared) => {
                 let PreparedSlot { mut old, mut candidate, .. } = *prepared;
+                candidate.unwire();
                 candidate.discard_held_outbox();
                 old.resume_replies(candidate.take_pending_replies());
+                old.unwire();
                 old.answer_held_at_close();
             }
             Slot::Released => {}

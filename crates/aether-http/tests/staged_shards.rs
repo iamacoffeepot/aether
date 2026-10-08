@@ -5,7 +5,7 @@
 use aether_actor::actor;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_http::{
-    HttpRouterResult, HttpServerCapability, HttpServerConfig, HttpServerRequest, HttpServerResponse,
+    HttpRouterResult, HttpServerCapability, HttpServerConfig, HttpServerRequest, HttpServerResponse, MethodFilter,
     RegisterRouteResult, RegisterRouteSelf,
 };
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -28,8 +28,13 @@ impl NativeActor for ColdHttpHandler {
         Ok(ColdHttpHandlerState)
     }
 
-    fn wire(_state: &mut ColdHttpHandlerState, ctx: &mut NativeCtx<'_>) {
-        ctx.send::<HttpServerCapability>(&RegisterRouteSelf { prefix: "/".to_owned(), method: None, shared: false });
+    fn wire(_state: &mut ColdHttpHandlerState, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
+        ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
+            prefix: "/".to_owned(),
+            method: MethodFilter::Any,
+            shared: false,
+        });
+        Ok(())
     }
 
     #[handler::request]

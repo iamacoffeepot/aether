@@ -31,7 +31,7 @@ A deferred reply is a typed pair. The handler returns the receipt, and the oblig
 ```rust
 // main: untyped debt, unchecked handler, Undeclared row
 #[handler::unchecked(reason = "…")]
-fn on_watch_head(.., ctx: &mut NativeCtx<'_, Self, Unchecked>, m: WatchHead) {
+fn on_watch_head(.., ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, m: WatchHead) {
     let reply: DeferredReply = ctx.defer_reply_to(ctx.reply_target());
     self.watchers.park(reply);
 }
@@ -123,7 +123,8 @@ held.answer(ctx, &WatchHeadResult { .. });
      candidate in `PendingReplies` (#6409), so a ticket still resolves to
      its requester once the member commits. On abort, the table moves back
      to the reinstated old guest, so no ticket is orphaned by another
-     member's failure. The candidate does not re-register: the stored reply
+     member's failure. An `unwire` at commit answers no held reply: its rows
+     already moved to the successor at prepare (ADR-0249 §4). The candidate does not re-register: the stored reply
      is the kind the requester asked for, and a ticket claims only with a
      matching reply kind id, which hashes the kind's schema, so a candidate
      that changed `R` could not answer the slot and could not produce the
@@ -139,15 +140,14 @@ held.answer(ctx, &WatchHeadResult { .. });
    - **The guard.** The guest's per-actor registry, the one that already
      holds its request-context table and is reached through the ctx, tracks
      each live ticket. After `on_dehydrate`, a ticket that is still live and
-     was not encoded makes the hook return a refusal status. The refusing
-     hook still saves what it encoded, so the tickets it moved into saved
-     state return with that state to the reinstated guest. The host maps
-     that status onto a refusal that aborts the whole group (ADR-0241 §7):
-     every member reinstates its old guest, so the requester is not
+     was not encoded makes the `on_dehydrate` export return an error, the
+     way a hook's own returned error is reported (ADR-0249 §1). The refusing
+     export still saves what the hooks encoded, so the tickets they moved
+     into saved state return with that state to the reinstated guest. The
+     host refuses with that error, which aborts the whole group (ADR-0241
+     §7): every member reinstates its old guest, so the requester is not
      stranded and a healthy member is not swapped out for another member's
-     dropped ticket. The hook refuses, not traps, because the host contains
-     `on_dehydrate` traps and lets the replace proceed (ADR-0015). That
-     long-standing behavior is out of scope here. A dropped guest `Held`
+     dropped ticket. A dropped guest `Held`
      checks only a flag on the value that a granted encoder sets, so no drop
      path reads global state.
    - **Limits.** A candidate whose `on_rehydrate` does not decode a saved
@@ -219,6 +219,7 @@ held.answer(ctx, &WatchHeadResult { .. });
     - **It is not a panic.** A reply kind is mail any sender can send, so a panic would let one uncorrelated mail trap a wasm component or fail a native dispatch. §7 panics only for a debt the actor stranded itself, and it still runs after the arm: a context of another kind holding a `Held` that is left behind is still named.
     - **`context: Option<C>` runs either way.** It is for a handler that is correct with and without its context, and receives the take as it is. With no fourth parameter a handler may still call `ctx.take_context` itself, for example to try several context kinds in turn.
     - **The successful path costs what the hand-written take cost.** The arm adds the one take the handler made itself, and the intent word is not published: the row, the manifest record, and the wire are unchanged.
+    - **A guest's departure handler takes its context the same way.** A wasm component's `#[handler::event]` over `Departed<W>` ([ADR-0079](0079-instanced-actors-as-a-first-class-category.md) §8) takes the context its `ctx.watch` stored as a fourth parameter, written as a response handler writes its own. It is `context: C` and never `Option<C>`: only `watch` stores a watch context and it stores one on every watch, so the kind is checked where the watch is written (`Watches<W>::Context`) and the arm has nothing to match at run time within one module. A handler that leaves the parameter out is watched for with `NoContext`. A watch context is `ActorMail`, so it holds no `Held`: a requester a watcher would answer when a provider leaves is already answered by the provider's close ([ADR-0247](0247-six-invariants-where-actors-meet-the-engine.md) rule 2).
 
 ## Consequences
 

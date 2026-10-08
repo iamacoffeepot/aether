@@ -7,7 +7,7 @@
 //! <package>/
 //!   aether-desktop              # the chassis binary
 //!   pack/manifest               # the one persisted manifest (this module)
-//!   pack/objects/<sha256>       # component wasm + config bytes, immutable
+//!   pack/objects/<sha256>       # boot wasm + config bytes and named objects, immutable
 //!   pack/assets/…               # the shipped asset tree, verbatim
 //! ```
 //!
@@ -18,6 +18,17 @@
 //! addressed by hash because the manifest names them; assets are addressed
 //! by path because the running program does. Boot roots the `assets`
 //! namespace here via [`package_assets_root`].
+//!
+//! `pack/objects` also holds what a running engine reads. The manifest's
+//! [`named`](PackageManifest::named) table lists the objects the package
+//! ships that boot does not load, each under a [`NamespacePath`], and boot
+//! hands that table and [`package_objects_root`] to the read-only `objects`
+//! file namespace. An actor mails `aether.fs.read { addr: { namespace:
+//! "objects", path: <path> } }` and publishes the blob it is answered
+//! with; the namespace reads the file named for the row's sha256. The
+//! namespace checks at boot that every named object is present at its
+//! recorded length, so a truncated install fails to boot. The read itself
+//! is unverified, as boot's is.
 //!
 //! [`PackageManifest`] is the *persisted, versioned* shipping artifact: where
 //! the JSON boot-manifest ([`crate::boot_manifest`]) names component files by
@@ -44,10 +55,16 @@
 //! - a `u32` entry count;
 //! - then per entry: the object hash (32 raw bytes), the optional config
 //!   hash (a presence byte then 32 raw bytes), the optional `name` /
-//!   `export` strings, and the optional `replicas` `u32`.
+//!   `export` strings, and the optional `replicas` `u32`;
+//! - a `u32` named-object count (v3 appended the table after the entries);
+//! - then per named object, in strictly ascending path order: the path (a
+//!   string with no presence byte), the object hash (32 raw bytes), and
+//!   the size as a `u64`.
 //!
 //! Optional scalars/strings are a presence byte (0/1) then the value;
-//! strings are a `u32` length then UTF-8 bytes.
+//! strings are a `u32` length then UTF-8 bytes. A named path is a
+//! [`NamespacePath`], and a path that is malformed, repeated, or out of
+//! order is a decode error, so one manifest has one byte image.
 //!
 //! ## Object resolution
 //!
@@ -61,6 +78,7 @@
 //! platform's job — the store converges the disk toward the manifest by
 //! hash — so boot reads the named file without re-hashing it.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -68,6 +86,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::str;
 
+pub use aether_fs::{NamedObject, NamespacePath, NamespacePathError, Sha256, Sha256ParseError};
 use aether_substrate::config::ConfigError;
 
 use crate::autoload::{AutoloadComponent, expand_replicas};
@@ -80,7 +99,7 @@ pub const MANIFEST_MAGIC: &[u8; 8] = b"AEPKGMAN";
 /// Bumped on any incompatible change to the byte layout; the decoder
 /// rejects an unrecognized version ([`ManifestDecodeError::UnsupportedVersion`])
 /// rather than misreading newer bytes as v1.
-pub const MANIFEST_VERSION: u8 = 2;
+pub const MANIFEST_VERSION: u8 = 3;
 
 /// The `pack/` subdirectory of a package holding the manifest and objects.
 const PACK_DIR: &str = "pack";
@@ -110,92 +129,23 @@ pub fn package_assets_root(package_root: &Path) -> Option<PathBuf> {
     assets.is_dir().then_some(assets)
 }
 
-/// A sha256 content address — the identity of a package object (ADR-0163
-/// §1). Encoded on the wire as its 32 raw bytes; rendered as lowercase hex
-/// for the `pack/objects/<hash>` filename. The chassis never hashes bytes
-/// itself (integrity is the platform's job) — it parses hashes out of the
-/// manifest and reads the named file — so this newtype carries render/parse
-/// but no digest computation.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Sha256(pub [u8; 32]);
-
-impl Sha256 {
-    /// Render as lowercase hex — the `pack/objects/<hash>` filename.
-    #[must_use]
-    pub fn to_hex(&self) -> String {
-        use std::fmt::Write as _;
-        let mut out = String::with_capacity(self.0.len() * 2);
-        for byte in self.0 {
-            let _ = write!(out, "{byte:02x}");
-        }
-        out
-    }
-
-    /// Parse a 64-character lowercase-or-uppercase hex string into a hash.
-    ///
-    /// # Errors
-    ///
-    /// [`Sha256ParseError::BadLength`] if the string is not 64 hex digits;
-    /// [`Sha256ParseError::BadDigit`] if a character is not a hex digit.
-    pub fn from_hex(s: &str) -> Result<Self, Sha256ParseError> {
-        let bytes = s.as_bytes();
-        if bytes.len() != 64 {
-            return Err(Sha256ParseError::BadLength(bytes.len()));
-        }
-        let mut out = [0u8; 32];
-        for (index, pair) in bytes.chunks_exact(2).enumerate() {
-            let high = hex_digit(pair[0])?;
-            let low = hex_digit(pair[1])?;
-            out[index] = (high << 4) | low;
-        }
-        Ok(Self(out))
-    }
+/// A package's object store, `<package>/pack/objects`: the directory boot
+/// resolves manifest hashes against and the `objects` file namespace reads
+/// a package's named objects from at run time.
+///
+/// Always a path, never absent: every package has an object store, and one
+/// whose directory is missing holds no objects. Returned rather than
+/// applied, as [`package_assets_root`] is, so the boot path keeps the
+/// precedence.
+#[must_use]
+pub fn package_objects_root(package_root: &Path) -> PathBuf {
+    package_root.join(PACK_DIR).join(OBJECTS_DIR)
 }
 
-fn hex_digit(byte: u8) -> Result<u8, Sha256ParseError> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        other => Err(Sha256ParseError::BadDigit(other)),
-    }
-}
-
-impl fmt::Display for Sha256 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.to_hex())
-    }
-}
-
-impl fmt::Debug for Sha256 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Sha256({})", self.to_hex())
-    }
-}
-
-/// A failure parsing a hex string into a [`Sha256`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Sha256ParseError {
-    /// The string was not exactly 64 hex digits (the found length).
-    BadLength(usize),
-    /// A character was not a hex digit (the offending byte).
-    BadDigit(u8),
-}
-
-impl fmt::Display for Sha256ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::BadLength(len) => write!(f, "sha256 hex must be 64 digits, got {len}"),
-            Self::BadDigit(byte) => write!(f, "sha256 hex holds a non-hex byte {byte:#04x}"),
-        }
-    }
-}
-
-impl Error for Sha256ParseError {}
-
-/// A persisted package manifest: the chassis settings the package applies
-/// plus its hash-referenced component entries, in autoload order (ADR-0163
-/// §1). Reuses [`ChassisSettings`] (title / window mode / tick rate) so a
+/// A persisted package manifest: the chassis settings the package applies,
+/// its hash-referenced component entries in autoload order, and the named
+/// objects it ships for a running engine to read by path (ADR-0163 §1).
+/// Reuses [`ChassisSettings`] (title / window mode / tick rate) so a
 /// package carries the same three knobs the JSON boot manifest does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageManifest {
@@ -205,6 +155,9 @@ pub struct PackageManifest {
     pub settings: ChassisSettings,
     /// The component entries, in autoload order.
     pub entries: Vec<PackageEntry>,
+    /// The objects the package ships that boot checks for and does not
+    /// load, by the path a running engine reads each at. Empty means none.
+    pub named: BTreeMap<NamespacePath, NamedObject>,
 }
 
 /// One component entry in a [`PackageManifest`]: the object it loads plus
@@ -258,16 +211,27 @@ pub fn encode_manifest(manifest: &PackageManifest) -> Vec<u8> {
         put_opt_string(&mut out, entry.export.as_deref());
         put_opt_u32(&mut out, entry.replicas);
     }
+    let named = u32::try_from(manifest.named.len()).expect("package named-object count fits in 32 bits");
+    out.extend_from_slice(&named.to_le_bytes());
+    for (path, object) in &manifest.named {
+        put_string(&mut out, path.as_str());
+        out.extend_from_slice(&object.sha256.0);
+        out.extend_from_slice(&object.size.to_le_bytes());
+    }
     out
+}
+
+fn put_string(out: &mut Vec<u8>, value: &str) {
+    let len = u32::try_from(value.len()).expect("manifest string length fits in 32 bits");
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(value.as_bytes());
 }
 
 fn put_opt_string(out: &mut Vec<u8>, value: Option<&str>) {
     match value {
         Some(s) => {
-            let len = u32::try_from(s.len()).expect("manifest string length fits in 32 bits");
             out.push(1);
-            out.extend_from_slice(&len.to_le_bytes());
-            out.extend_from_slice(s.as_bytes());
+            put_string(out, s);
         }
         None => out.push(0),
     }
@@ -297,6 +261,11 @@ pub enum ManifestDecodeError {
     Truncated,
     /// A string field holds invalid UTF-8.
     BadUtf8,
+    /// A named object's path is not a [`NamespacePath`] (the rule it broke).
+    BadObjectPath(NamespacePathError),
+    /// A named object's path is not strictly greater than the one before
+    /// it: the table is unsorted or repeats a path.
+    ObjectsOutOfOrder,
 }
 
 impl fmt::Display for ManifestDecodeError {
@@ -308,6 +277,10 @@ impl fmt::Display for ManifestDecodeError {
             }
             Self::Truncated => write!(f, "package manifest is truncated"),
             Self::BadUtf8 => write!(f, "package manifest string field holds invalid UTF-8"),
+            Self::BadObjectPath(source) => write!(f, "package manifest names an object at a bad path: {source}"),
+            Self::ObjectsOutOfOrder => {
+                write!(f, "package manifest named objects are not in strictly ascending path order")
+            }
         }
     }
 }
@@ -350,14 +323,21 @@ impl<'a> Reader<'a> {
         Ok(Some(self.take_sha256()?))
     }
 
+    fn take_u64(&mut self) -> Result<u64, ManifestDecodeError> {
+        let raw = self.take(8)?;
+        Ok(u64::from_le_bytes(raw.try_into().expect("8-byte slice")))
+    }
+
+    fn take_string(&mut self) -> Result<&'a str, ManifestDecodeError> {
+        let len = self.take_u32()? as usize;
+        str::from_utf8(self.take(len)?).map_err(|_| ManifestDecodeError::BadUtf8)
+    }
+
     fn take_opt_string(&mut self) -> Result<Option<String>, ManifestDecodeError> {
         if self.take_u8()? == 0 {
             return Ok(None);
         }
-        let len = self.take_u32()? as usize;
-        let bytes = self.take(len)?;
-        let s = str::from_utf8(bytes).map_err(|_| ManifestDecodeError::BadUtf8)?;
-        Ok(Some(s.to_owned()))
+        Ok(Some(self.take_string()?.to_owned()))
     }
 
     fn take_opt_u32(&mut self) -> Result<Option<u32>, ManifestDecodeError> {
@@ -372,8 +352,9 @@ impl<'a> Reader<'a> {
 ///
 /// # Errors
 ///
-/// A [`ManifestDecodeError`] when the magic, version, a length prefix, or a
-/// string field doesn't decode — see the variant docs.
+/// A [`ManifestDecodeError`] when the magic, version, a length prefix, a
+/// string field, or the named-object table doesn't decode — see the variant
+/// docs.
 pub fn decode_manifest(bytes: &[u8]) -> Result<PackageManifest, ManifestDecodeError> {
     let mut reader = Reader { rest: bytes };
     if reader.take(MANIFEST_MAGIC.len())? != MANIFEST_MAGIC {
@@ -400,7 +381,27 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<PackageManifest, ManifestDecodeEr
         let replicas = reader.take_opt_u32()?;
         entries.push(PackageEntry { object, config, name, export, replicas });
     }
-    Ok(PackageManifest { settings: ChassisSettings { title, window_mode, tick_hz, clear_color }, entries })
+    // The count is untrusted here too, and the table is built row by row.
+    // Each key goes through the one checked constructor, and a key that is
+    // not strictly greater than the last is refused, so a repeat cannot
+    // collapse silently and one table has one byte image.
+    let named_count = reader.take_u32()?;
+    let mut named = BTreeMap::new();
+    for _ in 0..named_count {
+        let path = NamespacePath::new(reader.take_string()?).map_err(ManifestDecodeError::BadObjectPath)?;
+        let sha256 = reader.take_sha256()?;
+        let size = reader.take_u64()?;
+        if !follows_last(&named, &path) {
+            return Err(ManifestDecodeError::ObjectsOutOfOrder);
+        }
+        named.insert(path, NamedObject { sha256, size });
+    }
+    Ok(PackageManifest { settings: ChassisSettings { title, window_mode, tick_hz, clear_color }, entries, named })
+}
+
+/// Whether `path` sorts strictly after every key already in `named`.
+fn follows_last(named: &BTreeMap<NamespacePath, NamedObject>, path: &NamespacePath) -> bool {
+    named.last_key_value().is_none_or(|(last, _)| last < path)
 }
 
 /// One package object source: the `pack/objects` directory of one package
@@ -553,11 +554,25 @@ pub fn read_manifest(package_root: &Path) -> Result<PackageManifest, PackageErro
     decode_manifest(&bytes).map_err(|source| PackageError::Decode { path, source })
 }
 
-/// Read the package rooted at `package_root` into its [`ChassisSettings`]
-/// plus the boot autoload component list (ADR-0163 §1). Decodes
-/// `pack/manifest`, resolves each entry's object (and optional config) bytes
-/// against the package's `pack/objects` store, then fans out replicas through
-/// the shared [`expand_replicas`].
+/// What a package gives boot: its chassis settings, the components boot
+/// loads, and the named objects a running engine reads by path.
+pub struct PackageBoot {
+    /// The manifest's chassis settings.
+    pub settings: ChassisSettings,
+    /// The boot autoload list, replicas fanned out.
+    pub components: Vec<AutoloadComponent>,
+    /// The manifest's named objects, unchanged: the `objects` file
+    /// namespace checks each is present and reads them.
+    pub named: BTreeMap<NamespacePath, NamedObject>,
+}
+
+/// Read the package rooted at `package_root` into its [`ChassisSettings`],
+/// the boot autoload component list, and its table of named objects
+/// (ADR-0163 §1). Decodes `pack/manifest`, resolves each entry's object (and
+/// optional config) bytes against the package's `pack/objects` store, then
+/// fans out replicas through the shared [`expand_replicas`]. The named
+/// objects are passed through as decoded: none is read or located here, and
+/// the `objects` file namespace checks each when the chassis composes it.
 ///
 /// Returns the manifest's [`ChassisSettings`] alongside the autoload list
 /// (issue 4001): the depot boot path (`--package` / `AETHER_PACKAGE`) applies
@@ -572,24 +587,19 @@ pub fn read_manifest(package_root: &Path) -> Result<PackageManifest, PackageErro
 /// A hard [`ConfigError`] (ADR-0090 §4: a known knob with a bad value
 /// aborts boot loudly) when the manifest is unreadable, doesn't decode, an
 /// object is missing, or a `replicas` fan-out is invalid.
-pub fn package_autoload(package_root: &Path) -> Result<(ChassisSettings, Vec<AutoloadComponent>), ConfigError> {
+pub fn package_autoload(package_root: &Path) -> Result<PackageBoot, ConfigError> {
     // Two error domains: `PackageError` (file / decode / object resolution)
     // and `ConfigError` (the replica fan-out). Resolve the packs first, map
     // that domain onto the boot fault, then expand replicas.
-    let (settings, packed) = read_and_resolve(package_root)
-        .map_err(|e| ConfigError::unparseable("AETHER_PACKAGE", package_root.display().to_string(), e))?;
-    let components = packed.into_iter().map(expand_replicas).collect::<Result<_, _>>()?;
-    Ok((settings, components))
-}
-
-/// Resolve the package's chassis settings + entries to their loaded
-/// [`PackedComponent`]s (object + config bytes pulled from the store), before
-/// replica fan-out.
-fn read_and_resolve(package_root: &Path) -> Result<(ChassisSettings, Vec<PackedComponent>), PackageError> {
-    let PackageManifest { settings, entries } = read_manifest(package_root)?;
-    let stores = ObjectStores::single(package_root.join(PACK_DIR).join(OBJECTS_DIR));
-    let packed = resolve_entries(entries, &stores)?;
-    Ok((settings, packed))
+    let boot_fault =
+        |error: PackageError| ConfigError::unparseable("AETHER_PACKAGE", package_root.display().to_string(), error);
+    let PackageManifest { settings, entries, named } = read_manifest(package_root).map_err(boot_fault)?;
+    let components = resolve_entries(entries, &ObjectStores::single(package_objects_root(package_root)))
+        .map_err(boot_fault)?
+        .into_iter()
+        .map(expand_replicas)
+        .collect::<Result<_, _>>()?;
+    Ok(PackageBoot { settings, components, named })
 }
 
 /// Resolve a decoded manifest's `entries` against an [`ObjectStores`] into the
@@ -635,7 +645,12 @@ mod tests {
                 export: None,
                 replicas: Some(2),
             }],
+            named: BTreeMap::from([(path("modules/a.wasm"), NamedObject { sha256: Sha256([0xef; 32]), size: 258 })]),
         }
+    }
+
+    fn path(text: &str) -> NamespacePath {
+        NamespacePath::new(text).expect("test setup: a well-formed path")
     }
 
     #[test]
@@ -661,13 +676,15 @@ mod tests {
                 },
                 PackageEntry { object: Sha256([9; 32]), config: None, name: None, export: None, replicas: None },
             ],
+            named: BTreeMap::new(),
         };
         assert_eq!(decode_manifest(&encode_manifest(&manifest)).expect("decode"), manifest);
     }
 
     #[test]
     fn round_trip_empty_manifest() {
-        let manifest = PackageManifest { settings: ChassisSettings::default(), entries: Vec::new() };
+        let manifest =
+            PackageManifest { settings: ChassisSettings::default(), entries: Vec::new(), named: BTreeMap::new() };
         assert_eq!(decode_manifest(&encode_manifest(&manifest)).expect("decode"), manifest);
     }
 
@@ -681,7 +698,7 @@ mod tests {
         // bump, not an accident.
         let mut expected = Vec::new();
         expected.extend_from_slice(b"AEPKGMAN"); // magic
-        expected.push(2); // MANIFEST_VERSION
+        expected.push(3); // MANIFEST_VERSION
         expected.extend_from_slice(&[0x01, 0x03, 0x00, 0x00, 0x00]); // title: present, len 3
         expected.extend_from_slice(b"hud");
         expected.push(0x00); // window_mode: absent
@@ -696,7 +713,40 @@ mod tests {
         expected.extend_from_slice(b"slime");
         expected.push(0x00); // export: absent
         expected.extend_from_slice(&[0x01, 0x02, 0x00, 0x00, 0x00]); // replicas: present, 2
+        expected.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]); // named-object count: 1
+        expected.extend_from_slice(&[0x0e, 0x00, 0x00, 0x00]); // path: len 14, no presence byte
+        expected.extend_from_slice(b"modules/a.wasm");
+        expected.extend_from_slice(&[0xef; 32]); // named object hash
+        expected.extend_from_slice(&[0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // size: 258
         assert_eq!(encode_manifest(&sample_manifest()), expected);
+    }
+
+    #[test]
+    fn decode_refuses_a_malformed_or_unsorted_named_table() {
+        // The hand-written decode must admit only what the path constructor
+        // admits, and only one ordering of a table: the bugs are a path the
+        // adapter would refuse reaching the table, and a repeated path
+        // collapsing into one row without a word.
+        let table = |paths: &[&str]| {
+            let empty = PackageManifest { named: BTreeMap::new(), ..sample_manifest() };
+            let mut bytes = encode_manifest(&empty);
+            bytes.truncate(bytes.len() - 4);
+            bytes.extend_from_slice(&u32::try_from(paths.len()).expect("a short table").to_le_bytes());
+            for text in paths {
+                put_string(&mut bytes, text);
+                bytes.extend_from_slice(&[0x77; 32]);
+                bytes.extend_from_slice(&5u64.to_le_bytes());
+            }
+            bytes
+        };
+
+        assert_eq!(decode_manifest(&table(&["a", "b"])).expect("an ascending table decodes").named.len(), 2);
+        assert_eq!(
+            decode_manifest(&table(&["modules/A.wasm"])),
+            Err(ManifestDecodeError::BadObjectPath(NamespacePathError::Byte(b'A')))
+        );
+        assert_eq!(decode_manifest(&table(&["b", "a"])), Err(ManifestDecodeError::ObjectsOutOfOrder));
+        assert_eq!(decode_manifest(&table(&["a", "a"])), Err(ManifestDecodeError::ObjectsOutOfOrder));
     }
 
     #[test]
@@ -723,21 +773,6 @@ mod tests {
         for len in 0..bytes.len() {
             assert!(decode_manifest(&bytes[..len]).is_err(), "decode of {len}-byte prefix unexpectedly succeeded");
         }
-    }
-
-    #[test]
-    fn sha256_hex_round_trips() {
-        let hash = Sha256([0x0f; 32]);
-        assert_eq!(hash.to_hex().len(), 64);
-        assert_eq!(Sha256::from_hex(&hash.to_hex()).expect("parse"), hash);
-    }
-
-    #[test]
-    fn sha256_from_hex_rejects_bad_input() {
-        assert_eq!(Sha256::from_hex("abc"), Err(Sha256ParseError::BadLength(3)));
-        let mut sixty_four = "0".repeat(63);
-        sixty_four.push('z');
-        assert_eq!(Sha256::from_hex(&sixty_four), Err(Sha256ParseError::BadDigit(b'z')));
     }
 
     #[test]
@@ -798,11 +833,13 @@ mod tests {
                 export: Some("handler".to_owned()),
                 replicas: Some(2),
             }],
+            named: BTreeMap::from([(path("modules/late.wasm"), NamedObject { sha256: Sha256([0x56; 32]), size: 7 })]),
         };
         fs::write(root.join(PACK_DIR).join(MANIFEST_FILE), encode_manifest(&manifest)).expect("write manifest");
 
-        let (returned_settings, components) = package_autoload(&root).expect("autoload");
+        let PackageBoot { settings: returned_settings, components, named } = package_autoload(&root).expect("autoload");
         assert_eq!(returned_settings, settings, "the manifest's chassis settings surface to the depot boot path");
+        assert_eq!(named, manifest.named, "the named objects reach boot as the manifest lists them");
         let [component] = components.as_slice() else {
             panic!("one entry is one module: {} components", components.len());
         };
@@ -829,6 +866,7 @@ mod tests {
                 export: None,
                 replicas: None,
             }],
+            named: BTreeMap::new(),
         };
         fs::write(root.join(PACK_DIR).join(MANIFEST_FILE), encode_manifest(&manifest)).expect("write manifest");
 

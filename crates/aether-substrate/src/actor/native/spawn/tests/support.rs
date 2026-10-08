@@ -4,27 +4,25 @@
 
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
 
-use aether_actor::{ActorRef, Addressable, HandlesKind, Many};
-use aether_data::{ActorId, RequestId};
+use aether_actor::{ActorRef, Addressable, HandlesKind, Instanced, Many};
+use aether_data::{ActorId, Kind as _, RequestId};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::spawn::activation::NativeSpawnFinalizer;
 use crate::actor::native::spawn::reservation::ChildReservationKey;
 use crate::actor::native::spawn::{SpawnOutcome, Spawner, Subname};
-use crate::actor::native::{DispatchId, NativeActor, NativeCtx, NativeInitCtx, TaskDone};
-use crate::actor::registry::ActorRegistry;
+use crate::actor::native::{DispatchId, NativeActor, NativeCtx, NativeInitCtx, TaskCompletionWake, TaskDone};
 use crate::chassis::error::BootError;
 use crate::config::RingCapacities;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::PreparedSpawnCommit;
-use crate::mail::registry::{MailDispatch, Registry};
+use crate::mail::registry::{MailDispatch, OwnedDispatch, Registry};
 use crate::mail::{KindId, MailId};
 use crate::runtime::effect_chain::{EffectChain, Uncaused};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 use crate::scheduler::{Pool, PoolConfig, PoolHandle};
-use crate::testing::boot_authority;
+use crate::testing::{await_event, boot_authority};
 
 #[aether_data::kind(name = "test.activation.poke", copy)]
 pub(super) struct ActivationPoke;
@@ -53,7 +51,9 @@ impl Addressable for PokeSink {
     type Resolver = Many;
 }
 
-impl HandlesKind<ActivationPoke> for PokeSink {}
+impl HandlesKind<ActivationPoke> for PokeSink {
+    type Sender = aether_actor::Anyone;
+}
 
 pub(super) struct ActivationProbe {
     events: crossbeam_channel::Sender<ActivationEvent>,
@@ -93,11 +93,12 @@ impl NativeActor for ActivationProbe {
         Ok(Self { events: config.events, lifecycle_target: config.lifecycle_target })
     }
 
-    fn wire(state: &mut Self, ctx: &mut NativeCtx<'_>) {
+    fn wire(state: &mut Self, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         if let Some(target) = state.lifecycle_target {
             ctx.send_detached_to(target, &ActivationPoke);
         }
         let _ = state.events.send(ActivationEvent::Wire(thread::current().id()));
+        Ok(())
     }
 
     #[handler::tell]
@@ -119,6 +120,38 @@ impl NativeActor for ActivationProbe {
     }
 }
 
+/// Two native types sharing one namespace, so the table decides which of
+/// them this engine runs.
+pub(super) struct SharedFirst;
+
+#[aether_actor::actor(instanced, root)]
+impl NativeActor for SharedFirst {
+    const NAMESPACE: &'static str = "test.activation.shared";
+    type Config = ();
+
+    fn init((): Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    #[handler::tell]
+    fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _poke: ActivationPoke) {}
+}
+
+pub(super) struct SharedSecond;
+
+#[aether_actor::actor(instanced, root)]
+impl NativeActor for SharedSecond {
+    const NAMESPACE: &'static str = "test.activation.shared";
+    type Config = ();
+
+    fn init((): Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    #[handler::tell]
+    fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _poke: ActivationPoke) {}
+}
+
 pub(super) fn activation_fixture() -> (Arc<Spawner>, Arc<Registry>, Arc<Mailer>, PoolHandle) {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
@@ -126,7 +159,6 @@ pub(super) fn activation_fixture() -> (Arc<Spawner>, Arc<Registry>, Arc<Mailer>,
     let pool = Pool::start(PoolConfig { workers: 1, ..PoolConfig::default() }, Arc::clone(&aborter));
     let spawner = Arc::new(Spawner::new(
         Arc::clone(&registry),
-        Arc::new(ActorRegistry::new()),
         Arc::clone(&mailer),
         aborter,
         pool.wake_sink(),
@@ -178,6 +210,42 @@ pub(super) fn activation_sink(
     (Registry::declared_dependency::<PokeSink>(sink.id()), receiver)
 }
 
+/// A finalized birth of the shared-namespace probe `A`, staged the way a
+/// handler stages one: its hold is taken by the owner, never here.
+pub(super) fn finalized_shared<A>(
+    spawner: &Arc<Spawner>,
+    parent: &Arc<NativeBinding>,
+    name: &str,
+    correlation: u64,
+) -> (PreparedSpawnCommit, DispatchId)
+where
+    A: Instanced + NativeActor<Config = (), Params = ()> + Addressable,
+{
+    let key = ChildReservationKey::new(
+        parent.self_mailbox(),
+        ActorId::singleton(A::NAMESPACE),
+        ActorId::instanced(A::NAMESPACE, name),
+    );
+    let parent_reservation = parent.reserve_child(key).expect("distinct staged parent key reservation wins");
+    let identity = spawner.prepare_identity::<A>(Subname::Named(name), None).unwrap();
+    let staged = spawner.build::<A>(identity, (), (), Vec::new()).unwrap();
+    let causing_chain = MailId::new(parent.self_mailbox(), correlation);
+    let deferred = parent.dispatch_stage::<SpawnOutcome<A>>(
+        Some(spawner.mailer().acquire_settlement_hold(causing_chain)),
+        RequestId(parent.mint_correlation()),
+    );
+    let dispatch_id = deferred.dispatch_id();
+    let finalizer = NativeSpawnFinalizer::<A>::parented(
+        parent_reservation,
+        deferred,
+        staged.identity.id,
+        staged.identity.canonical_name.clone(),
+        Arc::downgrade(&staged.transport),
+    );
+
+    (spawner.prepare_commit(staged, Some(finalizer), EffectChain::Held(causing_chain)), dispatch_id)
+}
+
 pub(super) fn finalized_probe(
     spawner: &Arc<Spawner>,
     parent: &Arc<NativeBinding>,
@@ -210,16 +278,59 @@ pub(super) fn finalized_probe(
     (spawner.prepare_commit(staged, Some(finalizer), EffectChain::Held(causing_chain)), dispatch_id, key)
 }
 
+/// A parent binding whose own mailbox is registered as `name`, beside the
+/// channel its completion wakes arrive on.
+///
+/// A finalized birth tells its parent the outcome the way any staged task
+/// does: it fills the parent's ledger and then pushes one
+/// [`TaskCompletionWake`] to the parent's mailbox. The route registered here
+/// forwards each wake's [`DispatchId`], so [`await_spawn_done`] waits on the
+/// wake a parent actor would be woken by.
+pub(super) fn activation_parent(
+    registry: &Registry,
+    mailer: &Arc<Mailer>,
+    name: &str,
+) -> (Arc<NativeBinding>, crossbeam_channel::Receiver<DispatchId>) {
+    let (wake_tx, wake_rx) = crossbeam_channel::unbounded();
+    let mailbox = registry.register_inbox(
+        &boot_authority(),
+        name,
+        Arc::new(move |dispatch: OwnedDispatch| {
+            // ADR-0094: terminal test consumer.
+            dispatch.discharge();
+            let wake = TaskCompletionWake::decode_from_bytes(dispatch.payload.bytes())
+                .expect("only a completion wake reaches the activation parent");
+            let _ = wake_tx.send(DispatchId(wake.dispatch_id));
+        }),
+    );
+
+    (Arc::new(NativeBinding::new_for_test(Arc::clone(mailer), mailbox)), wake_rx)
+}
+
+/// Take the outcome `dispatch_id` names, waiting for a completion wake when
+/// the ledger does not hold it yet.
+///
+/// The finalizer fills the ledger before it pushes the wake, so an outcome
+/// that is missing has not sent its wake: the wait always has one coming,
+/// and a wake for another birth only sends the loop round to look again.
 pub(super) fn await_spawn_done(
     parent: &NativeBinding,
+    wakes: &crossbeam_channel::Receiver<DispatchId>,
     dispatch_id: DispatchId,
 ) -> TaskDone<SpawnOutcome<ActivationProbe>, ()> {
-    let deadline = Instant::now() + Duration::from_secs(1);
+    await_spawn_outcome::<ActivationProbe>(parent, wakes, dispatch_id)
+}
+
+/// [`await_spawn_done`] for any born type `A`.
+pub(super) fn await_spawn_outcome<A: 'static>(
+    parent: &NativeBinding,
+    wakes: &crossbeam_channel::Receiver<DispatchId>,
+    dispatch_id: DispatchId,
+) -> TaskDone<SpawnOutcome<A>, ()> {
     loop {
         if let Some(done) = parent.dispatch_take(dispatch_id) {
             return done;
         }
-        assert!(Instant::now() < deadline, "native finalizer filled its typed deferred result");
-        thread::yield_now();
+        await_event(wakes, "test.activation.spawn_done");
     }
 }

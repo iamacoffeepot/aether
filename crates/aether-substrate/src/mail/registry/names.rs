@@ -1,5 +1,4 @@
-use aether_data::tagged_id::{Tag, with_tag};
-use aether_data::{ActorId, MailboxCategory, fold_lineage};
+use aether_data::{CanonicalPath, MailboxCategory};
 
 use crate::mail::MailboxId;
 
@@ -18,21 +17,14 @@ pub fn canonical_mailbox_id(name: &str) -> MailboxId {
 }
 
 /// The position a `/`-rendered canonical lineage path names: the ADR-0099 §4
-/// parse → fold, the inverse of the render. Each segment is one node, a bare
-/// namespace a singleton and `namespace:discriminator` an instance, folded
-/// root to leaf. A one-segment path is the depth-1 fixed point, equal to
-/// [`canonical_mailbox_id`] for the same name.
+/// parse → fold, the inverse of the render. A one-segment path is the
+/// depth-1 fixed point, equal to [`canonical_mailbox_id`] for the same name.
 ///
 /// Crate-private: the registry's name lookup is the one place a written
-/// address becomes a position (ADR-0230 §3), and this is the fold it keys with.
-pub fn lineage_mailbox_id(path: &str) -> MailboxId {
-    let mut nodes = path.split('/').map(|segment| match segment.split_once(':') {
-        Some((namespace, discriminator)) => ActorId::instanced(namespace, discriminator),
-        None => ActorId::singleton(segment),
-    });
-    // `split` yields at least one segment, even for an empty path.
-    let root = nodes.next().map_or(0, |root| root.0);
-    MailboxId(with_tag(Tag::Mailbox, nodes.fold(root, fold_lineage)))
+/// address becomes a position (ADR-0230 §3), and this is the fold it keys
+/// with.
+pub fn lineage_mailbox_id(path: &CanonicalPath) -> MailboxId {
+    path.lineage_id()
 }
 
 /// Categorise a native mailbox name for the inventory snapshot (issue 730).

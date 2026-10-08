@@ -10,7 +10,6 @@ use std::any::{TypeId, type_name};
 use std::fmt::Write as _;
 use std::iter;
 use std::sync::Arc;
-use std::time::Duration;
 
 use aether_actor::{Addressable, One};
 use aether_data::name_inventory::{
@@ -33,12 +32,12 @@ use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::{EffectBatch, RegistryApplied, RegistryBatch, RegistryEffect, RegistryEffectError};
 use crate::mail::registry::owner::RegistryOwnerLease;
 use crate::mail::registry::{
-    AddressResolutionError, AdoptRefused, ContractBreak, Registry, RouteContract, canonical_mailbox_id,
-    lineage_mailbox_id, noop_handler,
+    AddressResolutionError, AdoptRefused, ContractBreak, Registry, RouteContract, canonical_mailbox_id, noop_handler,
 };
 use crate::scheduler::WakeSink;
 use crate::store::BlobStore;
 use crate::testing::boot_authority as auth;
+use crate::testing::canonical_id;
 
 const NATIVE_SINGLETON: &str = "test.publication.native_singleton";
 const NATIVE_INSTANCED: &str = "test.publication.native_instanced";
@@ -371,7 +370,7 @@ impl Fixture {
     fn apply(&self, batch: EffectBatch) -> Result<Vec<RegistryApplied>, RegistryEffectError> {
         let completion = self.registry.submit(batch).expect("the attached owner reserves the batch");
         self.owner.run_once();
-        completion.wait_timeout(Duration::from_secs(5)).expect("the owner completes the batch")
+        completion.try_take().expect("the owner completes the batch")
     }
 
     fn publish(&self, module: &Module) -> Result<(), String> {
@@ -503,10 +502,11 @@ impl Addressable for Guest {
 }
 
 impl Fixture {
-    /// Register a live route at `name`'s lineage position.
+    /// Register a live route at `name`'s lineage position. A nested name
+    /// needs its parent registered first (ADR-0248 §5).
     fn register(&self, name: &str) {
         self.registry
-            .try_register_inbox_with_id(&auth(), lineage_mailbox_id(name), name, noop_handler())
+            .try_register_inbox_with_id(&auth(), canonical_id(name), name, noop_handler())
             .expect("register the route");
     }
 
@@ -526,6 +526,7 @@ fn a_route_is_a_guest_where_a_published_module_holds_its_leaf_namespace() {
     fixture.publish(&fixture.module(&[(Guest::NAMESPACE, &[KEPT])])).expect("publish the guest's module");
 
     let guests = [Guest::NAMESPACE, "test.publication.guest:k", "test.publication.host/test.publication.guest:k"];
+    fixture.register("test.publication.host");
     for name in guests.into_iter().chain(["test.publication.unpublished"]) {
         fixture.register(name);
     }
@@ -546,7 +547,7 @@ fn loaded_adopts_only_a_published_guest() {
     fixture.register(Guest::NAMESPACE);
     fixture.register("test.publication.not_a_guest");
 
-    let resolve = |name: &str| fixture.registry.resolve_live(lineage_mailbox_id(name)).expect("the route is live");
+    let resolve = |name: &str| fixture.registry.resolve_live(canonical_id(name)).expect("the route is live");
 
     assert!(fixture.registry.loaded::<Guest>(resolve(Guest::NAMESPACE)).is_ok());
     assert_eq!(
@@ -567,7 +568,9 @@ fn a_publish_extends_the_short_path_index_without_touching_native_paths() {
     let fixture = Fixture::new();
     let native = format!("{NATIVE_ROOT}/{NATIVE_INSTANCED}:k");
     let guest = format!("{PARENT}/{CHILD}:k");
+    fixture.register(NATIVE_ROOT);
     fixture.register(&native);
+    fixture.register(PARENT);
     fixture.register(&guest);
     let expand = |short: &str| {
         let path = ErasedActorPath::new(short).expect("a well-formed short path");
@@ -640,6 +643,7 @@ fn a_hole_under_a_multi_type_guest_parent_resolves_to_its_live_holder() {
     );
 
     let first = format!("{PARENT}/{FIRST}:k");
+    fixture.register(PARENT);
     fixture.register(&first);
     assert_eq!(expand(&short), Ok(first));
 
@@ -652,4 +656,81 @@ fn a_hole_under_a_multi_type_guest_parent_resolves_to_its_live_holder() {
             candidates
         })
     );
+}
+
+// Catches: an unpublish that removes sibling rows, or one that answers
+// without withdrawing its row.
+#[test]
+fn unpublish_withdraws_exactly_its_named_row() {
+    let fixture = Fixture::new();
+    let module = fixture.module(&[("test.unpublish.a", &[KEPT]), ("test.unpublish.b", &[KEPT])]);
+    fixture.publish(&module).expect("publish the two-namespace module");
+
+    let applied = fixture
+        .apply(RegistryBatch::unpublish_namespace("test.unpublish.a", module.hash()).into_effects())
+        .expect("withdraw the named row");
+    assert!(matches!(applied.as_slice(), [RegistryApplied::Unpublished]));
+
+    assert!(fixture.registry.published_module("test.unpublish.a").is_none(), "the withdrawn namespace is unpublished");
+    let sibling = fixture.registry.published_module("test.unpublish.b").expect("the sibling row is still held");
+    assert_eq!(sibling.hash(), module.hash(), "the sibling still points at its module");
+}
+
+// Catches: an unpublish arm that touches native publications, or one that
+// answers `Ok` where nothing was ever published.
+#[test]
+fn unpublish_of_a_native_or_never_published_namespace_is_refused() {
+    let fixture = Fixture::new();
+
+    let absent = fixture.apply(RegistryBatch::unpublish_namespace("test.unpublish.absent", hash(9)).into_effects());
+    assert!(matches!(absent, Err(RegistryEffectError::Unpublish { .. })), "{absent:?}");
+
+    let native = fixture.apply(RegistryBatch::unpublish_namespace(NATIVE_SINGLETON, hash(9)).into_effects());
+    assert!(matches!(native, Err(RegistryEffectError::Unpublish { .. })), "{native:?}");
+}
+
+// Catches: an arm that ignores the hash check, withdrawing a namespace a
+// concurrent republish repointed under the caller.
+#[test]
+fn unpublish_with_a_stale_hash_is_refused() {
+    let fixture = Fixture::new();
+    let first = fixture.module(&[("test.unpublish.stale", &[KEPT])]);
+    fixture.publish(&first).expect("publish the first module");
+    let second = fixture.module(&[("test.unpublish.stale", &[KEPT, ADDED])]);
+    fixture.publish(&second).expect("republish the growing successor");
+
+    let stale = fixture.apply(RegistryBatch::unpublish_namespace("test.unpublish.stale", first.hash()).into_effects());
+    assert!(matches!(stale, Err(RegistryEffectError::Unpublish { .. })), "{stale:?}");
+
+    let held = fixture.registry.published_module("test.unpublish.stale").expect("the successor still holds the row");
+    assert_eq!(held.hash(), second.hash());
+}
+
+// Catches: a second withdrawal of the same row answered as withdrawn.
+#[test]
+fn a_second_unpublish_of_the_same_namespace_is_refused() {
+    let fixture = Fixture::new();
+    let module = fixture.module(&[("test.unpublish.once", &[KEPT])]);
+    fixture.publish(&module).expect("publish the module");
+    fixture
+        .apply(RegistryBatch::unpublish_namespace("test.unpublish.once", module.hash()).into_effects())
+        .expect("withdraw the row");
+
+    let again = fixture.apply(RegistryBatch::unpublish_namespace("test.unpublish.once", module.hash()).into_effects());
+    assert!(matches!(again, Err(RegistryEffectError::Unpublish { .. })), "{again:?}");
+}
+
+// Catches: a withdrawal under a live instance, which would free code a
+// running guest still executes.
+#[test]
+fn unpublish_under_a_live_instance_is_refused() {
+    let fixture = Fixture::new();
+    let module = fixture.module(&[("test.unpublish.live", &[KEPT])]);
+    fixture.publish(&module).expect("publish the module");
+    fixture.register("test.unpublish.live:k");
+
+    let refused =
+        fixture.apply(RegistryBatch::unpublish_namespace("test.unpublish.live", module.hash()).into_effects());
+    assert!(matches!(refused, Err(RegistryEffectError::Unpublish { .. })), "{refused:?}");
+    assert!(fixture.registry.published_module("test.unpublish.live").is_some(), "the refused withdrawal holds no row");
 }

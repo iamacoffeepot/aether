@@ -5,19 +5,21 @@ use syn::{FnArg, ImplItem, ItemImpl, Type};
 use crate::diagnostics::{doc_attrs, extract_agent_doc};
 use crate::export_desc::emit_actor_export_desc;
 use crate::handler_parse::{
-    FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, allow_abi_receiver, allow_context_by_value,
-    attr_is_fallback, attr_is_handler, check_intent_signature, classify_handler_reply, ctx_names_actor,
-    extract_handler_kind_type, fill_ctx_actor, handler_cfgs, parse_handler_args, parse_handler_class,
-    reject_duplicate_handler_kinds, rename_lifecycle_hooks, silent_call, validate_addressable_consts,
-    validate_fallback_sig,
+    FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, IntentParameters, SenderArm, WatchHandlerFn,
+    allow_abi_receiver, allow_context_by_value, attr_is_fallback, attr_is_handler, check_intent_signature,
+    check_watch_signature, classify_handler_reply, ctx_names_actor, departed_watched_type, extract_handler_kind_type,
+    fill_ctx_actor, handler_cfgs, parse_handler_args, parse_handler_class, reject_ctx_sender,
+    reject_duplicate_handler_kinds, reject_duplicate_watched_types, rename_lifecycle_hooks, require_hook_results,
+    sender_arm, silent_call, validate_addressable_consts, validate_fallback_sig,
 };
 use crate::manifest::{
     build_actor_lineage_manifest_consts, build_inputs_manifest_consts, build_kinds_section_retention_statics,
 };
 use crate::opts::{ActorCardinality, ActorOpts};
 use crate::reply_markers::{
-    DeclaredLists, ReplyMarkerSite, RowSpec, contract_element, contract_row_impl, contract_rows_expr, contracts_impl,
-    declared_impl, position, refusal_answer, reply_marker_impl, rows_list,
+    ContractRow, DeclaredLists, ReplyMarkerSite, RowSpec, conjoined_cfg_predicate, contract_element, contract_row_impl,
+    contract_rows_expr, contracts_impl, declared_impl, handles_kind_impl, position, refusal_answer, reply_marker_impl,
+    rows_list, watchable_actor_impl,
 };
 
 /// Wasm-actor expansion — `#[actor] impl WasmActor for X` (or
@@ -47,6 +49,10 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     let mut init_method: Option<syn::ImplItemFn> = None;
     let mut lifecycle_methods: Vec<syn::ImplItemFn> = Vec::new();
     let mut handlers: Vec<HandlerFn> = Vec::new();
+    // ADR-0079 §8: the departure handlers, which share one row, and the slot
+    // in `handlers` that row takes: where the first of them was declared.
+    let mut watch_handlers: Vec<WatchHandlerFn> = Vec::new();
+    let mut watch_slot: Option<usize> = None;
     let mut fallback: Option<FallbackFn> = None;
     let mut helpers: Vec<syn::ImplItemFn> = Vec::new();
     // Issue 525 Phase 1B: pass-through trait consts (today just
@@ -129,8 +135,28 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                     let kind_ty = extract_handler_kind_type(&f.sig, intent.is_some())?;
                     let agent_doc = extract_agent_doc(&f.attrs);
                     let reply = classify_handler_reply(&f.sig.output);
-                    let response_context =
-                        intent.map(|i| check_intent_signature(i, &reply, &f.sig, false)).transpose()?.flatten();
+                    // ADR-0079 §8: a handler over `Departed<W>` is a
+                    // departure handler, judged by its own signature rules
+                    // and kept apart from the mail handlers.
+                    if let Some(watched_ty) = departed_watched_type(&kind_ty).cloned() {
+                        let context_ty = check_watch_signature(&f.attrs[idx], intent, &reply, &f.sig)?;
+                        let cfgs = handler_cfgs(&f.attrs);
+                        f.attrs.remove(idx);
+                        // The arm hands the taken context over by value, as a
+                        // response arm does.
+                        if context_ty.is_some() {
+                            f.attrs.push(syn::parse_quote!(#[allow(clippy::needless_pass_by_value)]));
+                        }
+                        fill_ctx_actor(&mut f.sig);
+                        allow_abi_receiver(&mut f);
+                        watch_slot.get_or_insert(handlers.len());
+                        watch_handlers.push(WatchHandlerFn { method: f, watched_ty, context_ty, cfgs });
+                        continue;
+                    }
+                    let IntentParameters { response_context, sender } = intent
+                        .map(|i| check_intent_signature(i, &reply, &f.sig, false))
+                        .transpose()?
+                        .unwrap_or_default();
                     // iamacoffeepot/aether#4811: the method keeps its own `#[cfg]`s
                     // (only the marker attribute is removed), so clone them for
                     // the artifacts derived from it.
@@ -148,12 +174,18 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                         unchecked_reason: args.reason,
                         cfgs,
                         response_context,
+                        sender,
                     });
                 } else if let Some(idx) = fallback_attr_idx {
                     if fallback.is_some() {
                         return Err(syn::Error::new_spanned(&f, "at most one #[fallback] method per component"));
                     }
                     validate_fallback_sig(&f.sig)?;
+                    reject_ctx_sender(
+                        &f.sig,
+                        "`#[fallback]`",
+                        "it catches mail no handler names, so no kind's send could carry the requirement",
+                    )?;
                     let agent_doc = extract_agent_doc(&f.attrs);
                     f.attrs.remove(idx);
                     fill_ctx_actor(&mut f.sig);
@@ -164,6 +196,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                 } else if matches!(name.as_str(), "wire" | "unwire" | "on_dehydrate" | "on_rehydrate") {
                     // `on_dehydrate` takes a `WasmDropCtx`, which the fill leaves
                     // alone.
+                    reject_ctx_sender(&f.sig, "a lifecycle hook", "it dispatches no mail, so there is no sender")?;
                     fill_ctx_actor(&mut f.sig);
                     lifecycle_methods.push(f);
                 } else if name == "receive" {
@@ -203,6 +236,22 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
              (or, with `type Config = T`, `fn init(config: T, ctx: &mut WasmInitCtx<'_>) -> …`)",
         )
     })?;
+
+    // ADR-0079 §8: the departure handlers become one mail handler for the
+    // engine's notice, at the first one's slot, so every artifact a handler
+    // gets (its `HandlesKind`, contract row, manifest record, retention, and
+    // dispatch arm) is emitted once for the group by the code below.
+    reject_duplicate_watched_types(&watch_handlers)?;
+    if let Some(slot) = watch_slot {
+        if let Some(direct) = handlers.iter().find(|h| type_names_monitor_notice(&h.kind_ty)) {
+            return Err(syn::Error::new_spanned(
+                &direct.kind_ty,
+                "this component takes its departures as `Departed<W>`, so it cannot also take `MonitorNotice`: the \
+                 notice is the mail its `Departed<W>` handlers share one row for (ADR-0079 §8)",
+            ));
+        }
+        handlers.insert(slot, departure_handler(&watch_handlers)?);
+    }
 
     if handlers.is_empty() && fallback.is_none() {
         return Err(syn::Error::new_spanned(
@@ -338,6 +387,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     let dispatch_body = build_dispatch_body(&handlers, fallback.as_ref(), opts.handler_set.as_ref());
 
     let handler_methods_tokens = handlers.iter().map(|h| &h.method);
+    let watch_methods_tokens = watch_handlers.iter().map(|h| &h.method);
     let fallback_method_tokens = fallback.as_ref().map(|f| &f.method);
     let helper_methods_tokens = helpers.iter();
 
@@ -369,7 +419,13 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         quote! { #set!(#self_ty, #base); }
     });
     let lineage_manifest_consts = build_actor_lineage_manifest_consts(self_ty, opts);
-    let kind_retention_statics = build_kinds_section_retention_statics(self_ty, &handlers, config_kind_ty);
+    // ADR-0079 §8: each departure handler's context kind is retained beside
+    // the handler kinds, so the host can judge a carried watch context at a
+    // republish (ADR-0139 §4).
+    let watch_context_kinds: Vec<(Type, Vec<syn::Attribute>)> =
+        watch_handlers.iter().map(|h| (watch_context_ty(h), h.cfgs.clone())).collect();
+    let kind_retention_statics =
+        build_kinds_section_retention_statics(self_ty, &handlers, config_kind_ty, &watch_context_kinds);
 
     // Issue 525 Phase 4: trait consts (today just NAMESPACE) live
     // on the `Addressable` super-trait, not `Component` / `WasmActor`. Route
@@ -396,6 +452,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     } else {
         quote! { ::aether_actor::One }
     };
+    let watchable = watchable_actor_impl(&quote! { #impl_generics }, &quote! { #self_ty }, &quote! { #where_clause });
     let actor_impl = if consts.is_empty() {
         quote! {}
     } else {
@@ -404,8 +461,22 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                 #(#const_tokens)*
                 type Resolver = #resolver_ty;
             }
+            #watchable
         }
     };
+    // ADR-0079 §8: one `Watches<W>` per departure handler, naming the context
+    // kind its signature fixes, which `ctx.watch` is bounded by.
+    let watches_impls = watch_handlers.iter().map(|h| {
+        let watched_ty = &h.watched_ty;
+        let context_ty = watch_context_ty(h);
+        let cfgs = &h.cfgs;
+        quote! {
+            #(#cfgs)*
+            impl #impl_generics ::aether_actor::Watches<#watched_ty> for #self_ty #where_clause {
+                type Context = #context_ty;
+            }
+        }
+    });
     // ADR-0241 §5: a guest declared `root` is placed at the root under its
     // published name, as a native root is, so it carries the same permission.
     let root_impl = opts.root.then(|| {
@@ -509,14 +580,23 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // errors at the call site. The handler list above
     // is the single source of truth — adding a `#[handler]` automatically
     // updates senders' compile-time checks.
+    // ADR-0231 §11: the marker names what the handler requires of its sender,
+    // read from its ctx's sender type argument, which the typed sends
+    // bound the sending actor against.
     let handles_kind_impls = handlers.iter().map(|h| {
-        let kind_ty = &h.kind_ty;
-        let cfgs = &h.cfgs;
-        quote! {
-            #(#cfgs)*
-            impl #impl_generics ::aether_actor::HandlesKind<#kind_ty>
-                for #self_ty #where_clause {}
-        }
+        let impl_generics_ts = quote! { #impl_generics };
+        let self_ty_ts = quote! { #self_ty };
+        let where_clause_ts = quote! { #where_clause };
+        handles_kind_impl(
+            &h.kind_ty,
+            h.sender.as_ref(),
+            &ReplyMarkerSite {
+                impl_generics: &impl_generics_ts,
+                self_ty: &self_ty_ts,
+                where_clause: &where_clause_ts,
+                cfgs: &h.cfgs,
+            },
+        )
     });
     let reply_marker_impls = handlers.iter().map(|h| {
         let impl_generics_ts = quote! { #impl_generics };
@@ -542,9 +622,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // this actor's list through its bridge's `@rows` arm (ADR-0169).
     let contract_rows = handlers.iter().enumerate().map(|(index, h)| {
         contract_row_impl(
-            h.class,
-            &h.reply,
-            &h.kind_ty,
+            ContractRow { class: h.class, reply: &h.reply, kind_ty: &h.kind_ty, sender: h.sender.as_ref() },
             &position(index),
             &ReplyMarkerSite {
                 impl_generics: &impl_generics_ts,
@@ -605,38 +683,40 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // `Self::State` resolves directly inside `impl WasmActor for Self`.
     // `on_dehydrate` snapshots through `self.dehydrate()` and frames the
     // value with `save_state_kind`; `on_rehydrate` decodes via
-    // `PriorState::decode_kind` and either restores through `self.rehydrate`
-    // or boots fresh, warning only when bytes were present but did not
-    // decode (a reshaped state kind — `K::ID` changed). When `type State`
+    // `PriorState::decode_kind` and restores through `self.rehydrate`. Both
+    // return the result (ADR-0249 §1): the save's, and for the decode `Ok`
+    // when nothing was carried and an error when bytes were present but did
+    // not decode (a reshaped state kind — `K::ID` changed). When `type State`
     // was omitted these are empty and the actor keeps the default no-op
     // hooks (or its own hand-written ones, carried in `lifecycle_methods`).
     let generated_state_hooks = if state_type.is_some() {
         quote! {
-            fn on_dehydrate(&mut self, __aether_ctx: &mut ::aether_actor::WasmDropCtx<'_>) {
+            fn on_dehydrate(
+                &mut self,
+                __aether_ctx: &mut ::aether_actor::WasmDropCtx<'_>,
+            ) -> ::core::result::Result<(), ::aether_actor::ActorInitError> {
                 let __aether_state = self.dehydrate();
                 ::aether_actor::Persistence::save_state_kind::<
                     <Self as ::aether_actor::WasmActor>::Persist,
-                >(__aether_ctx, 0, &__aether_state);
+                >(__aether_ctx, 0, &__aether_state)
             }
 
             fn on_rehydrate(
                 &mut self,
                 __aether_ctx: &mut ::aether_actor::WasmCtx<'_, Self>,
                 __aether_prior: ::aether_actor::PriorState<'_>,
-            ) {
+            ) -> ::core::result::Result<(), ::aether_actor::ActorInitError> {
                 match __aether_prior.decode_kind::<<Self as ::aether_actor::WasmActor>::Persist>() {
                     ::core::option::Option::Some(__aether_state) => {
                         self.rehydrate(__aether_state);
+                        ::core::result::Result::Ok(())
                     }
-                    ::core::option::Option::None => {
-                        if !__aether_prior.bytes().is_empty() {
-                            ::aether_actor::__macro_internals::tracing::warn!(
-                                "discarded prior state on rehydrate: bytes were present but did \
-                                 not decode as the declared `type State` (a reshaped state kind); \
-                                 booting fresh",
-                            );
-                        }
+                    ::core::option::Option::None if __aether_prior.bytes().is_empty() => {
+                        ::core::result::Result::Ok(())
                     }
+                    ::core::option::Option::None => ::core::result::Result::Err(
+                        ::aether_actor::wasm::__state_kind_refused::<<Self as ::aether_actor::WasmActor>::Persist>(),
+                    ),
                 }
             }
         }
@@ -662,6 +742,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // takes the typed ctx, so a hand-written one is renamed and forwarded to
     // like `wire` / `unwire`, and only `on_dehydrate` lands in the trait impl
     // as written.
+    require_hook_results(&lifecycle_methods, &["wire", "on_dehydrate", "on_rehydrate"], "ActorInitError")?;
     let (mut boot_hooks, hotswap_hooks): (Vec<syn::ImplItemFn>, Vec<syn::ImplItemFn>) = lifecycle_methods
         .into_iter()
         .partition(|m| matches!(m.sig.ident.to_string().as_str(), "wire" | "unwire" | "on_rehydrate"));
@@ -674,11 +755,10 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // receiver for an un-split `State = Self`). Emitted only when the user
     // provided the hook; the trait's default no-op stands otherwise.
     let (has_wire, has_unwire, has_rehydrate) = rename_lifecycle_hooks(&mut boot_hooks);
-    // ADR-0163 §3: `wire` receives the window-bearing `WireCtx`, not a bare
-    // `WasmCtx`, so an author can read assets in `wire` but not from a
-    // handler (which is handed a `WasmCtx`). The forwarder wraps the
-    // `WasmCtx` the lifecycle call builds; `WireCtx` `Deref`s to it, so the
-    // user's `wire` body reaches every send / subscribe verb unchanged.
+    // ADR-0250: `wire` receives the asset-bearing `WireCtx`, not a bare
+    // `WasmCtx`. The forwarder wraps the `WasmCtx` the lifecycle call builds;
+    // `WireCtx` `Deref`s to it, so the user's `wire` body reaches every send
+    // / subscribe verb unchanged.
     // Issue 6279: the renamed hooks keep the author's signatures, so read the
     // actor off them. The lifecycle ctx is typed by the actor, and so is every
     // hook that omitted its actor (#6533), so it passes as is; only a hook
@@ -692,9 +772,9 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             fn wire(
                 __aether_state: &mut Self,
                 __aether_ctx: &mut ::aether_actor::WasmCtx<'_, Self>,
-            ) {
+            ) -> ::core::result::Result<(), ::aether_actor::ActorInitError> {
                 let mut __aether_wire_ctx = ::aether_actor::WireCtx::__new(#wire_ctx);
-                #self_ty::__aether_wire(__aether_state, &mut __aether_wire_ctx);
+                #self_ty::__aether_wire(__aether_state, &mut __aether_wire_ctx)
             }
         }
     } else {
@@ -727,8 +807,8 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                 &mut self,
                 __aether_ctx: &mut ::aether_actor::WasmCtx<'_, Self>,
                 __aether_prior: ::aether_actor::PriorState<'_>,
-            ) {
-                #self_ty::__aether_on_rehydrate(self, #rehydrate_ctx, __aether_prior);
+            ) -> ::core::result::Result<(), ::aether_actor::ActorInitError> {
+                #self_ty::__aether_on_rehydrate(self, #rehydrate_ctx, __aether_prior)
             }
         }
     } else {
@@ -751,6 +831,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         #(#contract_rows)*
         #set_markers
         #contracts_list
+        #(#watches_impls)*
 
         // iamacoffeepot/aether#2311: the boot lifecycle over the runtime state.
         // For an un-split component `State = Self`, so `init` returns `Self` and
@@ -777,7 +858,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         impl #impl_generics ::aether_actor::WasmDispatch<Self> for #self_ty #where_clause {
             fn dispatch(
                 __aether_state: &mut Self,
-                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Anyone, ::aether_actor::Unchecked>,
                 __aether_mail: ::aether_actor::Mail<'_>,
             ) -> u32 {
                 #self_ty::__aether_dispatch(__aether_state, __aether_ctx, __aether_mail)
@@ -804,7 +885,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             #[doc(hidden)]
             pub fn __aether_dispatch(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Anyone, ::aether_actor::Unchecked>,
                 __aether_mail: ::aether_actor::Mail<'_>,
             ) -> u32 {
                 #dispatch_body
@@ -814,6 +895,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             #lineage_manifest_consts
 
             #(#handler_methods_tokens)*
+            #(#watch_methods_tokens)*
             #fallback_method_tokens
             #(#helper_methods_tokens)*
             #(#boot_hooks)*
@@ -833,7 +915,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             }
             fn erased_dispatch(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Anyone, ::aether_actor::Unchecked>,
                 __aether_mail: ::aether_actor::Mail<'_>,
             ) -> u32 {
                 self.__aether_dispatch(__aether_ctx, __aether_mail)
@@ -842,28 +924,31 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             // upgrade the carried erased ctx to the actor once, where it is
             // born, and downgrade the `Unchecked` view here. `on_rehydrate` takes
             // the same typed ctx (#6533) and upgrades the same way below.
-            fn erased_wire(&mut self, __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>) {
-                <#self_ty as ::aether_actor::Lifecycle<Self>>::wire(self, __aether_ctx.__for_actor::<Self>().as_single());
+            fn erased_wire(
+                &mut self,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Anyone, ::aether_actor::Unchecked>,
+            ) -> ::core::result::Result<(), ::aether_actor::ActorInitError> {
+                <#self_ty as ::aether_actor::Lifecycle<Self>>::wire(self, __aether_ctx.__for_actor::<Self>().as_single())
             }
-            fn erased_unwire(&mut self, __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>) {
+            fn erased_unwire(&mut self, __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Anyone, ::aether_actor::Unchecked>) {
                 <#self_ty as ::aether_actor::Lifecycle<Self>>::unwire(self, __aether_ctx.__for_actor::<Self>().as_single());
             }
             fn erased_on_dehydrate(
                 &mut self,
                 __aether_ctx: &mut ::aether_actor::WasmDropCtx<'_>,
-            ) {
-                <#self_ty as ::aether_actor::WasmActor>::on_dehydrate(self, __aether_ctx);
+            ) -> ::core::result::Result<(), ::aether_actor::ActorInitError> {
+                <#self_ty as ::aether_actor::WasmActor>::on_dehydrate(self, __aether_ctx)
             }
             fn erased_on_rehydrate(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Anyone, ::aether_actor::Unchecked>,
                 __aether_prior: ::aether_actor::PriorState<'_>,
-            ) {
+            ) -> ::core::result::Result<(), ::aether_actor::ActorInitError> {
                 <#self_ty as ::aether_actor::WasmActor>::on_rehydrate(
                     self,
                     __aether_ctx.__for_actor::<Self>().as_single(),
                     __aether_prior,
-                );
+                )
             }
         }
 
@@ -900,6 +985,95 @@ fn erase_ctx_unless_named(sig: &syn::Signature) -> TokenStream2 {
     } else {
         quote!(__aether_ctx.erase())
     }
+}
+
+/// The context kind a departure handler's watches store (ADR-0079 §8): its
+/// fourth parameter's type, or the engine's `NoContext` when it has none.
+fn watch_context_ty(handler: &WatchHandlerFn) -> Type {
+    handler.context_ty.clone().unwrap_or_else(|| syn::parse_quote!(::aether_actor::NoContext))
+}
+
+/// Whether a handler's kind spells the engine's departure notice, any path
+/// whose last segment is `MonitorNotice`.
+fn type_names_monitor_notice(ty: &Type) -> bool {
+    matches!(ty, Type::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "MonitorNotice"))
+}
+
+/// The one mail handler an actor's departure handlers share (ADR-0079 §8): a
+/// silent single handler for the engine's `MonitorNotice`, synthesized so the
+/// group gets one `HandlesKind`, one contract row, one manifest record, and
+/// one dispatch arm from the code that emits them for every handler.
+///
+/// Its body asks the host, once per departure handler in declaration order,
+/// for the watch through that handler's watched type the notice ends. Each
+/// answer takes the watch's stored context as the handler's kind and calls
+/// the handler, so one notice runs the handler of each type its sender was
+/// watched through once. A handler that spells `Erased` is handed the erased
+/// ctx, as a lifecycle hook is.
+///
+/// It is gated by the disjunction of its handlers' `#[cfg]`s, so it exists in
+/// exactly the configurations in which one of them does.
+fn departure_handler(watch_handlers: &[WatchHandlerFn]) -> syn::Result<HandlerFn> {
+    let calls = watch_handlers.iter().map(|h| {
+        let method = &h.method.sig.ident;
+        let method_name = method.to_string();
+        let watched_ty = &h.watched_ty;
+        let context_ty = watch_context_ty(h);
+        let ctx = erase_ctx_unless_named(&h.method.sig);
+        let cfgs = &h.cfgs;
+        let (context_pattern, context_arg) = if h.context_ty.is_some() {
+            (quote! { __aether_context }, quote! { , __aether_context })
+        } else {
+            (quote! { _ }, quote! {})
+        };
+        quote! {
+            #(#cfgs)*
+            {
+                let __aether_ended = __aether_ctx.__ended_watch::<#watched_ty>().and_then(|__aether_event| {
+                    __aether_ctx
+                        .__take_watch_context::<#context_ty>(__aether_event.watch, #method_name)
+                        .map(|__aether_context| (__aether_event, __aether_context))
+                });
+                if let ::core::option::Option::Some((__aether_event, #context_pattern)) = __aether_ended {
+                    self.#method(#ctx, __aether_event #context_arg);
+                }
+            }
+        }
+    });
+    let method: syn::ImplItemFn = syn::parse_quote! {
+        #[doc(hidden)]
+        fn __aether_on_departed(
+            &mut self,
+            __aether_ctx: &mut ::aether_actor::WasmCtx<'_, Self>,
+            _notice: ::aether_actor::__macro_internals::MonitorNotice,
+        ) {
+            #(#calls)*
+        }
+    };
+
+    Ok(HandlerFn {
+        method,
+        kind_ty: syn::parse_quote!(::aether_actor::__macro_internals::MonitorNotice),
+        agent_doc: None,
+        cfgs: departure_cfgs(watch_handlers)?,
+        reply: HandlerReply::None,
+        class: HandlerClass::Single,
+        unchecked_reason: None,
+        response_context: None,
+        sender: None,
+    })
+}
+
+/// The `#[cfg]` of the shared departure handler: nothing when any departure
+/// handler is ungated, and otherwise the disjunction of each handler's
+/// conjoined predicates.
+fn departure_cfgs(watch_handlers: &[WatchHandlerFn]) -> syn::Result<Vec<syn::Attribute>> {
+    if watch_handlers.iter().any(|h| h.cfgs.is_empty()) {
+        return Ok(Vec::new());
+    }
+    let predicates =
+        watch_handlers.iter().map(|h| conjoined_cfg_predicate(&h.cfgs)).collect::<syn::Result<Vec<_>>>()?;
+    Ok(vec![syn::parse_quote!(#[cfg(any(#(#predicates),*))])])
 }
 
 /// Issue 552 stage 1: expansion for `#[actor] impl NativeActor for X`
@@ -954,9 +1128,17 @@ fn build_dispatch_body(
         // `DISPATCH_HANDLED_HOLD`, so the substrate keeps the handle and
         // holds the requester's settlement for the `Held<R>` minted beside
         // the receipt.
+        // ADR-0231 §11: an arm whose handler's ctx names a protocol `P` as its
+        // sender casts the inbound sender to `P` first and calls the handler
+        // with the ctx typed by `P`. A sender the cast refuses never reaches
+        // the handler: the helper logs it and answers a request, and the arm
+        // returns the code the helper hands back.
+        let SenderArm { prelude: prove_sender, ctx } =
+            sender_arm(h.sender.as_ref(), k, h.reply.manifest_kind(), &quote! { __aether_refused }, ctx);
         let (call, rc) = match (h.class, &h.reply) {
             (HandlerClass::Single, HandlerReply::Sync(_)) => (
                 quote! {
+                    #prove_sender
                     let __aether_reply = self.#method(#ctx.as_single(), __aether_decoded);
                     ::aether_actor::OutboundReply::reply(__aether_ctx, &__aether_reply);
                 },
@@ -967,12 +1149,16 @@ fn build_dispatch_body(
             (HandlerClass::Single, HandlerReply::None) => {
                 let rc = quote! { ::aether_actor::DISPATCH_HANDLED_RELEASE };
                 let call = silent_call(h.response_context.as_ref(), method, k, &rc, |context| {
-                    quote! { self.#method(#ctx.as_single(), __aether_decoded #context); }
+                    quote! {
+                        #prove_sender
+                        self.#method(#ctx.as_single(), __aether_decoded #context);
+                    }
                 });
                 (call, rc)
             }
             (HandlerClass::Single, HandlerReply::Deferred(_)) => (
                 quote! {
+                    #prove_sender
                     let __aether_pending = self.#method(#ctx.as_single(), __aether_decoded);
                     __aether_ctx.__accept_pending(__aether_pending);
                 },

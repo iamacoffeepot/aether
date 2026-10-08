@@ -10,12 +10,14 @@ use crate::mail::ReplyHandle;
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::outbound_reply::OutboundReply;
 use crate::model::ctx::reply_mode::{ReplyMode, Unchecked};
-use crate::model::{Addressable, CallerAddressable, DependencyResolver, DependsOn, SendableTo, Singleton};
+use crate::model::{
+    Addressable, Anyone, CallerAddressable, CoveredBy, DependencyResolver, DependsOn, SendableTo, SentBy, Singleton,
+};
 use crate::reference::{ActorRef, ErasedActorRef, Target};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::{ChainMode, send_through_host};
 
-impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
+impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
     /// Issue 1987: send `payload` through a held reference, threading this
     /// actor's own id as the send's `from` (ADR-0232 §1). The target is a
     /// [`Target`]: an [`ActorRef<R>`](crate::ActorRef) is kind-checked, so the
@@ -29,7 +31,15 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// narrows to — never a computed position (ADR-0230). There is no
     /// by-name counterpart, because text is not a proof. Routes through the inline registry and inherits the handler's
     /// causal chain like every ctx send.
-    pub fn send_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K) {
+    ///
+    /// The ctx's own actor must cover what the target's handler requires of
+    /// its sender (ADR-0231 §11): nothing for most handlers, and the protocol
+    /// `P` for one whose ctx names `P` as its sender. The erased ctx names
+    /// no actor, so it does not send such a kind.
+    pub fn send_to<K: ActorMail, I, T: Target<K, I>>(&mut self, target: T, payload: &K)
+    where
+        T::Sender: CoveredBy<A>,
+    {
         self.push(target.erased(), payload, ChainMode::Inherit);
     }
 
@@ -38,12 +48,15 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     ///
     /// Compiles only on a ctx typed by an actor that declares `R` with
     /// `#[actor(depends(R))]`, and only for a kind `R` handles; the turbofish
-    /// names only `R`, the kind is inferred from the payload. The erased ctx
-    /// has no flat send. The recipient is the position [`Self::actor_ref`]
-    /// folds for `R`.
+    /// names only `R`, the kind is inferred from the payload. When `R`'s
+    /// handler for the kind names a protocol `P` as its sender, it compiles only
+    /// when this actor has a handler for each of `P`'s kinds
+    /// ([`SentBy<A, R>`](SentBy), ADR-0231 §11); the call site is the same
+    /// line either way. The erased ctx has no flat send. The recipient is the
+    /// position [`Self::actor_ref`] folds for `R`.
     ///
     /// Its consumers include the cube fixture's camera send.
-    pub fn send<R: Singleton + CallerAddressable>(&mut self, payload: &impl SendableTo<R>)
+    pub fn send<R: Singleton + CallerAddressable>(&mut self, payload: &(impl SendableTo<R> + SentBy<A, R>))
     where
         A: DependsOn<R>,
         R::Resolver: DependencyResolver,
@@ -59,8 +72,10 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     ///
     /// Its consumer is the cube fixture, which emits its twelve triangles as
     /// one batch.
-    pub fn send_many<R: Singleton + CallerAddressable>(&mut self, payloads: &[impl SendableTo<R> + bytemuck::NoUninit])
-    where
+    pub fn send_many<R: Singleton + CallerAddressable>(
+        &mut self,
+        payloads: &[impl SendableTo<R> + SentBy<A, R> + bytemuck::NoUninit],
+    ) where
         A: DependsOn<R>,
         R::Resolver: DependencyResolver,
     {
@@ -76,7 +91,10 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// Its consumer is the fs demux fixture, which matches two
     /// indistinguishable `aether.fs.read` replies by these ids.
     #[must_use]
-    pub fn send_tracked<R: Singleton + CallerAddressable>(&mut self, payload: &impl SendableTo<R>) -> RequestId
+    pub fn send_tracked<R: Singleton + CallerAddressable>(
+        &mut self,
+        payload: &(impl SendableTo<R> + SentBy<A, R>),
+    ) -> RequestId
     where
         A: DependsOn<R>,
         R::Resolver: DependencyResolver,
@@ -100,7 +118,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     #[must_use]
     pub fn send_with_context<R: Singleton + CallerAddressable>(
         &mut self,
-        payload: &impl SendableTo<R>,
+        payload: &(impl SendableTo<R> + SentBy<A, R>),
         context: impl Kind,
     ) -> RequestId
     where
@@ -128,7 +146,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     ///
     /// Its consumer is the routed HTTP fixture's drop bridge, which keeps the
     /// component teardown out of the request's causal chain.
-    pub fn send_detached<R: Singleton + CallerAddressable>(&mut self, payload: &impl SendableTo<R>)
+    pub fn send_detached<R: Singleton + CallerAddressable>(&mut self, payload: &(impl SendableTo<R> + SentBy<A, R>))
     where
         A: DependsOn<R>,
         R::Resolver: DependencyResolver,
@@ -180,13 +198,13 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
 // always goes through the host so its reply carries a correlation. For a
 // childless component with no captured `self_id` match the recipient is
 // always `Remote`, so the path is identical to a bare `mail::send_mail`.
-impl<A, M: ReplyMode> MailSender for WasmCtx<'_, A, M> {
+impl<A, S, M: ReplyMode> MailSender for WasmCtx<'_, A, S, M> {
     fn prev_correlation(&self) -> u64 {
         mail::prev_correlation()
     }
 
     // By-id detached send: the inherent `send_to` with `ChainMode::Detached`.
-    fn send_detached_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K) {
+    fn send_detached_to<K: ActorMail, I>(&mut self, target: impl Target<K, I, Sender = Anyone>, payload: &K) {
         self.push(target.erased(), payload, ChainMode::Detached);
     }
 }
@@ -195,7 +213,7 @@ impl<A, M: ReplyMode> MailSender for WasmCtx<'_, A, M> {
 // unchecked-class handler issues its own replies); `Single` deliberately
 // does not, so a `-> ()` single handler is provably silent and a stray
 // single-ctx `ctx.reply` is a compile error rather than a manifest lie.
-impl<A> OutboundReply for WasmCtx<'_, A, Unchecked> {
+impl<A, S> OutboundReply for WasmCtx<'_, A, S, Unchecked> {
     type ReplyHandle = ReplyHandle;
 
     fn reply_target(&self) -> Option<ReplyHandle> {

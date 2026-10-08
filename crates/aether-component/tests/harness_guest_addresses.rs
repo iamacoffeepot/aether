@@ -46,7 +46,6 @@ fn spawn_matrix_child_under(
         key: Some("k".to_owned()),
         parent: Some(parent),
         config: Vec::new(),
-        code: None,
     };
     harness.spawn_any(&spawn).map(|spawned| spawned.path)
 }
@@ -55,17 +54,12 @@ fn key() -> LoadName {
     LoadName::new("k").expect("a valid load name")
 }
 
-/// A harness that also composes the inventory cap, so a scenario resolves
+/// A harness whose basics carry the inventory cap, so a scenario resolves
 /// short paths the way an external caller does, with the `stem` module
 /// published.
 fn fixture_of(stem: &str) -> Option<SubstrateHarness> {
     let wasm = fs::read(require_wasm(stem)?).expect("read fixture wasm");
-    let mut harness = SubstrateHarness::builder()
-        .size(64, 48)
-        .with_component_host()
-        .with_actor::<InventoryCapability>(())
-        .build()
-        .expect("boot");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     harness.publish(wasm).unwrap_or_else(|error| panic!("publish {stem}: {error}"));
     Some(harness)
 }

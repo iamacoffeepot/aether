@@ -25,6 +25,7 @@ mod placement;
 mod publish;
 mod republish;
 mod spawn;
+mod unpublish;
 
 use super::{ComponentHostCapability, LoadResult};
 use crate::component::{Abort, Aborted, Commit, Committed, LoadDelivered, Prepare, Prepared, SpawnDelivered};
@@ -32,10 +33,11 @@ use crate::component::{Abort, Aborted, Commit, Committed, LoadDelivered, Prepare
 // cap-root `pub use runtime::ComponentHostParams;` re-export sources it here.
 pub use self::config::ComponentHostParams;
 
+use crate::kinds::Unpublished;
 use aether_kinds::trace::Settled;
 use aether_kinds::{
     DescribeComponent, DescribeComponentResult, DropComponent, DropResult, ListComponents, ListComponentsResult,
-    LoadComponent, Publish, PublishResult, Spawn, SpawnResult,
+    LoadComponent, Publish, PublishResult, Spawn, SpawnResult, Unpublish, UnpublishResult,
 };
 
 // Crate-local wiring the `#[runtime] impl` handler bodies name (the
@@ -43,7 +45,7 @@ use aether_kinds::{
 // module. No sibling-cap imports: drop-time cleanup rides the ADR-0079
 // close `MonitorNotice` (each cap monitors its registrants and purges its own
 // rows), so the host names no peer cap's type or kinds.
-use aether_actor::{ErasedActorRef, ProtocolRef, Single};
+use aether_actor::{Anyone, ErasedActorRef, ProtocolRef, Single};
 use aether_data::ErasedActorPath;
 use aether_data::{MailId, MailboxCategory};
 
@@ -122,6 +124,11 @@ pub struct ComponentHostCapabilityState {
     publishes: HashMap<u64, publish::PublishInFlight>,
     /// The next id a staged `Publish` takes.
     next_publish: u64,
+    /// Every `Unpublish` whose withdrawal batch is staged, keyed by the id
+    /// its completion's context carries, until the owner answers it.
+    unpublishes: HashMap<u64, unpublish::UnpublishInFlight>,
+    /// The next id a staged `Unpublish` takes.
+    next_unpublish: u64,
     /// Every published namespace of every module that declares a boot
     /// (ADR-0147), recorded when its publish commits. A republish of any of
     /// them is refused, whether or not an instance is live: a boot module is
@@ -166,7 +173,7 @@ pub struct LoadedGuest {
 }
 
 /// The host's own ctx, in either reply mode.
-type HostCtx<'a, M> = NativeCtx<'a, ComponentHostCapability, M>;
+type HostCtx<'a, M> = NativeCtx<'a, ComponentHostCapability, Anyone, M>;
 
 /// The rows the component host controls a guest through: its trampoline's
 /// own framework rows, never the guest's published surface. A guest birth
@@ -212,6 +219,8 @@ impl NativeActor for ComponentHostCapability {
             next_load: 0,
             publishes: HashMap::new(),
             next_publish: 0,
+            unpublishes: HashMap::new(),
+            next_unpublish: 0,
             boot_namespaces: HashSet::new(),
             republishes: HashMap::new(),
             next_republish: 0,
@@ -222,8 +231,9 @@ impl NativeActor for ComponentHostCapability {
         })
     }
 
-    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self>) {
+    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self>) -> Result<(), BootError> {
         state.registry_subscription = Some(ctx.subscribe_inventory());
+        Ok(())
     }
 
     /// Load a wasm component into the substrate: a publish of its module,
@@ -261,15 +271,25 @@ impl NativeActor for ComponentHostCapability {
     /// A module publish settled (ADR-0241 §3): a load's commit continues to
     /// the module boot and the requested guest, a `Publish`'s spawns the
     /// module's boot and answers, and a republish's commit sends every
-    /// member its commit (§7). A refusal answers the load or the `Publish`,
-    /// or aborts every member of the republish.
+    /// member its commit (§7). An unpublish's withdrawal (ADR-0250 §5)
+    /// answers its held reply instead. A refusal answers the load, the
+    /// `Publish`, or the `Unpublish`, or aborts every member of the
+    /// republish.
     #[handler(task)]
     fn on_module_published(
         state: &mut Self::State,
-        ctx: &mut NativeCtx<'_, Self, Single>,
+        ctx: &mut NativeCtx<'_, Self, Anyone, Single>,
         done: TaskDone<RegistryBatchResult>,
     ) {
-        state.finish_publish(ctx, done);
+        // A withdrawal completes through the same owner batch output, so its
+        // context answers the held unpublish here; every other context takes
+        // the publish path it staged. A wrong-kind take leaves the context
+        // stored, so this probe disturbs no publish completion.
+        if let Some(unpublished) = ctx.take_context::<Unpublished>() {
+            state.finish_unpublish(ctx, unpublished.unpublish, done.into_output());
+        } else {
+            state.finish_publish(ctx, done);
+        }
         state.release_queued_publishes(ctx);
     }
 
@@ -279,7 +299,7 @@ impl NativeActor for ComponentHostCapability {
     #[handler(task)]
     fn on_guest_born(
         state: &mut Self::State,
-        ctx: &mut NativeCtx<'_, Self, Single>,
+        ctx: &mut NativeCtx<'_, Self, Anyone, Single>,
         done: TaskDone<GuestOutcome<GuestControl>>,
     ) {
         state.finish_guest_birth(ctx, done);
@@ -345,10 +365,10 @@ impl NativeActor for ComponentHostCapability {
         pending
     }
 
-    /// Spawn an instance of a published type (ADR-0241 §9).
+    /// Spawn an instance of a published type (ADR-0241 §9, ADR-0250).
     ///
     /// # Agent
-    /// `Spawn { namespace, key, parent, config, code }`, where `namespace` is a
+    /// `Spawn { namespace, key, parent, config }`, where `namespace` is a
     /// published name `PublishResult` reported. The name the instance takes
     /// decides the answer: `NS` for a singleton (which names no `key`),
     /// `NS:key` for an instanced type (`NS:<counter>` when `key` is `None`),
@@ -360,14 +380,29 @@ impl NativeActor for ComponentHostCapability {
     /// instance itself answers, so an actor requester keeps the reply's
     /// stamped sender as its reference. A namespace no module publishes is
     /// refused, and a spawn of one whose module is republishing waits until
-    /// the republish answers. `code` is the published module's bytes, brought
-    /// so the new instance reads its assets in `init` and `wire`; bytes of
-    /// any other module are refused, and `None` stands up an instance whose
-    /// load window serves no asset payload.
+    /// the republish answers. A spawn of a published type always builds an
+    /// instance that can read its assets, in every hook, from its own
+    /// module.
     #[handler::request]
     fn on_spawn(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: Spawn) -> Pending<SpawnResult> {
         let (pending, held) = ctx.hold::<SpawnResult>();
         state.begin_spawn(ctx, held, payload);
+        pending
+    }
+
+    /// Withdraw one published namespace (ADR-0250 §5).
+    ///
+    /// # Agent
+    /// `Unpublish { namespace }`, where `namespace` is a published name a
+    /// `PublishResult` reported. The namespace must have no live instance:
+    /// drop its instances first. A namespace no module publishes, one native
+    /// code implements, one with a publish or load in flight, or one still
+    /// running an instance is refused with the reason. Reply:
+    /// `UnpublishResult`.
+    #[handler::request]
+    fn on_unpublish(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: Unpublish) -> Pending<UnpublishResult> {
+        let (pending, held) = ctx.hold::<UnpublishResult>();
+        state.begin_unpublish(ctx, held, payload);
         pending
     }
 

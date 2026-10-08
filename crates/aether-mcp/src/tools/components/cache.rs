@@ -55,7 +55,7 @@ impl ComponentCache {
         }
         for ((cached_engine, path), capabilities) in &mut maps.instances {
             if let Some(published) =
-                types.iter().find(|published| *cached_engine == engine && published.namespace == leaf_namespace(path))
+                types.iter().find(|published| *cached_engine == engine && published.namespace == path.leaf_namespace())
             {
                 capabilities.clone_from(&published.capabilities);
             }
@@ -86,11 +86,17 @@ impl ComponentCache {
     pub(in crate::tools) fn published_type(&self, engine: EngineId, namespace: &str) -> Option<ComponentCapabilities> {
         self.maps().types.get(&(engine, namespace.to_owned())).cloned()
     }
-}
 
-/// The namespace of the type an actor path names: its last segment, before
-/// any `:key` (ADR-0241 §5).
-pub(super) fn leaf_namespace(path: &ErasedActorPath) -> &str {
-    let leaf = path.as_str().rsplit('/').next().unwrap_or(path.as_str());
-    leaf.split_once(':').map_or(leaf, |(namespace, _)| namespace)
+    /// Forget the type published as `namespace` and every cached instance
+    /// whose leaf namespace matches it, after an unpublish withdrew it. Live
+    /// instances are already gone — the host refuses an unpublish while one
+    /// still runs — so this clears the type entry and the stale
+    /// dropped-instance entries, and a later describe by namespace goes live
+    /// to the engine and reports the withdrawal.
+    pub(in crate::tools) fn forget_namespace(&self, engine: EngineId, namespace: &str) {
+        let mut maps = self.maps();
+        maps.types.remove(&(engine, namespace.to_owned()));
+        maps.instances
+            .retain(|(cached_engine, path), _| *cached_engine != engine || path.leaf_namespace() != namespace);
+    }
 }

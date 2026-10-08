@@ -217,12 +217,12 @@ pub fn fallback(_attr: TokenStream, _item: TokenStream) -> TokenStream {
 ///
 /// ```ignore
 /// #[handler_set]
-/// pub trait WidgetDefaults {
-///     fn widget_frame(&mut self) -> &mut WidgetFrame;
+/// pub trait Framed {
+///     fn frame(&mut self) -> &mut Frame;
 ///
 ///     #[handler::tell]
-///     fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
-///         *self.widget_frame() = frame;
+///     fn on_set_frame(&mut self, _ctx: &mut WasmCtx<'_>, set: SetFrame) {
+///         *self.frame() = set.frame;
 ///     }
 /// }
 /// ```
@@ -234,8 +234,8 @@ pub fn fallback(_attr: TokenStream, _item: TokenStream) -> TokenStream {
 /// A member is typed by its adopter (ADR-0231 §7): a ctx that omits its actor
 /// reads as `WasmCtx<'_, Self>`, where `Self` is the adopting actor, and only a
 /// member spelling `Erased` gets the erased view. So the set states what its
-/// default bodies reach as supertraits — the real `WidgetDefaults` is
-/// `WidgetChrome + DependsOn<TextCapability>` — and the macro adds `Sized` to
+/// default bodies reach as supertraits — `trait Framed: DependsOn<AudioCapability>`
+/// for a body that mails the audio capability — and the macro adds `Sized` to
 /// them. An override is a plain trait-method impl the macro never rewrites, so
 /// it spells the typed signature: `WasmCtx<'_, Self>`.
 #[proc_macro_attribute]
@@ -440,15 +440,15 @@ fn expand_handlers(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStream2
 ///
 /// The path is resolved relative to the invoking source file, exactly
 /// like `include_bytes!`, and the path string as written is the
-/// asset's name — the key the ADR-0163 load window
-/// (`AssetWindow::asset`) and catalog report.
+/// asset's name — the key the module-held catalog (`Assets::assets`) and
+/// payload verbs report.
 ///
 /// ```ignore
 /// aether_actor::export_asset!("sprites/slime.png");
 /// ```
 ///
 /// The bytes ride a custom section keyed by the asset path — the
-/// section the host-side load window and catalog index — and are not
+/// section the host-side indexer and module-held catalog index — and are not
 /// addressable from guest code. The static that carries them stays out
 /// of linear memory: rustc leaves an unreferenced `#[link_section]`
 /// static as a dead internal global, and this expansion withholds the

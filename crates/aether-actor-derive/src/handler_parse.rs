@@ -1,5 +1,5 @@
 use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
+use quote::{quote, quote_spanned};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{Attribute, Expr, FnArg, GenericArgument, Meta, PathArguments, ReturnType, Signature, Type};
@@ -41,6 +41,12 @@ pub struct HandlerFn {
     /// The stored request context a `#[handler::response]` takes as its fourth
     /// parameter (ADR-0243 §10), which the dispatch arm fills before the call.
     pub response_context: Option<ResponseContext>,
+    /// The protocol `P` the handler's ctx names as its sender, as in
+    /// `WasmCtx<'_, Self, P>` (ADR-0231 §11): what the handler requires of
+    /// its sender, read by [`ctx_sender`]. It is the
+    /// row's `HandlesKind::Sender`, which the typed sends bound against, and
+    /// the cast the dispatch arm runs before the call.
+    pub sender: Option<Type>,
 }
 
 pub struct FallbackFn {
@@ -330,19 +336,97 @@ pub fn parse_handler_class(attr: &Attribute, args: &HandlerArgs) -> syn::Result<
     }
 }
 
+/// What an intent handler's signature states beyond its kind (#7201,
+/// ADR-0231 §11): a response's stored request context, its fourth parameter,
+/// and a tell's or request's sender requirement, its ctx's sender. One
+/// handler never has both, since each belongs to a different intent.
+#[derive(Default)]
+pub struct IntentParameters {
+    pub response_context: Option<ResponseContext>,
+    pub sender: Option<Type>,
+}
+
+/// The sender a method's ctx type states (ADR-0231 §11): the ctx's second
+/// type argument, in the order receiver, sender, mode, or `None` when the ctx
+/// names no second type argument or names `Anyone` there. The macro has no
+/// type resolution, so the match is syntactic, as [`type_is_erased`] is: a
+/// path whose last segment is `Anyone` states nothing.
+///
+/// A reply mode in the sender position is refused here, for every method the
+/// macro reads a ctx from: it is a two-argument spelling from before the ctx
+/// carried its sender, and the message gives the three-argument spelling.
+pub fn ctx_sender(sig: &Signature) -> syn::Result<Option<&Type>> {
+    let Some(args) = ctx_type_args(sig) else {
+        return Ok(None);
+    };
+    let Some(sender) = args.get(1).copied() else {
+        return Ok(None);
+    };
+    match last_segment_name(sender).as_deref() {
+        Some("Anyone") => Ok(None),
+        Some(mode @ ("Single" | "Unchecked")) => {
+            let ctx = ctx_type_name(sig).unwrap_or_else(|| "NativeCtx".to_owned());
+            let actor = args.first().map_or_else(|| "Self".to_owned(), |actor| spelled(actor));
+            Err(syn::Error::new_spanned(
+                sender,
+                format!(
+                    "`{mode}` is a reply mode, and a ctx's type arguments are receiver, sender, mode: the reply \
+                     mode is the third. Write `{ctx}<'_, {actor}, Anyone, {mode}>` (ADR-0231 §7, §11)"
+                ),
+            ))
+        }
+        _ => Ok(Some(sender)),
+    }
+}
+
+/// The last path segment of `ty` as text, or `None` for a type that is not a
+/// path.
+fn last_segment_name(ty: &Type) -> Option<String> {
+    let Type::Path(type_path) = ty else {
+        return None;
+    };
+    type_path.path.segments.last().map(|segment| segment.ident.to_string())
+}
+
+/// `ty` as its author spelled it, without the spaces token printing adds.
+fn spelled(ty: &Type) -> String {
+    quote!(#ty).to_string().replace(' ', "")
+}
+
+/// Refuse a sender stated in the ctx type where `what` cannot state one
+/// (ADR-0231 §11), naming the two attributes that do. `why` says what about
+/// the method rules the requirement out.
+pub fn reject_ctx_sender(sig: &Signature, what: &str, why: &str) -> syn::Result<()> {
+    let Some(sender) = ctx_sender(sig)? else {
+        return Ok(());
+    };
+    Err(syn::Error::new_spanned(
+        sender,
+        format!(
+            "{what} states no sender in its ctx type: {why}. Only `#[handler::tell]` and \
+             `#[handler::request]` on an actor's own `#[actor]` impl state what their sender must handle \
+             (ADR-0231 §11)"
+        ),
+    ))
+}
+
 /// Check a handler's signature against its [`HandlerIntent`] (#7201) and read
-/// a `#[handler::response]`'s fourth parameter. `request` must answer
-/// (`-> O` or `-> Pending<O>`); `tell`, `event`, and `response` answer
-/// nothing. Only `response` takes a fourth parameter, `context: C` or
-/// `context: Option<C>`, and never on a native `&[K]` slice handler, because
-/// a batched cast is never a reply. Each refusal names the attribute that
-/// fits. The kind extractors have already bounded the parameter count at four.
+/// its ctx's sender and its fourth parameter. `request` must answer (`-> O`
+/// or `-> Pending<O>`); `tell`, `event`, and `response` answer nothing. A
+/// `tell` or a `request` may name a protocol as its ctx's sender, what it
+/// requires of its sender (ADR-0231 §11); a `response` may take `context: C`
+/// or `context: Option<C>` as a fourth parameter (ADR-0243 §10); a `tell`,
+/// `request`, or `event` takes no fourth parameter. A native `&[K]` slice
+/// handler takes neither: a batched cast is never a reply, and it is the
+/// high-rate path the per-mail cast stays off. Each refusal names the
+/// attribute that fits.
+/// The kind extractors have already bounded the parameter count at four.
 pub fn check_intent_signature(
     intent: HandlerIntent,
     reply: &HandlerReply,
     sig: &Signature,
     is_slice: bool,
-) -> syn::Result<Option<ResponseContext>> {
+) -> syn::Result<IntentParameters> {
     let word = intent.word();
     match (intent, reply) {
         (HandlerIntent::Request, HandlerReply::None) => {
@@ -366,8 +450,31 @@ pub fn check_intent_signature(
         }
         _ => {}
     }
+    let sender = ctx_sender(sig)?.cloned();
+    if sender.is_some() {
+        match intent {
+            HandlerIntent::Tell | HandlerIntent::Request => {}
+            HandlerIntent::Event => reject_ctx_sender(
+                sig,
+                "`#[handler::event]`",
+                "an event arrives from a publisher this actor subscribed to, so its sender is the actor's own choice",
+            )?,
+            HandlerIntent::Response => reject_ctx_sender(
+                sig,
+                "`#[handler::response]`",
+                "a response answers this actor's own request, so its sender is whoever the actor asked",
+            )?,
+        }
+        if is_slice {
+            reject_ctx_sender(
+                sig,
+                "a batched `mail: &[K]` handler",
+                "a batched cast is the high-rate path, and the engine's cast of the sender stays off it",
+            )?;
+        }
+    }
     let Some(fourth) = sig.inputs.get(3) else {
-        return Ok(None);
+        return Ok(IntentParameters { response_context: None, sender });
     };
     if intent != HandlerIntent::Response {
         return Err(syn::Error::new_spanned(
@@ -398,10 +505,142 @@ pub fn check_intent_signature(
         && args.args.len() == 1
         && let Some(GenericArgument::Type(inner)) = args.args.first()
     {
-        return Ok(Some(ResponseContext { ty: inner.clone(), optional: true }));
+        let response_context = Some(ResponseContext { ty: inner.clone(), optional: true });
+        return Ok(IntentParameters { response_context, sender });
     }
-    Ok(Some(ResponseContext { ty: (*pt.ty).clone(), optional: false }))
+    let response_context = Some(ResponseContext { ty: (*pt.ty).clone(), optional: false });
+    Ok(IntentParameters { response_context, sender })
 }
+
+/// A wasm actor's departure handler (ADR-0079 §8): a `#[handler::event]`
+/// whose third parameter is `Departed<W>`. It is not a mail handler of its
+/// own. Every departure handler of an actor shares the one row, manifest
+/// record, and dispatch arm of the engine's departure notice, and the arm
+/// picks among them by the watched type `W`.
+pub struct WatchHandlerFn {
+    pub method: syn::ImplItemFn,
+    /// `W`, read syntactically out of `Departed<W>`.
+    pub watched_ty: Type,
+    /// The context kind `C` of a `context: C` fourth parameter, or `None`
+    /// for a handler that takes none, whose context kind is `NoContext`.
+    pub context_ty: Option<Type>,
+    /// The handler method's `#[cfg]` attributes (see [`handler_cfgs`]).
+    pub cfgs: Vec<Attribute>,
+}
+
+/// `W` when `ty` spells `Departed<W>`: any path whose last segment is
+/// `Departed` with one type argument. The macro has no type resolution, so
+/// the match is syntactic, as it is for `Pending<R>` and `TaskDone<O>`.
+pub fn departed_watched_type(ty: &Type) -> Option<&Type> {
+    let Type::Path(type_path) = ty else {
+        return None;
+    };
+    let segment = type_path.path.segments.last()?;
+    if segment.ident != "Departed" {
+        return None;
+    }
+    let PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return None;
+    };
+    match args.args.first() {
+        Some(GenericArgument::Type(watched)) if args.args.len() == 1 => Some(watched),
+        _ => None,
+    }
+}
+
+/// Check a wasm departure handler's signature (ADR-0079 §8) and read its
+/// context kind. It is a `#[handler::event]` that answers nothing. Its
+/// optional fourth parameter is the context every watch of its watched type
+/// stores, so it is `context: C` and never `Option<C>`: a watch always
+/// stores its context, and a handler with nothing to note leaves the
+/// parameter out.
+pub fn check_watch_signature(
+    attr: &Attribute,
+    intent: Option<HandlerIntent>,
+    reply: &HandlerReply,
+    sig: &Signature,
+) -> syn::Result<Option<Type>> {
+    if intent != Some(HandlerIntent::Event) {
+        return Err(syn::Error::new_spanned(
+            attr,
+            "a `Departed<W>` handler is `#[handler::event]`: a watched actor's departure arrives because this \
+             actor watched it, and the handler answers nothing (ADR-0079 §8)",
+        ));
+    }
+    if !matches!(reply, HandlerReply::None) {
+        return Err(syn::Error::new_spanned(
+            &sig.output,
+            "a `Departed<W>` handler answers nothing, so it returns `()`: a departure has no one waiting for a reply",
+        ));
+    }
+    reject_ctx_sender(
+        sig,
+        "a `Departed<W>` handler",
+        "a departure is the engine's notice about an actor this one watched",
+    )?;
+    let Some(fourth) = sig.inputs.get(3) else {
+        return Ok(None);
+    };
+    let FnArg::Typed(pt) = fourth else {
+        return Err(syn::Error::new_spanned(fourth, "the context parameter must be `context: C`"));
+    };
+    if let Type::Path(type_path) = &*pt.ty
+        && type_path.qself.is_none()
+        && let Some(segment) = type_path.path.segments.last()
+        && segment.ident == "Option"
+    {
+        return Err(syn::Error::new_spanned(
+            &pt.ty,
+            "a `Departed<W>` handler's context is never optional: a watch always stores its context. Write \
+             `context: C` for the kind every `ctx.watch` of this type passes, or leave the parameter out and \
+             watch with `NoContext` (ADR-0079 §8)",
+        ));
+    }
+    Ok(Some((*pt.ty).clone()))
+}
+
+/// Reject two departure handlers for one watched type (ADR-0079 §8). One
+/// handler serves each watched type and fixes its context kind; a second
+/// would never run, and would give the type two context kinds. The macro has
+/// no type resolution, so the comparison is by token equality.
+pub fn reject_duplicate_watched_types(handlers: &[WatchHandlerFn]) -> syn::Result<()> {
+    for (index, later) in handlers.iter().enumerate() {
+        let earlier = handlers[..index].iter().find(|earlier| types_token_eq(&earlier.watched_ty, &later.watched_ty));
+        if let Some(earlier) = earlier {
+            let earlier_name = &earlier.method.sig.ident;
+            let watched_ty = &later.watched_ty;
+            return Err(syn::Error::new_spanned(
+                &later.method.sig.ident,
+                format!(
+                    "two handlers take `Departed<{}>` (also `{earlier_name}`): one handler serves each watched \
+                     type, and its signature fixes the context kind every watch of that type stores. Tell the \
+                     watches apart by the context value; an enum kind carries notes of different shapes",
+                    quote!(#watched_ty)
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a `Departed<W>` handler where no watch can be declared for it
+/// (ADR-0079 §8): `Departed<W>` is the event of a wasm component's
+/// `ctx.watch`, and `#[actor]` on the component's own impl is what declares
+/// the watch. `instead` says what the author writes there.
+pub fn reject_departed_handler(kind_ty: &Type, instead: &str) -> syn::Result<()> {
+    if departed_watched_type(kind_ty).is_none() {
+        return Ok(());
+    }
+    Err(syn::Error::new_spanned(
+        kind_ty,
+        format!("`Departed<W>` is the event of a wasm component's `ctx.watch` (ADR-0079 §8): {instead}"),
+    ))
+}
+
+/// What a native actor writes in place of a `Departed<W>` handler.
+const NATIVE_WATCH_FORM: &str = "a native actor watches with `ctx.monitor(reference)`, keeps the `MonitorHandle`, \
+                                 and takes `MonitorNotice` in its `#[handler::event]`, reading the departed actor \
+                                 from `ctx.sender()`";
 
 /// Push `#[allow(clippy::needless_pass_by_value)]` onto a response handler
 /// that takes its context parameter (ADR-0243 §10): the arm hands the taken
@@ -461,26 +700,86 @@ pub fn silent_call(
     }
 }
 
-/// The ctx parameter's angle-bracketed **type** arguments in declaration
-/// order, lifetimes skipped: `[]` for `WasmCtx<'_>`, `[Erased, Unchecked]` for
-/// `WasmCtx<'_, Erased, Unchecked>`, `[Self]` for `WasmCtx<'_, Self>`. Both
-/// transports spell the actor first (issues 4158 + 6279), so one positional
-/// reader serves `WasmCtx` / `NativeCtx` / `WireCtx` alike.
-/// `None` when the second parameter is not a reference to a path type at all —
-/// [`ctx_names_actor`] reads that as naming no actor.
-fn ctx_type_args(sig: &Signature) -> Option<Vec<&Type>> {
+/// The statements a dispatch arm runs before a handler whose ctx names a
+/// protocol as its sender, and the ctx it then calls the handler with
+/// (ADR-0231 §11), shared by the wasm and native arms. A handler that states
+/// no sender gets no cast and no branch: its arm keeps `ctx`, the full
+/// dispatch ctx already viewed as the handler's actor.
+///
+/// The engine casts the inbound sender to `P` on `ctx`, through the hidden
+/// helper each transport defines: `__sender_or_refuse::<P, K>()` for a tell,
+/// and `__sender_or_answer::<P, K, O>()` for a request replying `O`, which
+/// answers a refused sender with `O::from(PathRefused)`. On a pass the helper
+/// returns that ctx typed by `P`, whose `sender()` is the proven reference,
+/// and the arm applies its mode view to it as it would to `ctx`. On a miss
+/// both log the refusal and return `Err` carrying what the arm returns, which
+/// `refused` turns into the arm's own return expression from the bound name
+/// `__aether_refused`. The request helper is spanned at the reply type, so a
+/// reply that is not `From<PathRefused>` fails there.
+pub struct SenderArm {
+    pub prelude: TokenStream2,
+    pub ctx: TokenStream2,
+}
+
+pub fn sender_arm(
+    sender: Option<&Type>,
+    kind_ty: &Type,
+    reply: Option<&Type>,
+    refused: &TokenStream2,
+    ctx: TokenStream2,
+) -> SenderArm {
+    let Some(protocol) = sender else {
+        return SenderArm { prelude: quote! {}, ctx };
+    };
+    let prove = reply.map_or_else(
+        || quote! { #ctx.__sender_or_refuse::<#protocol, #kind_ty>() },
+        |reply_ty| {
+            quote_spanned! {reply_ty.span()=>
+                #ctx.__sender_or_answer::<#protocol, #kind_ty, #reply_ty>()
+            }
+        },
+    );
+    let prelude = quote! {
+        let __aether_proven = match #prove {
+            ::core::result::Result::Ok(__aether_proven) => __aether_proven,
+            ::core::result::Result::Err(__aether_refused) => return #refused,
+        };
+    };
+    SenderArm { prelude, ctx: quote! { __aether_proven } }
+}
+
+/// The last path segment of the ctx parameter's type: the ctx type itself
+/// (`WasmCtx` / `NativeCtx` / `WireCtx`), behind its leading `&mut` / `&`.
+/// `None` when the second parameter is not a reference to a path type at all.
+fn ctx_type_segment(sig: &Signature) -> Option<&syn::PathSegment> {
     let FnArg::Typed(pt) = sig.inputs.get(1)? else {
         return None;
     };
-    // Peel the leading `&mut` / `&` off the ctx reference, then read the
-    // last path segment — the ctx type itself (`WasmCtx` / `NativeCtx`).
     let Type::Reference(ctx_ref) = &*pt.ty else {
         return None;
     };
     let Type::Path(ctx_path) = &*ctx_ref.elem else {
         return None;
     };
-    let PathArguments::AngleBracketed(args) = &ctx_path.path.segments.last()?.arguments else {
+    ctx_path.path.segments.last()
+}
+
+/// The ctx parameter's type name as its author wrote it, for a diagnostic
+/// that gives a corrected spelling.
+fn ctx_type_name(sig: &Signature) -> Option<String> {
+    ctx_type_segment(sig).map(|segment| segment.ident.to_string())
+}
+
+/// The ctx parameter's angle-bracketed **type** arguments in declaration
+/// order, lifetimes skipped: `[]` for `WasmCtx<'_>`, `[Self]` for
+/// `WasmCtx<'_, Self>`, `[Erased, Anyone, Unchecked]` for
+/// `WasmCtx<'_, Erased, Anyone, Unchecked>`. Both transports spell receiver,
+/// sender, mode in that order (issues 4158 + 6279, ADR-0231 §11), so one
+/// positional reader serves `WasmCtx` / `NativeCtx` / `WireCtx` alike.
+/// `None` when the second parameter is not a reference to a path type at all —
+/// [`ctx_names_actor`] reads that as naming no actor.
+fn ctx_type_args(sig: &Signature) -> Option<Vec<&Type>> {
+    let PathArguments::AngleBracketed(args) = &ctx_type_segment(sig)?.arguments else {
         return Some(Vec::new());
     };
     Some(
@@ -738,6 +1037,9 @@ pub struct NativeActorHandlerFn {
     /// [`HandlerFn::response_context`]. The intent word itself leaves no other
     /// trace once [`check_intent_signature`] has passed (#7201).
     pub response_context: Option<ResponseContext>,
+    /// A tell's or request's sender requirement (ADR-0231 §11); see
+    /// [`HandlerFn::sender`].
+    pub sender: Option<Type>,
 }
 
 /// A `#[handler(task)]` completion handler (ADR-0093 §3). Its third
@@ -888,6 +1190,41 @@ pub fn allow_abi_receiver(m: &mut syn::ImplItemFn) {
     m.attrs.push(syn::parse_quote!(#[allow(clippy::unused_self)]));
 }
 
+/// Require each hand-written hook named in `hooks` to declare its return
+/// type. `wire` returns the birth's result, as `init` does (ADR-0247 rule 3),
+/// and a wasm actor's `on_dehydrate` and `on_rehydrate` return the
+/// republish's (ADR-0249 §1). A hook written without one is refused here with
+/// the signature to write rather than left to fail as a type mismatch inside
+/// generated code. `error` is the transport's hook error, named in the
+/// diagnostic. Called before [`rename_lifecycle_hooks`], while each hook
+/// still has its name.
+pub fn require_hook_results(methods: &[syn::ImplItemFn], hooks: &[&str], error: &str) -> syn::Result<()> {
+    let Some(hook) = methods.iter().find(|method| lacks_result(method, hooks)) else {
+        return Ok(());
+    };
+
+    let name = &hook.sig.ident;
+    let (operation, consequence) = if name == "wire" {
+        ("birth", "fails the birth and whoever asked for the actor is told")
+    } else {
+        ("republish", "refuses the republish and whoever asked for it is told")
+    };
+    Err(syn::Error::new(
+        name.span(),
+        format!(
+            "`{name}` returns the {operation}'s result: write `fn {name}(..) -> Result<(), {error}>` and end it with \
+             `Ok(())`; an `Err` {consequence}"
+        ),
+    ))
+}
+
+/// Whether `method` is one of `hooks` written with no return type.
+fn lacks_result(method: &syn::ImplItemFn, hooks: &[&str]) -> bool {
+    let named = hooks.iter().any(|hook| method.sig.ident == *hook);
+    let unreturning = matches!(method.sig.output, ReturnType::Default);
+    named && unreturning
+}
+
 /// Rename `wire` → `__aether_wire`, `unwire` → `__aether_unwire` and
 /// `on_rehydrate` → `__aether_on_rehydrate` in the given method slice, pushing
 /// `#[allow(clippy::unused_self)]` (via [`allow_abi_receiver`]) onto each
@@ -908,6 +1245,12 @@ pub fn rename_lifecycle_hooks(methods: &mut [syn::ImplItemFn]) -> (bool, bool, b
         if m.sig.ident == "wire" {
             has_wire = true;
             m.sig.ident = syn::Ident::new("__aether_wire", m.sig.ident.span());
+            // `wire` returns the birth's result whether or not this actor's
+            // can fail (ADR-0247 rule 3), which is the `Lifecycle::wire`
+            // signature the forwarder returns through. A hook that only
+            // ever returns `Ok(())` trips `clippy::unnecessary_wraps` on the
+            // now-inherent copy, as the trait-impl method never would.
+            m.attrs.push(syn::parse_quote!(#[allow(clippy::unnecessary_wraps)]));
         } else if m.sig.ident == "unwire" {
             has_unwire = true;
             m.sig.ident = syn::Ident::new("__aether_unwire", m.sig.ident.span());
@@ -919,6 +1262,11 @@ pub fn rename_lifecycle_hooks(methods: &mut [syn::ImplItemFn]) -> (bool, bool, b
             // it trips `clippy::needless_pass_by_value` on the now-inherent
             // copy, as the trait-impl method never did.
             m.attrs.push(syn::parse_quote!(#[allow(clippy::needless_pass_by_value)]));
+            // The hook returns the republish's result whether or not this
+            // actor's can fail (ADR-0249 §1), as `wire` above returns the
+            // birth's: one that only ever returns `Ok(())` trips
+            // `clippy::unnecessary_wraps` on the now-inherent copy.
+            m.attrs.push(syn::parse_quote!(#[allow(clippy::unnecessary_wraps)]));
         } else {
             continue;
         }
@@ -1045,6 +1393,7 @@ pub fn extract_native_actor_handler_kind(
     is_split: bool,
     allow_context: bool,
 ) -> syn::Result<(Type, bool)> {
+    reject_sender_on_unchecked(sig, allow_context)?;
     if !handler_arity_fits(sig, allow_context) {
         return Err(syn::Error::new_spanned(
             sig,
@@ -1082,6 +1431,7 @@ pub fn extract_native_actor_handler_kind(
     {
         return Ok(((*slice.elem).clone(), true));
     }
+    reject_departed_handler(&pt.ty, NATIVE_WATCH_FORM)?;
     Ok(((*pt.ty).clone(), false))
 }
 
@@ -1093,6 +1443,21 @@ fn handler_arity_fits(sig: &Signature, allow_context: bool) -> bool {
     sig.inputs.len() == 3 || (allow_context && sig.inputs.len() == 4)
 }
 
+/// Refuse a sender stated in the ctx type of a handler with no intent word,
+/// which is an unchecked handler (ADR-0231 §11). `allow_context` is set
+/// exactly when the handler has an intent word, whose ctx sender
+/// [`check_intent_signature`] judges.
+fn reject_sender_on_unchecked(sig: &Signature, allow_context: bool) -> syn::Result<()> {
+    if allow_context {
+        return Ok(());
+    }
+    reject_ctx_sender(
+        sig,
+        "`#[handler::unchecked(..)]`",
+        "it gives up the reply check, so the engine has no declared reply to refuse a request through",
+    )
+}
+
 /// Extract `K` from a handler method's third parameter (`arg: K`).
 /// Accepts any type path — trait-bound validation lives in the
 /// generated call site: the `mail.decode_typed::<K>()` in the
@@ -1100,6 +1465,7 @@ fn handler_arity_fits(sig: &Signature, allow_context: bool) -> bool {
 /// so unsupported types surface as a trait-bound error pointing at
 /// the user's signature.
 pub fn extract_handler_kind_type(sig: &Signature, allow_context: bool) -> syn::Result<Type> {
+    reject_sender_on_unchecked(sig, allow_context)?;
     if !handler_arity_fits(sig, allow_context) {
         return Err(syn::Error::new_spanned(
             sig,

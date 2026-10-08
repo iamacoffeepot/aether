@@ -9,18 +9,23 @@ use core::marker::PhantomData;
 use core::num::NonZeroU64;
 use core::ptr;
 
-use aether_data::{Kind, MailboxId, RequestId, Source};
+use aether_data::{Blob, Kind, MailboxId, RequestId, Source};
 
+use crate::asset::{AssetInfo, Assets};
+use crate::blob::guest;
+use crate::instant::Instant;
 use crate::mail::ReplyHandle;
 use crate::model::ctx::Erased;
 use crate::model::ctx::reply_mode::{ReplyMode, Single, Unchecked};
 use crate::model::{
-    Addressable, CallerAddressable, CallerScope, CallerScoped, DependencyResolver, DependsOn, Singleton,
+    Addressable, Anyone, CallerAddressable, CallerScope, CallerScoped, DependencyResolver, DependsOn,
+    SenderRequirement, Singleton,
 };
 use crate::reference::{ActorRef, ErasedActorRef};
-use crate::wasm::bridge::mail;
+use crate::wasm::bridge::{clock, mail};
 use crate::wasm::inline::Registry;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 /// Per-receive (and post-init `wire` / pre-shutdown `unwire`)
 /// capability handle for FFI guests. Exposes send, reply, and
@@ -28,7 +33,7 @@ use alloc::string::String;
 /// position (ADR-0230).
 // The `Wasm` prefix carries the native/wasm split signal; bare `Ctx` loses that.
 #[allow(clippy::module_name_repetitions)]
-pub struct WasmCtx<'a, A = Erased, M: ReplyMode = Single> {
+pub struct WasmCtx<'a, A = Erased, S = Anyone, M: ReplyMode = Single> {
     pub(super) mailbox: u64,
     pub(super) sender: Option<ReplyHandle>,
     /// The inbound source — a proof of whoever sent the mail currently being
@@ -45,8 +50,9 @@ pub struct WasmCtx<'a, A = Erased, M: ReplyMode = Single> {
     pub(super) source: Option<ErasedActorRef>,
     /// Whether this ctx came from a top-level host dispatch. Cluster-drained
     /// in-place dispatches carry no host correlation, so `in_reply_to` must
-    /// not read the outer dispatch's ambient host scalar.
-    host_dispatch: bool,
+    /// not read the outer dispatch's ambient host scalar. A departure notice
+    /// is host mail too, so the watch it ends is asked for only here.
+    pub(super) host_dispatch: bool,
     /// ADR-0114: the per-component inline-child registry the
     /// [`Self::spawn_inline_child`] / [`Self::despawn_inline_child`] verbs
     /// drive. The `export!` membrane threads in the component's emitted
@@ -71,6 +77,12 @@ pub struct WasmCtx<'a, A = Erased, M: ReplyMode = Single> {
     /// receives the erased view. The type default is [`Erased`], for a ctx
     /// built where no actor is in scope.
     _actor: PhantomData<fn() -> A>,
+    /// Phantom marker naming what this ctx's handler requires of its sender
+    /// (ADR-0231 §11), and so what [`Self::sender`] hands out. The `#[actor]`
+    /// arm of a handler that names a protocol here retypes the ctx to it once
+    /// the sender cast passes; every other ctx carries [`Anyone`], the type
+    /// default.
+    _sender: PhantomData<fn() -> S>,
 }
 
 /// The `source` argument to [`WasmCtx::__new`] for a dispatch that carries no
@@ -90,7 +102,7 @@ fn decode_source(source: u64) -> Option<ErasedActorRef> {
     NonZeroU64::new(source).map(|raw| ErasedActorRef::new(MailboxId(raw.get())))
 }
 
-impl<'a> WasmCtx<'a, Erased, Unchecked> {
+impl<'a> WasmCtx<'a, Erased, Anyone, Unchecked> {
     /// Not part of the public API; called only by [`crate::export!`] and
     /// the inline membrane / drain. The runtime builds the most-permissive
     /// [`Unchecked`] view, with the actor [`Erased`] — the entry points run
@@ -115,6 +127,7 @@ impl<'a> WasmCtx<'a, Erased, Unchecked> {
             _borrow: PhantomData,
             _mode: PhantomData,
             _actor: PhantomData,
+            _sender: PhantomData,
         }
     }
 
@@ -134,27 +147,28 @@ impl<'a> WasmCtx<'a, Erased, Unchecked> {
             _borrow: PhantomData,
             _mode: PhantomData,
             _actor: PhantomData,
+            _sender: PhantomData,
         }
     }
 }
 
-impl<'a, A> WasmCtx<'a, A, Unchecked> {
+impl<'a, A, S> WasmCtx<'a, A, S, Unchecked> {
     /// ADR-0112 downgrade-only coercion: view this [`Unchecked`] ctx as a
     /// [`Single`] ctx, dropping the `OutboundReply` surface. The
     /// `#[actor]` macro hands a single-class handler this view, so a
     /// handler whose marker disagrees with its class fails to unify.
     /// There is deliberately no `as_unchecked` — the runtime only ever
-    /// downgrades. Preserves the actor marker `A`.
+    /// downgrades. Preserves the actor marker `A` and the sender marker `S`.
     #[doc(hidden)]
     #[must_use]
-    pub fn as_single(&mut self) -> &mut WasmCtx<'a, A, Single> {
-        // SAFETY: `M` is `PhantomData`-only, so `WasmCtx<'a, A, Unchecked>` and
-        // `WasmCtx<'a, A, Single>` are layout-identical (the marker field is a
+    pub fn as_single(&mut self) -> &mut WasmCtx<'a, A, S, Single> {
+        // SAFETY: `M` is `PhantomData`-only, so `WasmCtx<'a, A, S, Unchecked>` and
+        // `WasmCtx<'a, A, S, Single>` are layout-identical (the marker field is a
         // ZST for every `M` — see `reply_mode_types_are_zsts` and
         // `ffi_ctx_layout_identical_across_modes`). The reborrow swaps the
         // marker without touching any real field and only removes
         // capability, never adds it.
-        unsafe { &mut *ptr::from_mut(self).cast::<WasmCtx<'a, A, Single>>() }
+        unsafe { &mut *ptr::from_mut(self).cast::<WasmCtx<'a, A, S, Single>>() }
     }
 
     /// Accept a returned [`Pending<R>`](super::Pending) receipt. The
@@ -180,7 +194,7 @@ impl<'a, A> WasmCtx<'a, A, Unchecked> {
     }
 }
 
-impl<'a, M: ReplyMode> WasmCtx<'a, Erased, M> {
+impl<'a, S, M: ReplyMode> WasmCtx<'a, Erased, S, M> {
     /// Upgrade this erased ctx to the actor being dispatched (issue 6279).
     /// The `#[actor]` macro calls it with `Self` for a handler or `#[fallback]`
     /// whose signature names its actor — every one that does not spell
@@ -200,32 +214,32 @@ impl<'a, M: ReplyMode> WasmCtx<'a, Erased, M> {
     /// intended callers.
     #[doc(hidden)]
     #[must_use]
-    pub fn __for_actor<A>(&mut self) -> &mut WasmCtx<'a, A, M> {
-        // SAFETY: `A` appears only in `PhantomData`, so `WasmCtx<'a, Erased, M>`
-        // and `WasmCtx<'a, A, M>` are layout-identical for every `A` (see
+    pub fn __for_actor<A>(&mut self) -> &mut WasmCtx<'a, A, S, M> {
+        // SAFETY: `A` appears only in `PhantomData`, so `WasmCtx<'a, Erased, S, M>`
+        // and `WasmCtx<'a, A, S, M>` are layout-identical for every `A` (see
         // `ffi_ctx_layout_identical_across_modes`). The reborrow swaps the
         // marker without touching any real field.
-        unsafe { &mut *ptr::from_mut(self).cast::<WasmCtx<'a, A, M>>() }
+        unsafe { &mut *ptr::from_mut(self).cast::<WasmCtx<'a, A, S, M>>() }
     }
 }
 
-impl<'a, A, M: ReplyMode> WasmCtx<'a, A, M> {
+impl<'a, A, S, M: ReplyMode> WasmCtx<'a, A, S, M> {
     /// Downgrade-only coercion: view this ctx as one that names no actor. A
     /// typed handler — every handler that does not spell [`Erased`] — reaches
     /// an erased-only helper through this. Like [`Self::as_single`] the
     /// coercion only removes capability — the way back up is the macro's
     /// [`Self::__for_actor`].
     #[must_use]
-    pub fn erase(&mut self) -> &mut WasmCtx<'a, Erased, M> {
-        // SAFETY: `A` appears only in `PhantomData`, so `WasmCtx<'a, A, M>` and
-        // `WasmCtx<'a, Erased, M>` are layout-identical for every `A` (see
+    pub fn erase(&mut self) -> &mut WasmCtx<'a, Erased, S, M> {
+        // SAFETY: `A` appears only in `PhantomData`, so `WasmCtx<'a, A, S, M>` and
+        // `WasmCtx<'a, Erased, S, M>` are layout-identical for every `A` (see
         // `ffi_ctx_layout_identical_across_modes`). The reborrow swaps the
         // marker without touching any real field.
-        unsafe { &mut *ptr::from_mut(self).cast::<WasmCtx<'a, Erased, M>>() }
+        unsafe { &mut *ptr::from_mut(self).cast::<WasmCtx<'a, Erased, S, M>>() }
     }
 }
 
-impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
+impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
     pub(super) fn scope_mailbox(&self, scope: CallerScope) -> u64 {
         scope.select(MailboxId(self.mailbox))
     }
@@ -284,18 +298,6 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         ActorRef::new(R::resolve(self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()))
     }
 
-    /// The envelope sender as a proven [`ErasedActorRef`]: mints the dispatch
-    /// source the host stamped, with no lookup. `None` for a sourceless
-    /// dispatch (session / remote-engine / broadcast mail, or a lifecycle
-    /// hook with no inbound). Needs no actor type, so it exists on the
-    /// erased ctx too: a `#[fallback]` runs on the downgraded [`Single`]
-    /// view (issue 2687), and a cluster-membrane interposer reads its lane
-    /// direction there by comparing the sender against a stored child.
-    #[must_use]
-    pub fn sender(&self) -> Option<ErasedActorRef> {
-        self.source
-    }
-
     /// ADR-0063 fail-fast: bring the substrate down with `reason`.
     /// Diverging — does not return. The body `panic!`s; the substrate's
     /// wasm runtime catches the trap and ADR-0063 escalates the
@@ -312,5 +314,59 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     #[allow(clippy::needless_pass_by_value)]
     pub fn fatal_abort(&self, reason: String) -> ! {
         panic!("aether-actor: fatal_abort: {reason}")
+    }
+
+    /// A reading of the engine's actor clock. Subtract an earlier reading
+    /// with [`Instant::since`] to measure how long work took: within one
+    /// engine a later reading is never less than an earlier one, and only
+    /// the difference means anything. An [`Instant`] has no codec, so one
+    /// that outlives the handler is kept in actor state.
+    ///
+    /// The native twin is `aether_substrate::actor::native::NativeCtx::now`,
+    /// which reads the same clock.
+    #[must_use]
+    pub fn now(&self) -> Instant {
+        Instant::new(clock::now_nanos())
+    }
+}
+
+impl<A, S: SenderRequirement, M: ReplyMode> WasmCtx<'_, A, S, M> {
+    /// The envelope sender, as what this ctx's sender requirement `S` hands
+    /// out (ADR-0231 §11).
+    ///
+    /// A reply's sender is the actor that replied, as it is for a native
+    /// handler.
+    ///
+    /// On a ctx that states nothing, which is [`Anyone`], it is a proven
+    /// [`ErasedActorRef`]: the dispatch source the host stamped, minted with
+    /// no lookup, and `None` for a sourceless dispatch (session /
+    /// remote-engine / broadcast mail, or a lifecycle hook with no inbound).
+    /// It needs no actor type, so it exists on the erased ctx too: a
+    /// `#[fallback]` runs on the downgraded [`Single`] view (issue 2687), and
+    /// a cluster-membrane interposer reads its lane direction there by
+    /// comparing the sender against a stored child.
+    ///
+    /// On a ctx whose handler names a protocol `P` as its sender it is the
+    /// [`ProtocolRef<P>`](crate::ProtocolRef) the dispatch arm proved before
+    /// the handler ran, with no `Option` and no cast. Both read the one
+    /// `source` stamp, which is fixed at construction, so the typed reference
+    /// names the position the arm's cast proved.
+    #[must_use]
+    pub fn sender(&self) -> S::Reference {
+        S::__reference(self.source.map(ErasedActorRef::id), |_| true)
+    }
+}
+
+impl<A, S, M: ReplyMode> Assets for WasmCtx<'_, A, S, M> {
+    fn assets(&self) -> &[AssetInfo] {
+        self.inline.assets()
+    }
+
+    fn asset(&mut self, name: &str) -> Option<Vec<u8>> {
+        guest::asset(name)
+    }
+
+    fn asset_blob(&mut self, name: &str) -> Option<Blob> {
+        guest::asset_blob(name)
     }
 }

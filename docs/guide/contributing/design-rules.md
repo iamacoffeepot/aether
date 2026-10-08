@@ -483,6 +483,51 @@ argument of the send, monitor, or close it exists for.
   through an erased reference); #6907 (the rule governs code written
   against the engine, not the core's machinery).
 
+### R-0048: Write an Option only for a lookup that can miss or a value that never existed and never will {#r-0048}
+
+`Option` is allowed in two places: the return of a lookup that can miss, and
+a value fixed when its owner is built and never changed afterwards, where
+`None` says the thing did not exist and will not exist. A value that is
+computed later, or that comes and goes over its owner's life, is never an
+`Option`: state that changes is an enum whose cases are named. Every other
+use is nullable state and is not written:
+
+- a `None` that selects a behaviour ("no holder, so everyone hears") is a
+  named enum case;
+- a slot that is empty at some times and filled at others (a focus holder,
+  a pending request, a cached result) is an enum of its states, never an
+  `Option` that is assigned back and forth;
+- a `None` that means "not yet" (built in `init`, filled in `wire`) is fixed
+  by building the value where it is first available, usually the handler of
+  the actor that already has it;
+- a `None` that means "already used", and the `.take()` that produces it, is
+  removed: the callee refuses a second use itself, or the value is consumed
+  by move;
+- two fields that restate one fact (`held: Option<..>` beside `boot: bool`)
+  are one enum;
+- a value used once is a local or an argument, never a field on a struct
+  that outlives the use;
+- a `None` that pads a fixed array is a length;
+- an `(Option<T>, Result<..>)` pair, or any group of optionals whose
+  combinations are not all meaningful, is an enum of the outcomes that
+  occur;
+- an optional field of a kind that only tests leave empty is required.
+
+Trace an optional to its source before keeping it: if the absent case has no
+caller outside tests, it does not exist. The doc comment of an `Option` that
+stays states its one meaning. A plan lists every state field it adds and
+what each means, and a review checks every `Option` and `.take()` a change
+adds against this rule before the change is shown.
+
+- **Why:** each nullable field is a state machine the compiler does not
+  check, every reader must rediscover which `None` it is looking at, and it
+  usually marks a missing signal or a case that does not exist.
+- **Settled:** 2026-10-06 owner ruling on #7546, #7552, #7530, #7535, and
+  #7513 (a bind gate parked on the desktop driver, a tcp consumer that was
+  optional only for tests, a key reach where `None` meant everyone, a
+  saved-state pair, and a padded lineage order were all sent back); follows
+  [R-0011](#r-0011) and [R-0013](#r-0013).
+
 ## Actors, names, and addressing
 
 ### R-0016: Describe an actor outside its handler only by an actor path {#r-0016}
@@ -525,8 +570,9 @@ stand-in (ADR-0231 §4).
 The typed doors are not all built on `main`. The native `resolve` takes only a
 `ProtocolPath<P>` (`crates/aether-substrate/src/actor/native/ctx/address.rs`),
 and its `ActorPath<R>` arm lands with its first native caller (ADR-0230 §3).
-A guest's `ProtocolPath<P>` decode still lands with ADR-0241; its `resolve`
-over an `ActorPath<R>` is built, `WasmCtx::resolve` (#7205).
+A guest's doors are both built: it decodes a `ProtocolPath<P>` as a native
+actor does, and its `resolve` takes either typed path, `WasmCtx::resolve`
+(#7205, #7501).
 
 - **Why:** an erased path proves to an erased reference, which has no send
   verb, so a path meant for sending carries the type its sends need.
@@ -565,8 +611,9 @@ stand-in (ADR-0231 §4).
 The typed doors are not all built on `main`. The native `resolve` takes only a
 `ProtocolPath<P>` (`crates/aether-substrate/src/actor/native/ctx/address.rs`),
 and its `ActorPath<R>` arm lands with its first native caller (ADR-0230 §3).
-A guest's `ProtocolPath<P>` decode still lands with ADR-0241; its `resolve`
-over an `ActorPath<R>` is built, `WasmCtx::resolve` (#7205).
+A guest's doors are both built: it decodes a `ProtocolPath<P>` as a native
+actor does, and its `resolve` takes either typed path, `WasmCtx::resolve`
+(#7205, #7501).
 
 - **Why:** an erased path proves only to an erased reference, which has no
   send verb, so a path that code written against the engine will send to

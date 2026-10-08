@@ -20,9 +20,9 @@
 //!     capability traits in [`crate::model::ctx`].
 //!   - [`WasmActor`] trait — entry point with the `init` constructor and
 //!     the `wire` / `unwire` / `on_dehydrate` / `on_rehydrate` lifecycle
-//!     hooks (ADR-0101). `init` returns `Result<Self, ActorInitError>` so a
-//!     guest can surface its own error message instead of the panic-hook
-//!     path's generic "guest trapped during init" text.
+//!     hooks (ADR-0101). `init`, `wire`, `on_dehydrate` and `on_rehydrate`
+//!     return an [`ActorInitError`], so a guest surfaces its own error
+//!     message where the panic-hook path has only generic trap text.
 //!   - [`crate::export!`] — `#[no_mangle]` `init` / `receive` /
 //!     lifecycle shims plus the `aether.kinds.inputs` /
 //!     `aether.namespace` custom-section pins.
@@ -50,6 +50,7 @@ use crate::model::{Declared, ListIndex};
 
 pub mod bridge;
 pub mod ctx;
+pub mod decode;
 pub mod inline;
 mod raw;
 
@@ -57,15 +58,19 @@ mod raw;
 // allows mirror the def-site allows on each type.
 #[allow(clippy::module_name_repetitions)]
 pub use ctx::{
-    ActorTypeTag, HasParent, Held, InlineChild, InlineParent, NO_INBOUND_SOURCE, Pending, ResolvePathError, Sends,
-    SpawnError, WasmCtx, WasmDropCtx, WasmInitCtx, WireCtx,
+    ActorTypeTag, Departed, HasParent, Held, InlineChild, InlineParent, NO_INBOUND_SOURCE, Pending, ResolvePathError,
+    Sends, SpawnError, WasmCtx, WasmDropCtx, WasmInitCtx, WireCtx,
 };
 
-/// Error returned by [`Lifecycle::init`](crate::Lifecycle::init) when the actor cannot start
-/// (config parse failure, required handle missing, malformed env var).
-/// The message rides the `init_failed_p32` host fn into the substrate,
-/// which surfaces it in `LoadResult::Err { error }` instead of the
-/// panic-hook path's generic "guest trapped during init" text.
+/// Error returned by each of the four hooks the engine waits on (ADR-0249 §1):
+/// the birth hooks [`Lifecycle::init`](crate::Lifecycle::init) and
+/// [`Lifecycle::wire`](crate::Lifecycle::wire), when the actor cannot start
+/// (config parse failure, required handle missing, a peer that does not
+/// prove), and the replace hooks [`WasmActor::on_dehydrate`] and
+/// [`WasmActor::on_rehydrate`], when the actor cannot save its state or take
+/// it back. The message rides the `init_failed_p32` host fn into the
+/// substrate, which surfaces it in the failed birth's or the refused
+/// republish's answer instead of the panic-hook path's generic trap text.
 ///
 /// Wraps a `Cow<'static, str>` so static-string callers don't allocate
 /// (`ActorInitError::from("config missing")`) while owned strings still flow
@@ -144,7 +149,11 @@ pub trait WasmDispatch<S> {
     /// Returns the dispatch result code the `receive` FFI shim relays.
     /// ADR-0112: the seam carries the most-permissive [`Unchecked`](crate::Unchecked)
     /// view; the synthesized dispatcher downgrades per handler class.
-    fn dispatch(state: &mut S, ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>, mail: crate::Mail<'_>) -> u32;
+    fn dispatch(
+        state: &mut S,
+        ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>,
+        mail: crate::Mail<'_>,
+    ) -> u32;
 }
 
 // Bare `Actor` collides with `model::Actor`; the `Wasm` prefix is the deliberate native-vs-wasm disambiguator.
@@ -177,9 +186,9 @@ pub trait WasmActor:
     /// [`Self::on_rehydrate`] hooks instead of the author hand-writing
     /// them — the save side snapshots `Persist` and frames it via
     /// `save_state_kind`, the restore side decodes it via
-    /// [`PriorState::decode_kind`][crate::PriorState::decode_kind] and boots
-    /// fresh (with a `tracing::warn!`) when a reshaped `Persist` kind no
-    /// longer decodes.
+    /// [`PriorState::decode_kind`][crate::PriorState::decode_kind] and
+    /// returns an error, which refuses the republish, when a reshaped
+    /// `Persist` kind no longer decodes (ADR-0249 §1).
     ///
     /// Named `Persist` (not `State`) since iamacoffeepot/aether#2311 took the
     /// `State` name for the runtime state above; the authoring keyword stays
@@ -195,28 +204,38 @@ pub trait WasmActor:
 
     /// Save-side hot-swap hook (ADR-0040 / ADR-0101). Runs once on the
     /// old instance immediately before a `replace_component` swap, after
-    /// [`Lifecycle::unwire`](crate::Lifecycle::unwire). Default no-op; override to serialize state the
+    /// [`Lifecycle::unwire`](crate::Lifecycle::unwire). The default saves
+    /// nothing and returns `Ok(())`; override to serialize state the
     /// replacement instance recovers through [`Self::on_rehydrate`].
     /// Prefer
     /// [`WasmDropCtx::save_state_kind`][crate::model::ctx::Persistence::save_state_kind]
     /// to let the kind system carry schema identity; reach for the raw
     /// [`WasmDropCtx::save_state`][crate::model::ctx::Persistence::save_state]
     /// only when persisting a non-kind blob or driving an explicit
-    /// migration off the leading id.
+    /// migration off the leading id. Both return the save's error, which the
+    /// hook passes on with `?`.
     ///
     /// Concrete `&mut WasmDropCtx<'_>` — the ctx that carries
-    /// `Persistence::save_state` and outbound mail, with the reply /
-    /// resolve surfaces intentionally absent.
-    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
+    /// `Persistence::save_state` and nothing else: the hook saves and does
+    /// not send (ADR-0249 §8).
+    ///
+    /// # Errors
+    /// When the actor cannot save its state. The republish is refused with
+    /// the error, and this instance keeps running: it is handed back what it
+    /// saved before the error through [`Self::on_rehydrate`]. A hook that
+    /// fails after moving values into its saved state returns them to its
+    /// fields first. A trap here is a bug and aborts the engine (ADR-0249 §2).
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
         let _ = ctx;
+        Ok(())
     }
 
     /// Restore-side hot-swap hook (ADR-0040 / ADR-0101). Runs after
     /// [`Lifecycle::init`](crate::Lifecycle::init) on a freshly-instantiated replacement, if and only
     /// if the predecessor produced a state bundle via
     /// [`Self::on_dehydrate`] (the substrate skips the call when no
-    /// bundle was saved — ADR-0016 §3). Default ignores the prior state;
-    /// override to rehydrate from `prior` (typically
+    /// bundle was saved — ADR-0016 §3). The default ignores the prior state
+    /// and returns `Ok(())`; override to rehydrate from `prior` (typically
     /// [`PriorState::decode_kind`][crate::PriorState::decode_kind]).
     ///
     /// It also runs on the instance that dehydrated, with the bundle that
@@ -230,9 +249,17 @@ pub trait WasmActor:
     /// both restore fields and emit mail to its declared dependencies. Inside
     /// `#[actor]` an override may write `WasmCtx<'_>`, which the macro types
     /// by the actor, or `WasmCtx<'_, Erased>` to receive the erased view.
-    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_, Self>, prior: crate::PriorState<'_>) {
+    ///
+    /// # Errors
+    /// When the actor cannot take the prior state: it does not decode, or a
+    /// reference in it no longer proves. On a replacement the republish is
+    /// refused with the error and the replacement is dropped. On the instance
+    /// that dehydrated, after its replace aborted, the instance closes
+    /// (ADR-0249 §4).
+    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_, Self>, prior: crate::PriorState<'_>) -> Result<(), ActorInitError> {
         let _ = ctx;
         let _ = prior;
+        Ok(())
     }
 }
 
@@ -388,29 +415,56 @@ pub trait ErasedWasmActor {
     /// ADR-0112: the object-safe seam carries the most-permissive
     /// [`Unchecked`](crate::Unchecked) view; the synthesized dispatcher
     /// downgrades per handler class.
-    fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>, mail: crate::Mail<'_>)
-    -> u32;
+    fn erased_dispatch(
+        &mut self,
+        ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>,
+        mail: crate::Mail<'_>,
+    ) -> u32;
 
     /// Forwards to [`Lifecycle::wire`](crate::Lifecycle::wire). The synthesized
     /// impl upgrades the carried erased ctx to the actor, whose lifecycle ctx
     /// is typed by it, and downgrades the [`Unchecked`](crate::Unchecked) view to
-    /// `Single`.
-    fn erased_wire(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>);
+    /// `Single`. The hook's error is the birth's (ADR-0247 rule 3).
+    ///
+    /// # Errors
+    /// The error the actor's `wire` returned.
+    fn erased_wire(
+        &mut self,
+        ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>,
+    ) -> Result<(), ActorInitError>;
 
     /// Forwards to [`Lifecycle::unwire`](crate::Lifecycle::unwire), upgrading
     /// the ctx the same way as [`Self::erased_wire`].
-    fn erased_unwire(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>);
+    fn erased_unwire(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>);
 
     /// Forwards to [`WasmActor::on_dehydrate`].
-    fn erased_on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>);
+    ///
+    /// # Errors
+    /// The error the actor's `on_dehydrate` returned.
+    fn erased_on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError>;
 
     /// Forwards to [`WasmActor::on_rehydrate`], upgrading the ctx the same way
     /// as [`Self::erased_wire`].
+    ///
+    /// # Errors
+    /// The error the actor's `on_rehydrate` returned.
     fn erased_on_rehydrate(
         &mut self,
-        ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>,
+        ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>,
         prior: crate::PriorState<'_>,
-    );
+    ) -> Result<(), ActorInitError>;
+}
+
+/// The error the `#[actor]`-generated `on_rehydrate` returns when prior state
+/// was carried and does not decode as the declared `type State` kind `K`: a
+/// reshaped state kind, whose `K::ID` changed (ADR-0249 §1).
+#[doc(hidden)]
+#[must_use]
+pub fn __state_kind_refused<K: aether_data::Kind>() -> ActorInitError {
+    ActorInitError::from(alloc::format!(
+        "the prior state does not decode as the declared `type State` kind `{}` (a reshaped state kind)",
+        K::NAME
+    ))
 }
 
 /// Stage a guest init-failure message into the substrate via
@@ -1090,8 +1144,11 @@ macro_rules! __export_internal {
         /// scratch layout) before calling. `config_len == 0` passes
         /// through as `&[]` and resolves to the actor's compiled
         /// `Config::default()`. Non-empty bytes are decoded as the
-        /// actor's `Config`; a decode failure stages the message via
-        /// `init_failed_p32` and returns 1.
+        /// actor's `Config` through the guest decode context, so a
+        /// `ProtocolPath` in it is proven against the engine's published
+        /// routes; a decode failure stages the refusal, naming the actor,
+        /// the config kind, and the reason, via `init_failed_p32` and
+        /// returns 1.
         ///
         /// Returns `0` on success and non-zero when the actor's `init`
         /// returned `Err(ActorInitError)` or non-empty config bytes failed
@@ -1125,18 +1182,16 @@ macro_rules! __export_internal {
             let config = if config_len == 0 {
                 <<$component as $crate::Lifecycle<$component>>::Config as ::core::default::Default>::default()
             } else {
-                let Some(config) = <<$component as $crate::Lifecycle<$component>>::Config as $crate::__macro_internals::Kind>::decode_from_bytes(
-                    config_bytes,
-                ) else {
-                    let msg = ::core::concat!(
-                        "guest init: ",
-                        ::core::stringify!($component),
-                        " could not decode Config from bytes",
-                    );
-                    $crate::wasm::stage_init_failure(msg);
-                    return 1;
-                };
-                config
+                let decoded = $crate::wasm::decode::decode_config::<
+                    <$component as $crate::Lifecycle<$component>>::Config,
+                >(<$component as $crate::Addressable>::NAMESPACE, config_bytes);
+                match decoded {
+                    ::core::result::Result::Ok(config) => config,
+                    ::core::result::Result::Err(error) => {
+                        $crate::wasm::stage_init_failure(error.message());
+                        return 1;
+                    }
+                }
             };
             // ADR-0114 addressing amendment: capture the real folded
             // mailbox id the substrate hands the guest as this cluster's
@@ -1159,7 +1214,7 @@ macro_rules! __export_internal {
             // real params bytes over the FFI.
             let params =
                 <<$component as $crate::Lifecycle<$component>>::Params as ::core::default::Default>::default();
-            let mut ctx: $crate::WasmInitCtx<'_> = $crate::WasmInitCtx::__new();
+            let mut ctx: $crate::WasmInitCtx<'_> = $crate::WasmInitCtx::__new(&__AETHER_INLINE);
             match <$component as $crate::Lifecycle<$component>>::init(config, params, &mut ctx) {
                 Ok(instance) => {
                     __AETHER_INLINE.set_entry_actor_tag($crate::ActorTypeTag::of::<$component>());
@@ -1225,8 +1280,26 @@ macro_rules! __export_internal {
             // lifecycle ctx is `WasmCtx<'_, $component>` (= Single), so upgrade
             // it to the actor once, here where it is born, and downgrade.
             let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
-            <$component as $crate::Lifecycle<$component>>::wire(instance, ctx.__for_actor::<$component>().as_single());
-            0
+            let wired =
+                <$component as $crate::Lifecycle<$component>>::wire(instance, ctx.__for_actor::<$component>().as_single());
+            // ADR-0247 rule 3: a failed `wire` fails the birth. The message
+            // crosses the way a failed `init`'s does, and the non-zero code
+            // tells the host to read it. A rebuilt child whose `wire`
+            // refuses fails the export the same way, after running that
+            // child's `unwire`; a trap propagates as a trap does.
+            match wired {
+                Err(err) => {
+                    $crate::wasm::stage_init_failure(err.message());
+                    1
+                }
+                Ok(()) => match $crate::wasm::inline::wire_rebuilt_children(&__AETHER_INLINE) {
+                    Ok(()) => 0,
+                    Err(err) => {
+                        $crate::wasm::stage_init_failure(err.message());
+                        1
+                    }
+                },
+            }
         }
 
         /// # Safety
@@ -1234,9 +1307,15 @@ macro_rules! __export_internal {
         /// (on a replace) or the instance drop, on the dying instance
         /// (issue 584 Phase 2b, ADR-0079 amended). Mail-allowed — live
         /// peers are still addressable; sends to a dead peer warn-drop.
+        ///
+        /// Every inline child that wired runs its `unwire` first, children
+        /// before their parents and deepest first, and the entry actor's
+        /// hook runs last (ADR-0249 §6). The cascade holds no borrow of the
+        /// entry actor, which is taken only once it has returned.
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn unwire(mailbox_id: u64) -> u32 {
+            $crate::wasm::inline::unwire_children(&__AETHER_INLINE);
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
@@ -1378,19 +1457,6 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            // ADR-0114 addressing amendment: the cluster self-identity is the
-            // real folded id captured at `init` / `wire` — the same id
-            // `receive` derives for `WasmCtx`, so a `send::<R>` from the save
-            // hook resolves correctly at any lineage depth. Fall back to
-            // `hash(NAMESPACE)` only before any shim has run.
-            let mailbox_id = {
-                let captured = __AETHER_INLINE.self_id();
-                if captured != 0 {
-                    captured
-                } else {
-                    $crate::__macro_internals::ActorTypeTag::of::<$component>().0
-                }
-            };
             // ADR-0114 §5: run the parent's `on_dehydrate` and every
             // resident inline child's into a single composite, then call
             // the host `save_state` once. With no inline children the
@@ -1401,23 +1467,11 @@ macro_rules! __export_internal {
             // that was then rolled back, is live again in this instance,
             // whether or not its `on_rehydrate` claimed it back.
             __AETHER_INLINE.__revert_dehydrate();
-            let __aether_user_state = $crate::wasm::inline::compose::dehydrate(
-                mailbox_id,
+            let __aether_dehydrated = $crate::wasm::inline::compose::dehydrate(
                 &__AETHER_INLINE,
                 |ctx| <$component as $crate::WasmActor>::on_dehydrate(instance, ctx),
             );
-            // ADR-0243 §6: a held reply that is still live was neither saved
-            // nor answered, so the replace is refused. The state the
-            // dehydrate composed is still saved: the host reinstates this
-            // instance and hands it back through `on_rehydrate`, which
-            // claims the tickets it saved back to live (issue 7125).
-            let __aether_refused = __AETHER_INLINE.__held_unsaved();
-            let __aether_state = __AETHER_INLINE.compose_request_context_state(__aether_user_state);
-            if let Some((version, bytes)) = __aether_state {
-                let mut ctx: $crate::WasmDropCtx<'_> = $crate::WasmDropCtx::__new(mailbox_id, &__AETHER_INLINE);
-                ctx.save_state(version, &bytes);
-            }
-            if __aether_refused { $crate::DEHYDRATE_HELD_UNSAVED } else { 0 }
+            $crate::__export_internal!(@finish_dehydrate __aether_dehydrated)
         }
 
         /// # Safety
@@ -1449,8 +1503,8 @@ macro_rules! __export_internal {
             // childless component the bundle decomposes to the raw parent
             // blob, so the parent sees the identical `PriorState` it would
             // have before. A single-actor module rebuilds `$component` and
-            // its private children; a child of any other type is logged and
-            // skipped.
+            // its private children; a child of any other type fails the
+            // rebuild, and the export returns the first failure.
             let prior_bytes: &[u8] = if len == 0 {
                 &[]
             } else {
@@ -1461,7 +1515,7 @@ macro_rules! __export_internal {
             let (__aether_contexts, __aether_user_version, __aether_user_bytes) =
                 $crate::split_state_envelope(version, prior_bytes);
             __AETHER_INLINE.restore_request_contexts(__aether_contexts);
-            $crate::wasm::inline::compose::reconstruct_inline_children(
+            let __aether_rehydrated = $crate::wasm::inline::compose::reconstruct_inline_children(
                 __aether_user_version,
                 &__aether_user_bytes,
                 &__AETHER_INLINE,
@@ -1484,13 +1538,13 @@ macro_rules! __export_internal {
                         instance,
                         ctx.__for_actor::<$component>().as_single(),
                         parent_prior,
-                    );
+                    )
                 },
                 |registry, parent, child| {
                     $crate::__export_internal!(@reconstruct_child registry, parent, child ; [$component] ; [$($private),*])
                 },
             );
-            0
+            $crate::__export_internal!(@hook_status __aether_rehydrated)
         }
     };
 
@@ -1672,8 +1726,9 @@ macro_rules! __export_internal {
     // validates the replacement module's current placement facts against the
     // effective parent, then re-`init`s the child and restores its state
     // through the parent-aware compose helper. An unmatched or rejected child
-    // returns `false` so the caller logs + skips it; a matched tag that
-    // placement rejects does not fall through to the private types.
+    // is an error naming it, which refuses the republish (ADR-0249 §6); a
+    // matched tag that placement rejects does not fall through to the private
+    // types.
     (@reconstruct_child $registry:ident, $parent:ident, $child:ident ; [$($candidate:ty),+] ; [$($private:ty),*]) => {{
         $(
             if $child.type_tag == $crate::ActorTypeTag::of::<$candidate>().0 {
@@ -1686,20 +1741,49 @@ macro_rules! __export_internal {
             } else
         )*
         {
-            false
+            ::core::result::Result::Err($crate::wasm::inline::compose::unknown_child_type($child))
         }
     }};
 
     (@reconstruct_one $registry:ident, $parent:ident, $child:ident ; $candidate:ty) => {{
-        $crate::wasm::__validate_inline_child_placement(
+        let __aether_placed = $crate::wasm::__validate_inline_child_placement(
             $registry,
             $parent.0,
             $crate::ActorTypeTag($child.type_tag),
             <$candidate>::__AETHER_PLACEMENT,
-        )
-        .is_ok()
-            && $crate::wasm::inline::compose::reconstruct_one_child_at_parent::<$candidate>($registry, $parent, $child)
+        );
+        match __aether_placed {
+            ::core::result::Result::Ok(()) => {
+                $crate::wasm::inline::compose::reconstruct_one_child_at_parent::<$candidate>($registry, $parent, $child)
+            }
+            ::core::result::Result::Err(refusal) => {
+                ::core::result::Result::Err($crate::wasm::inline::compose::placement_refused($child, &refusal))
+            }
+        }
     }};
+
+    // The tail of both `on_dehydrate` exports (ADR-0249 §1): the shared
+    // finish, handed this module's host `save_state`.
+    (@finish_dehydrate $dehydrated:ident) => {{
+        let __aether_finished = $crate::wasm::inline::compose::finish_dehydrate(
+            &__AETHER_INLINE,
+            $dehydrated,
+            |version, bytes| $crate::WasmDropCtx::__new(&__AETHER_INLINE).save_state(version, bytes),
+        );
+        $crate::__export_internal!(@hook_status __aether_finished)
+    }};
+
+    // The return code of a hook export, as the `wire` export gives it: `0`,
+    // or the error's message staged for the host and `1`.
+    (@hook_status $outcome:ident) => {
+        match $outcome {
+            ::core::result::Result::Ok(()) => 0,
+            ::core::result::Result::Err(err) => {
+                $crate::wasm::stage_init_failure(err.message());
+                1
+            }
+        }
+    };
 
     // Resolve one inline child to *spawn* by matching a runtime actor-type
     // tag against the module's exported type set (issue 2692) — the spawn
@@ -1955,13 +2039,36 @@ macro_rules! __export_multi_internal {
             // ADR-0112: the boxed `ErasedWasmActor` seam carries the `Unchecked`
             // view; the synthesized impl downgrades to `Single` per hook.
             let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
-            instance.erased_wire(&mut ctx);
-            0
+            // ADR-0247 rule 3: a failed `wire` fails the birth, reported the
+            // way the single-actor shim reports it. A rebuilt child whose
+            // `wire` refuses fails the export the same way, after running
+            // that child's `unwire`; a trap propagates as a trap does.
+            match instance.erased_wire(&mut ctx) {
+                Err(err) => {
+                    $crate::wasm::stage_init_failure(err.message());
+                    1
+                }
+                Ok(()) => match $crate::wasm::inline::wire_rebuilt_children(&__AETHER_INLINE) {
+                    Ok(()) => 0,
+                    Err(err) => {
+                        $crate::wasm::stage_init_failure(err.message());
+                        1
+                    }
+                },
+            }
         }
 
+        /// # Safety
+        /// Called by the substrate on the dying instance, as the
+        /// single-actor shim's `unwire` is. Every inline child that wired
+        /// runs its `unwire` first, children before their parents and
+        /// deepest first, and the entry actor's hook runs last (ADR-0249
+        /// §6). The cascade holds no borrow of the entry actor, which is
+        /// taken only once it has returned.
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn unwire(mailbox_id: u64) -> u32 {
+            $crate::wasm::inline::unwire_children(&__AETHER_INLINE);
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
                 return 1;
             };
@@ -2088,19 +2195,6 @@ macro_rules! __export_multi_internal {
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
                 return 1;
             };
-            // ADR-0114 addressing amendment: the cluster self-identity is the
-            // real folded id captured at `init` / `wire` — the same id
-            // `receive` derives for `WasmCtx`, so a `send::<R>` from the save
-            // hook resolves correctly at any lineage depth. Fall back to
-            // `hash(namespace)` only before any shim has run.
-            let mailbox_id = {
-                let captured = __AETHER_INLINE.self_id();
-                if captured != 0 {
-                    captured
-                } else {
-                    $crate::__macro_internals::ActorId::singleton(instance.erased_namespace()).0
-                }
-            };
             // ADR-0114 §5: compose the parent + every inline child into one
             // composite, then `save_state` once (the boxed instance's
             // dehydrate routes through `erased_on_dehydrate`). Childless ⇒
@@ -2109,23 +2203,11 @@ macro_rules! __export_multi_internal {
             // that was then rolled back, is live again in this instance,
             // whether or not its `on_rehydrate` claimed it back.
             __AETHER_INLINE.__revert_dehydrate();
-            let __aether_user_state = $crate::wasm::inline::compose::dehydrate(
-                mailbox_id,
+            let __aether_dehydrated = $crate::wasm::inline::compose::dehydrate(
                 &__AETHER_INLINE,
                 |ctx| instance.erased_on_dehydrate(ctx),
             );
-            // ADR-0243 §6: a held reply that is still live was neither saved
-            // nor answered, so the replace is refused. The state the
-            // dehydrate composed is still saved: the host reinstates this
-            // instance and hands it back through `on_rehydrate`, which
-            // claims the tickets it saved back to live (issue 7125).
-            let __aether_refused = __AETHER_INLINE.__held_unsaved();
-            let __aether_state = __AETHER_INLINE.compose_request_context_state(__aether_user_state);
-            if let Some((version, bytes)) = __aether_state {
-                let mut ctx: $crate::WasmDropCtx<'_> = $crate::WasmDropCtx::__new(mailbox_id, &__AETHER_INLINE);
-                ctx.save_state(version, &bytes);
-            }
-            if __aether_refused { $crate::DEHYDRATE_HELD_UNSAVED } else { 0 }
+            $crate::__export_internal!(@finish_dehydrate __aether_dehydrated)
         }
 
         /// # Safety
@@ -2167,7 +2249,7 @@ macro_rules! __export_multi_internal {
             let (__aether_contexts, __aether_user_version, __aether_user_bytes) =
                 $crate::split_state_envelope(version, prior_bytes);
             __AETHER_INLINE.restore_request_contexts(__aether_contexts);
-            $crate::wasm::inline::compose::reconstruct_inline_children(
+            let __aether_rehydrated = $crate::wasm::inline::compose::reconstruct_inline_children(
                 __aether_user_version,
                 &__aether_user_bytes,
                 &__AETHER_INLINE,
@@ -2184,13 +2266,13 @@ macro_rules! __export_multi_internal {
                         )
                     }
                     .__with_registry(&__AETHER_INLINE);
-                    instance.erased_on_rehydrate(&mut ctx, parent_prior);
+                    instance.erased_on_rehydrate(&mut ctx, parent_prior)
                 },
                 |registry, parent, child| {
                     $crate::__export_internal!(@reconstruct_child registry, parent, child ; [$($component),+] ; [$($private),*])
                 },
             );
-            0
+            $crate::__export_internal!(@hook_status __aether_rehydrated)
         }
     };
 
@@ -2201,22 +2283,22 @@ macro_rules! __export_multi_internal {
         let config = if $config_bytes.is_empty() {
             <<$ty as $crate::Lifecycle<$ty>>::Config as ::core::default::Default>::default()
         } else {
-            let Some(config) = <
-                <$ty as $crate::Lifecycle<$ty>>::Config as $crate::__macro_internals::Kind
-            >::decode_from_bytes($config_bytes) else {
-                $crate::wasm::stage_init_failure(::core::concat!(
-                    "guest init: ",
-                    ::core::stringify!($ty),
-                    " could not decode Config from bytes",
-                ));
-                return 1;
-            };
-            config
+            let decoded = $crate::wasm::decode::decode_config::<<$ty as $crate::Lifecycle<$ty>>::Config>(
+                <$ty as $crate::Addressable>::NAMESPACE,
+                $config_bytes,
+            );
+            match decoded {
+                ::core::result::Result::Ok(config) => config,
+                ::core::result::Result::Err(error) => {
+                    $crate::wasm::stage_init_failure(error.message());
+                    return 1;
+                }
+            }
         };
         // ADR-0156 §2: empty params for now — resolve `Params` to its
         // compiled default, mirroring the empty-config path above.
         let params = <<$ty as $crate::Lifecycle<$ty>>::Params as ::core::default::Default>::default();
-        let mut ctx: $crate::WasmInitCtx<'_> = $crate::WasmInitCtx::__new();
+        let mut ctx: $crate::WasmInitCtx<'_> = $crate::WasmInitCtx::__new(&__AETHER_INLINE);
         match <$ty as $crate::Lifecycle<$ty>>::init(config, params, &mut ctx) {
             ::core::result::Result::Ok(instance) => {
                 __AETHER_INLINE.set_entry_actor_tag($crate::ActorTypeTag::of::<$ty>());

@@ -59,6 +59,33 @@
 > stages remain empty signals; per-frame application state still rides its own
 > mail rather than widening lifecycle payloads.
 
+> **Amendment (2026-10-06, issue 7507).** `Tick` carries two fields: the
+> frame's `delta_micros: u32` and `elapsed_micros: u64`, the game time since
+> boot with this frame included, so a subscriber counts a frame's whole steps
+> and the leftover fraction from the one mail (`Tick::steps`) with no state of
+> its own. One stage carries time; there is no second stage for fixed steps.
+> - The lifecycle capability owns the total. It adds exactly the delta its
+>   driver states, once, on the advance that broadcasts `Tick`, and applies no
+>   limit of its own. A driver passes one frame's delta on every advance of
+>   that frame; only the `Tick` advance counts it, and an advance the
+>   capability drops is not counted. `delta_micros` is still a copy of the
+>   advance's, and it is always the growth of `elapsed_micros`.
+> - The total is game time: on desktop, wall time between frames with each
+>   frame's share limited; on headless, the number of `Tick`s broadcast times
+>   the timer period, which runs slow against the wall clock when a frame
+>   overruns; in a harness, the sum of the stated durations, exactly.
+> - The desktop driver, the one driver that measures time, limits the interval
+>   it measured before it states it, through its own knob
+>   (`AETHER_DESKTOP_MAX_FRAME_DELTA_MICROS`, default 250,000). On a limited
+>   frame game time slows and no step is skipped. Headless and the harnesses
+>   state a delta and are never limited.
+> - `Tick` is wire-encoded, no longer cast-shaped, and its kind id changes:
+>   every component built before the change is refused at subscribe as an
+>   undeclared stage (§7) until it is rebuilt.
+> - The graph and the stage list are unchanged. The 2026-06-05 rule that
+>   per-frame application data rides its own mail still holds: the total is
+>   the clock's own state.
+
 ## Context
 
 The chassis lifecycle today — `init` → repeated (`tick` → `render` → `present`) → `shutdown` — is encoded in hand-written driver code per chassis (`crates/aether-substrate-bundle/src/{desktop,headless,hub,test_bench}/`). ADR-0074 §Decision 5 layered a single `FRAME_BARRIER: bool` const on every actor to mark "drains within the per-frame barrier vs runs free," and that const is the only first-class structure naming the frame. Everything else — what stages exist, what they emit, what order they fire — is implicit.

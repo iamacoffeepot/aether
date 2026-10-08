@@ -12,13 +12,13 @@ process profiles, binaries, packaging     aether-chassis, aether-chassis-*
 operator bridge                                       aether-mcp
 test harnesses                                        aether-harness-*
 procedural macros                                     *-derive crates
-reusable guest actors shipped with the engine        aether-kit, aether-widget
+reusable guest actors shipped with the engine        aether-kit
 journal-driven programs and reactors (bloomery)      aether-bloomery-*
 ```
 
-The list is also the order to read it in. Everything above `aether-kit` and
-`aether-widget` is the engine; the remaining rows hold consumers that happen
-to live in the same workspace.
+The list is also the order to read it in. Everything above `aether-kit` is
+the engine; the remaining rows hold consumers that happen to live in the same
+workspace.
 
 ## Foundation crates
 
@@ -50,15 +50,15 @@ compares this with native capabilities.
 | Crate | Owns |
 |---|---|
 | `aether-substrate` | registry, rings, dispatch, scheduler, native/wasm actor hosts, settlement, chassis traits |
-| `aether-render`, `aether-text`, `aether-audio` | draw queues and the wgpu pipeline, font layout and the glyph atlas, the synth and instrument banks |
+| `aether-render`, `aether-audio` | draw queues, the wgpu pipeline, font layout and the glyph atlas; the synth and instrument banks |
 | `aether-fs`, `aether-clipboard`, `aether-window` | namespaced file I/O, text clipboard, multi-window lifecycle/control, and selector-aware window-event subscriptions |
 | `aether-http`, `aether-http-derive`, `aether-tcp`, `aether-rpc` | HTTP egress and ingress with its typed route macros, TCP listeners and sessions, framed process RPC |
 | `aether-process` | deny-by-default, allowlisted one-shot subprocess execution and captured typed replies (Accepted ADR-0157) |
 | `aether-component`, `aether-lifecycle`, `aether-inventory`, `aether-trace` | wasm component hosting and the trampoline, frame stages, live name/kind lookup, causal-tree evidence |
 | `aether-fleet` | hub fleet supervision and the content-addressed artifact store |
 | `aether-chassis` | shared chassis composition: boot fragments, config registry, CLI roots, autoload, boot-manifest and package-depot formats |
-| `aether-chassis-desktop` / `aether-chassis-headless` / `aether-chassis-hub` / `aether-chassis-harness` / `aether-chassis-bloomery` | the five checked-in chassis binaries |
-| `aether-substrate-harness-cap` | the `aether.substrate_harness` mailbox the harness chassis drives ticks through; no other chassis composes it |
+| `aether-chassis-desktop` / `aether-chassis-headless` / `aether-chassis-hub` / `aether-chassis-bloomery` | the four checked-in chassis binaries |
+| `aether-substrate-harness-cap` | the `aether.substrate_harness` mailbox the in-process substrate harness advances ticks through; no chassis binary composes it |
 | `aether-harness-substrate` | composable in-process substrate harness with deterministic mail, lifecycle, and settlement control |
 | `aether-harness-substrate-capture` | opt-in render/GPU capture and visual comparison support layered onto the core substrate harness |
 | `aether-harness-fleet` | real-process hub/RPC/headless fleet scenarios over raw framed calls |
@@ -76,13 +76,12 @@ server.
 | Crate | Owns |
 |---|---|
 | `aether-kit` | common standalone reference actors: camera + camera-controller, mesh viewer |
-| `aether-widget` | reusable widget set and the `EditorShell` composition arbiter |
 | `aether-mesh` | mesh DSL, parsing/serialization, cleanup, polygon tessellation, surface nets, shared eye-facing stroke ribbon geometry |
 | `aether-demo` | the release demo: its bring-up component (`aether.demo`, which sends the kit mesh viewer its load at boot), depot spec, boot manifest, and controller config |
 
 These crates are valuable examples, but “in tree” does not mean “native.” The
-`aether-kit` and `aether-widget` crates are actor code hosted by the same
-component machinery available to other guest modules.
+`aether-kit` crate is actor code hosted by the same component machinery
+available to other guest modules.
 
 ## Bloomery crates
 
@@ -133,6 +132,7 @@ uses the nightly fuzzing toolchain.
 | `docs/guide/` | this mdBook source |
 | `.agents/skills/` | current Codex repository workflows |
 | `.claude/skills/` | the Claude Code workflows |
+| `.claude/agents/` | Claude Code agent types the workflows dispatch, such as `implementer` |
 | `.codex/` | Codex MCP configuration and hook wiring |
 | `.hooks/` | local guardrail hook scripts, wired by `.claude/settings.json` and `.codex/hooks.json` |
 | `.github/workflows/` | hosted CI, review, reconciliation, and release jobs |
@@ -148,7 +148,7 @@ uses the nightly fuzzing toolchain.
 | Add an MCP operation | `aether-mcp/src/tools` and `args.rs` | underlying capability kinds and hub RPC behavior |
 | Change one-shot subprocess execution | `aether-process` | chassis installation, allowlist/confinement config, settlement behavior |
 | Change in-process or real-process test support | `aether-harness-substrate`, `aether-harness-substrate-capture`, `aether-harness-fleet`, or `aether-harness-bloomery` | the consuming scenario's chassis and artifact requirements |
-| Add a reusable guest actor | `aether-kit`, `aether-widget`, or a new component crate | `aether-actor`, export/cardinality rules |
+| Add a reusable guest actor | `aether-kit` or a new component crate | `aether-actor`, export/cardinality rules |
 | Change a process profile | `aether-chassis-<chassis>` | config layers, linked capabilities, packaging |
 | Change a wire shape | owning kind plus `aether-data`/`aether-codec` | compatibility fixtures and any RPC framing |
 

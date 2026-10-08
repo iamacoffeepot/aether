@@ -41,7 +41,6 @@ fn spawn_under(harness: &mut SubstrateHarness, label: &str, parent: &str) -> Spa
         key: Some("k".to_owned()),
         parent: Some(ErasedActorPath::new(parent).expect("a valid parent path")),
         config: Vec::new(),
-        code: None,
     };
     let host = harness.actor_ref::<ComponentHostCapability>();
     let result =
@@ -177,11 +176,12 @@ impl NativeActor for HeldParent {
         Ok(Self { hatches: 0 })
     }
 
-    fn wire(_state: &mut Self, _ctx: &mut NativeCtx<'_>) {
+    fn wire(_state: &mut Self, _ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         let (gate, changed) = &GATE;
         gate.lock().expect("gate lock").entered = true;
         changed.notify_all();
         drop(changed.wait_while(gate.lock().expect("gate lock"), |state| !state.open).expect("gate lock"));
+        Ok(())
     }
 
     /// Never sent here: an actor declares at least one handler.

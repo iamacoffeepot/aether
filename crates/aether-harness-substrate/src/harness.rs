@@ -8,8 +8,7 @@
 //! as [`EgressEvent`]s so the test thread can correlate them to its
 //! requests by `correlation_id`.
 //!
-//! The chassis-control handler is the same one the binary uses — it pushes
-//! `Advance` events onto the events channel. `SubstrateHarness::advance`
+//! The chassis-control handler pushes `Advance` events onto the events channel. `SubstrateHarness::advance`
 //! drains the queue (which lets the handler run), pumps any pending events
 //! through `run_frame` synchronously, then drains the loopback for the
 //! matching reply. Capture is mail-driven inside the pumped render actor;
@@ -54,6 +53,7 @@ use aether_substrate::chassis::settlement::{
 use aether_substrate::config::{ConfigMember, SettlementConfig};
 #[cfg(test)]
 use aether_substrate::mail::MailboxId;
+use aether_substrate::runtime::actor_clock::{ActorClock, SteppedClock};
 use aether_substrate::{
     Builder, ChassisTarget, ChildRefused, EgressEvent, NativeActor, PassiveChassis, ReplyTarget, RingCapacities,
     RouteReadProbe, SchedulerTuning, SubstrateBoot, mail::MailId,
@@ -69,7 +69,7 @@ use super::chassis::{
 use aether_substrate_harness_cap::events::{ChassisEvent, EventReceiver, channel as event_channel};
 use std::error;
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, after, select};
 
 /// A reply source's wake: sends [`PumpWake::Mail`] on the harness's one wake
 /// channel. The source fires it after it enqueues, so the pump loop woken by
@@ -149,6 +149,12 @@ pub enum SubstrateHarnessError {
         protocol: &'static str,
         path: Option<ErasedActorPath>,
     },
+    /// The engine fatally aborted while the harness waited on a reply
+    /// (ADR-0063): a guest trapped where the engine cannot go on without it,
+    /// or a native handler panicked. Carries the abort's reason. The thread
+    /// that owed the reply is gone, so no later wait on this harness can be
+    /// answered, and its teardown reports the abort.
+    FatalAbort(String),
     SettlementTimeout {
         /// The sent mail's kind, as the registry labels it.
         kind: String,
@@ -180,6 +186,7 @@ impl fmt::Display for SubstrateHarnessError {
             Self::CastRefused { protocol, path: None } => {
                 write!(f, "a reference with no retained path does not answer the protocol {protocol}")
             }
+            Self::FatalAbort(reason) => write!(f, "the engine fatally aborted: {reason}"),
             Self::SettlementTimeout { kind, pending } => write!(
                 f,
                 "send of {kind} did not settle before the patience backstop — a genuine deadlock/livelock in the chain (a healthy chain never reaches this cap); pending roots: {pending}",
@@ -333,6 +340,9 @@ pub struct SubstrateHarnessBuilder {
     component_host: ComponentHostMode,
     compose: Vec<ComposeFn>,
     scheduler_tuning: SchedulerTuning,
+    /// The clock this harness's engine is built with: running unless the
+    /// test supplied a [`SteppedClock`] through [`Self::clock`].
+    clock: ActorClock,
 }
 
 impl Default for SubstrateHarnessBuilder {
@@ -350,6 +360,7 @@ impl Default for SubstrateHarnessBuilder {
             component_host: ComponentHostMode::Absent,
             compose: Vec::new(),
             scheduler_tuning: SchedulerTuning::default(),
+            clock: ActorClock::running(),
         }
     }
 }
@@ -453,11 +464,25 @@ impl SubstrateHarnessBuilder {
         self
     }
 
+    /// Build this harness's engine on a clock the test moves by hand, so a
+    /// scenario over code that measures time with `ctx.now()` asserts an
+    /// exact duration. The test keeps its own clone of `stepped` and calls
+    /// [`SteppedClock::step`] on it: every `ctx.now()` in this engine, guest
+    /// or native, then reads the stepped value. Holding that clone is what
+    /// shows the harness was built stepped, so the harness itself has no step
+    /// method. Without this call the engine reads real elapsed time, as every
+    /// chassis does. Trace and cost timestamps are real either way.
+    #[must_use]
+    pub fn clock(mut self, stepped: SteppedClock) -> Self {
+        self.clock = ActorClock::stepped(stepped);
+        self
+    }
+
     /// Compose an arbitrary capability into this harness. The harness boots
-    /// its basics (trace dispatch, the harness cap, lifecycle, synthetic
+    /// its basics (trace dispatch, inventory, the harness cap, lifecycle, synthetic
     /// window) and each scenario composes exactly the caps it
     /// needs on top (issue #3764); this is the generic surface for any
-    /// cap without boot-internal wiring — `harness.with_actor::<TextCapability>(())`,
+    /// cap without boot-internal wiring — `harness.with_actor::<AudioCapability>(())`,
     /// a scenario-local `NativeActor`, and so on. Applied to the chassis builder
     /// in push order, between the harness basics and lifecycle.
     ///
@@ -471,7 +496,7 @@ impl SubstrateHarnessBuilder {
     /// use aether_actor::{Addressable, ChildOf, Lifecycle, Many, One};
     /// use aether_data::KindId;
     /// use aether_harness_substrate::SubstrateHarnessBuilder;
-    /// use aether_substrate::{BootError, Dispatch, Unchecked, NativeActor, NativeCtx, NativeInitCtx};
+    /// use aether_substrate::{Anyone, BootError, Dispatch, Unchecked, NativeActor, NativeCtx, NativeInitCtx};
     ///
     /// struct Parent;
     /// impl Addressable for Parent {
@@ -499,7 +524,7 @@ impl SubstrateHarnessBuilder {
     /// impl Dispatch<Self> for ChildOnly {
     ///     fn dispatch(
     ///         _: &mut Self,
-    ///         _: &mut NativeCtx<'_, Self, Unchecked>,
+    ///         _: &mut NativeCtx<'_, Self, Anyone, Unchecked>,
     ///         _: KindId,
     ///         _: &[u8],
     ///     ) -> Option<()> {
@@ -669,6 +694,7 @@ impl SubstrateHarness {
             component_host,
             compose,
             scheduler_tuning,
+            clock,
         } = builder;
 
         // Lower the per-field `Option` overrides onto the `Copy`
@@ -698,7 +724,7 @@ impl SubstrateHarness {
         // the loopback recorder and the render slot each fire it after they
         // enqueue.
         let (wake_tx, wake_rx) = crossbeam_channel::unbounded::<PumpWake>();
-        let (events_tx, events_rx) = event_channel(Some(mail_wake(&wake_tx)));
+        let (events_tx, events_rx) = event_channel(mail_wake(&wake_tx));
         let observed_kinds = Arc::new(Mutex::new(Vec::<KindId>::new()));
 
         // ADR-0161 slice R4: the pumped render slot is booted in the build's
@@ -710,8 +736,7 @@ impl SubstrateHarness {
         let render_assets_dir = namespace_roots.as_ref().map(|roots| roots.assets.clone());
 
         // ADR-0071 phase 6: substrate boot + every cap goes through
-        // `SubstrateHarnessChassis::build_passive` — the same path the
-        // binary uses. Io is part of the chain when
+        // `SubstrateHarnessChassis::build_passive`. Io is part of the chain when
         // `namespace_roots` is supplied and pre-validation passes;
         // the chassis warns and skips Io otherwise. Tests that care
         // about io supply tempdir roots through
@@ -721,6 +746,7 @@ impl SubstrateHarness {
             pool_workers,
             ring_capacities,
             scheduler_tuning,
+            clock,
             observed_kinds: Some(Arc::clone(&observed_kinds)),
             events_tx,
             namespace_roots,
@@ -938,7 +964,7 @@ impl SubstrateHarness {
     }
 
     /// `actor`'s per-handler cost rows (ADR-0036), what the `actor_cost` MCP tool reports.
-    /// Consumers: `aether-substrate/tests/cost_table.rs`, `aether-widget/tests/widget_actor_cost.rs`.
+    /// Consumers: `aether-substrate/tests/cost_table.rs`, `aether-render/tests/actor_draw_cost_scenario.rs`.
     #[must_use]
     pub fn actor_cost(&self, actor: ErasedActorRef) -> CostTailResult {
         self.passive.actor_cost(actor, &CostTail { kind: None })
@@ -1173,8 +1199,8 @@ impl SubstrateHarness {
                         .and_then(|reply| TraceTailResult::decode_from_bytes(&reply))
                 })
             };
-            if let Some(TraceTailResult::Ok { entries, .. }) = result {
-                walk.absorb(entries);
+            if let Some(TraceTailResult::Ok { entries, truncated_before, .. }) = result {
+                walk.absorb(mailbox, entries, truncated_before);
             }
         }
         walk.finish_with(|tid| thread_name::resolve(tid.0))
@@ -1505,6 +1531,7 @@ impl SubstrateHarness {
         // on a dispatcher hop + compile when N test binaries run in
         // parallel); `Duration::MAX` (the no-cap sentinel) waits forever.
         let stall_deadline = self.settlement_cap;
+        let aborted = self.passive.fatal_abort_tripwire();
 
         let mut last_progress = Instant::now();
         let mut iterations = 0u32;
@@ -1589,20 +1616,33 @@ impl SubstrateHarness {
                 continue;
             }
 
+            // An abort unwound the thread that owed the reply, so nothing is
+            // left to send it: report the abort's reason where the stall
+            // budget would otherwise run out on a bare timeout.
+            if let Some(reason) = self.passive.fatal_abort_reason() {
+                return Err(SubstrateHarnessError::FatalAbort(reason));
+            }
+
             let remaining = stall_deadline.saturating_sub(last_progress.elapsed());
             if remaining.is_zero() {
                 return Err(SubstrateHarnessError::Timeout { expected, pumped_iterations: iterations });
             }
-            let woke = if stall_deadline == Duration::MAX {
-                self.wake_rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
+            let budget = if stall_deadline == Duration::MAX {
+                crossbeam_channel::never()
             } else {
-                self.wake_rx.recv_timeout(remaining)
+                after(remaining)
             };
-            // A wake loops back to empty the rest of the queue and drain; a
-            // timeout loops back to the budget check above, which reports it.
-            // A disconnect means every source's wake is gone, so no reply can
+            // A wake loops back to empty the rest of the queue and drain; an
+            // abort loops back to the check above, which reports it; a
+            // timeout loops back to the budget check, which reports it. A
+            // disconnect means every source's wake is gone, so no reply can
             // arrive.
-            if woke == Err(RecvTimeoutError::Disconnected) {
+            let woke = select! {
+                recv(self.wake_rx) -> woke => woke.is_ok(),
+                recv(aborted) -> _ => true,
+                recv(budget) -> _ => true,
+            };
+            if !woke {
                 return Err(SubstrateHarnessError::Timeout { expected, pumped_iterations: iterations });
             }
         }
@@ -1636,8 +1676,7 @@ impl SubstrateHarness {
         }
     }
 
-    /// Run one chassis event. Mirrors what the binary's events loop
-    /// does — but inline on the test thread instead of on a worker.
+    /// Run one chassis event. Runs inline on the test thread.
     ///
     /// Returns the error `run_frame`'s per-tick advance produces if the
     /// chain never settles: a `Timeout` waiting on the driver's
@@ -1651,29 +1690,15 @@ impl SubstrateHarness {
     /// in a stuck state and the test should fail loudly. On success the
     /// reply goes through that guard, which answers every sender kind and
     /// holds the request's chain open until the ticks complete.
-    // `event` is owned because the match destructures it; clippy
-    // doesn't track the partial-move via the `Advance { reply, .. }`
-    // pattern.
-    #[allow(clippy::needless_pass_by_value)]
     fn dispatch_event(&mut self, event: ChassisEvent) -> Result<(), SubstrateHarnessError> {
-        match event {
-            ChassisEvent::Advance { reply, ticks, delta_micros } => {
-                for _ in 0..ticks {
-                    self.frame += 1;
-                    self.run_frame(delta_micros)?;
-                }
-                reply.reply(&AdvanceResult::Ok { ticks_completed: ticks });
-            }
-            ChassisEvent::RenderMail => {
-                // In-process the pump loop in `pump_until_event` drains the
-                // slot every iteration, so this wake variant is never sent to
-                // the in-process harness (only the standalone binary installs
-                // the render wake). Draining here is harmless and honest.
-                if let Some(hook) = self.hook.as_mut() {
-                    hook.pump();
-                }
-            }
+        let ChassisEvent::Advance { reply, ticks, delta_micros } = event;
+
+        for _ in 0..ticks {
+            self.frame += 1;
+            self.run_frame(delta_micros)?;
         }
+        reply.reply(&AdvanceResult::Ok { ticks_completed: ticks });
+
         Ok(())
     }
 
@@ -2082,7 +2107,9 @@ mod tests {
             type Resolver = aether_actor::Many;
         }
         impl Root for Child {}
-        impl HandlesKind<Bump> for Child {}
+        impl HandlesKind<Bump> for Child {
+            type Sender = aether_actor::Anyone;
+        }
         impl aether_actor::Lifecycle<Self> for Child {
             type Config = Arc<AtomicU32>;
             type Params = ();
@@ -2104,7 +2131,7 @@ mod tests {
         impl Dispatch<Self> for Child {
             fn dispatch(
                 state: &mut Self,
-                _ctx: &mut NativeCtx<'_, Self, aether_substrate::Unchecked>,
+                _ctx: &mut NativeCtx<'_, Self, aether_substrate::Anyone, aether_substrate::Unchecked>,
                 kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {

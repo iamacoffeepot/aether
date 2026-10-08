@@ -5,13 +5,15 @@
 //! through the JSON boot-manifest path, **no hub and no RPC server**, and
 //! asserts the component's trampoline is live when `build` returns: a
 //! `BootManifest` of file paths → `boot_manifest_autoload` →
-//! `AutoloadComponent` → one `Publish` of its module and one `Spawn` per
-//! instance key, each bringing the module's code, awaited to `Ok` → live
+//! `AutoloadComponent` → one `Publish` of its module then one `Spawn` per
+//! instance key with no per-spawn bytes, awaited to `Ok` → live
 //! trampoline (issue #6413, issue #7155). This is the reader a `spawn_substrate` carrying a component list
 //! drives through `AETHER_BOOT_MANIFEST`. A boot component that fails to
-//! load fails the build, and so does an entry naming no export of a module
+//! load fails the build, as does one whose `wire` returns an error, and so
+//! does an entry naming no export of a module
 //! that exports several; a `replicas: N` entry spawns N counter-keyed
-//! instances behind the one publish.
+//! instances behind the one publish. A package whose manifest names an object
+//! its store does not hold fails the build too (issue 7631).
 //!
 //! The probe test is skipped when the probe wasm isn't pre-built (no wgpu
 //! gate — the headless chassis needs no adapter); `AETHER_REQUIRE_RUNTIME=1`
@@ -30,10 +32,14 @@ use std::path::Path;
 
 use aether_chassis::autoload::{AutoloadComponent, boot_manifest_autoload};
 use aether_chassis::boot::{
-    ActorRingConfig, ChassisBase, ChassisBootConfig, CommonEnv, RegistryQueueConfig, RuntimeConfig,
+    ActorRingConfig, ChassisBase, ChassisBootConfig, CommonEnv, ObjectSource, RegistryQueueConfig, RuntimeConfig,
     SchedulerTuningConfig, SettlementConfig,
 };
 use aether_chassis::boot_manifest::ChassisSettings;
+use aether_chassis::package::{
+    NamedObject, NamespacePath, PackageBoot, PackageManifest, Sha256, encode_manifest, package_autoload,
+    package_objects_root,
+};
 use aether_chassis_headless::HeadlessChassis;
 use aether_data::ErasedActorPath;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, locate_component_wasm, test_namespace_roots};
@@ -59,6 +65,15 @@ mod tests {
 
     /// The hub-less headless env over `sandbox` that boots `autoload`.
     fn headless_env(sandbox: &Path, autoload: Vec<AutoloadComponent>) -> CommonEnv {
+        headless_env_reading(sandbox, autoload, ObjectSource::Directory)
+    }
+
+    /// The same env, with the `objects` namespace reading `object_source`.
+    fn headless_env_reading(
+        sandbox: &Path,
+        autoload: Vec<AutoloadComponent>,
+        object_source: ObjectSource,
+    ) -> CommonEnv {
         CommonEnv {
             base: ChassisBase {
                 sources: default_sources(),
@@ -68,6 +83,7 @@ mod tests {
                 settlement: SettlementConfig::default(),
             },
             namespace_roots: test_namespace_roots(sandbox),
+            object_source,
             runtime: RuntimeConfig::default(),
             chassis_boot: ChassisBootConfig::default(),
             autoload,
@@ -199,6 +215,43 @@ mod tests {
     }
 
     #[test]
+    fn boot_component_whose_wire_fails_fails_the_build() {
+        // A boot entry whose guest returns an error from `wire` must fail
+        // the build with the guest's message (ADR-0247 rule 3); the bug this
+        // catches is the loader counting it loaded, with the instance live
+        // and unwired.
+        let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
+        let Some(wasm_path) = locate_component_wasm("aether_test_fixtures_bundle") else {
+            assert!(
+                !strict,
+                "AETHER_REQUIRE_RUNTIME set but probe.wasm not pre-built; \
+                 CI's `Pre-build component wasm for scenario tests` step is missing it",
+            );
+            eprintln!(
+                "skipping: probe.wasm not built; \
+                 run `cargo build --target wasm32-unknown-unknown -p aether-test-fixtures-bundle`",
+            );
+            return;
+        };
+
+        // The sandbox is shared per process, so this test's manifest carries
+        // its own name.
+        let sandbox = init_save_sandbox("headless-runtime-manifest");
+        let manifest_path = sandbox.join("wire-refuser-boot-manifest.json");
+        let manifest_json = serde_json::json!({
+            "components": [{ "wasm": wasm_path, "export": "test.wire_refuser" }],
+        });
+        fs::write(&manifest_path, serde_json::to_vec(&manifest_json).expect("serialize boot manifest"))
+            .expect("write boot manifest");
+
+        let autoload = boot_manifest_autoload(&manifest_path).expect("read boot manifest");
+        let error = HeadlessChassis::build(headless_env(sandbox, autoload))
+            .expect_err("a boot component whose wire fails must fail the build")
+            .to_string();
+        assert!(error.contains("wire refused"), "the build error must carry the guest's message: {error}");
+    }
+
+    #[test]
     fn boot_component_that_fails_to_load_fails_the_build() {
         // A boot entry whose bytes are not wasm must fail the build, naming
         // the entry, rather than leave a half-booted engine running.
@@ -218,5 +271,30 @@ mod tests {
         let error = HeadlessChassis::build(headless_env(sandbox, autoload))
             .expect_err("a boot component that fails to load must fail the build");
         assert!(error.to_string().contains("broken"), "the build error must name the failing entry: {error}");
+    }
+
+    #[test]
+    fn package_whose_named_object_is_absent_fails_the_build() {
+        // A package's manifest names an object boot does not load, and the
+        // install is missing its file. The bug this catches is a chassis
+        // that hands the fs cap no table, or an fs cap whose check does not
+        // reach the boot: either comes up clean and fails at whatever moment
+        // an actor first reads the path.
+        let package = init_save_sandbox("headless-runtime-manifest").join("truncated-package");
+        fs::create_dir_all(package_objects_root(&package)).expect("create the package's object store");
+        let path = NamespacePath::new("modules/late.wasm").expect("a well-formed path");
+        let manifest = PackageManifest {
+            settings: ChassisSettings::default(),
+            entries: Vec::new(),
+            named: [(path, NamedObject { sha256: Sha256([0x5a; 32]), size: 12 })].into(),
+        };
+        fs::write(package.join("pack").join("manifest"), encode_manifest(&manifest)).expect("write the manifest");
+
+        let PackageBoot { components, named, .. } = package_autoload(&package).expect("the manifest itself reads");
+        let object_source = ObjectSource::Package { root: package_objects_root(&package), named };
+        let error = HeadlessChassis::build(headless_env_reading(&package, components, object_source))
+            .expect_err("a package missing a named object must fail the build")
+            .to_string();
+        assert!(error.contains("modules/late.wasm"), "the build error must name the object's path: {error}");
     }
 }

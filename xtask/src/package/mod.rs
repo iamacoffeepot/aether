@@ -1,13 +1,15 @@
 //! `cargo xtask package` — emit the shippable depot layout (ADR-0163 §1):
 //! the chassis binary, the workspace license files, a persisted
-//! `pack/manifest`, and content-addressed component objects under
-//! `pack/objects/<sha256>`. The Steam depot is this directory uploaded
-//! verbatim.
+//! `pack/manifest`, and content-addressed objects under
+//! `pack/objects/<sha256>`: the components boot loads, and the named
+//! objects a running engine reads by path. The Steam depot is this
+//! directory uploaded verbatim.
 
 mod build;
 mod pack;
 mod plan;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use aether_chassis::boot_manifest::ChassisSettings;
@@ -17,9 +19,9 @@ use clap::Args;
 
 use crate::cargo::{Profile, build_named_chassis, host_binary_filename};
 use crate::inventory::PACKAGE_CHASSIS;
-use crate::package::build::{build_planned_components, sweep_components};
-use crate::package::pack::emit_depot;
-use crate::package::plan::{PackageChassis, resolve_package_plan};
+use crate::package::build::{build_planned_components, resolve_named, sweep_components};
+use crate::package::pack::{PackContents, emit_depot};
+use crate::package::plan::{FlagSelection, PackageChassis, resolve_package_plan};
 
 #[derive(Args)]
 pub struct PackageArgs {
@@ -50,6 +52,14 @@ pub struct PackageArgs {
     /// without a config get empty config bytes).
     #[arg(long = "config")]
     configs: Vec<PathBuf>,
+    /// A directory of objects to ship without loading at boot: every file
+    /// beneath `DIR` ships at `<UNDER>/<its relative path>`, and a running
+    /// engine reads it there through the `objects` file namespace. Repeat
+    /// the flag for more directories; a single object goes through
+    /// `--spec`. Each resulting path is lowercase `a-z`, `0-9`, `.`, `_`,
+    /// `-` segments joined by `/`, and a file that breaks that fails the run.
+    #[arg(long, num_args = 2, value_names = ["UNDER", "DIR"], requires = "components")]
+    named: Vec<String>,
     /// Window title (desktop chassis only).
     #[arg(long)]
     title: Option<String>,
@@ -75,19 +85,20 @@ pub struct PackageArgs {
     assets: Option<PathBuf>,
     /// Full-fidelity depot spec (JSON) — alternative to the component
     /// and chassis-config flags. Carries chassis, `title` /
-    /// `window_mode` / `tick_hz` / `clear_color`, and per-component `package`-or-`wasm` +
-    /// `config` + `name` + `export`; relative paths resolve against the
-    /// spec file's directory.
+    /// `window_mode` / `tick_hz` / `clear_color`, per-component `package`-or-`wasm` +
+    /// `config` + `name` + `export`, and a `named` list of objects to ship
+    /// without loading (`package`, `wasm`, or `dir` entries); relative paths
+    /// resolve against the spec file's directory.
     #[arg(
         long,
-        conflicts_with_all = ["components", "configs", "title", "window_mode", "tick_hz", "clear_color"]
+        conflicts_with_all = ["components", "configs", "named", "title", "window_mode", "tick_hz", "clear_color"]
     )]
     spec: Option<PathBuf>,
 }
 
 /// Emit the shippable depot layout (ADR-0163 §1): the chassis binary, the
 /// workspace license files, a persisted `pack/manifest`, and content-addressed
-/// component objects.
+/// objects.
 ///
 /// ```text
 /// <out>/
@@ -95,7 +106,7 @@ pub struct PackageArgs {
 ///   LICENSE-MIT                 # workspace licenses, shipped with the statically linked binary
 ///   LICENSE-APACHE
 ///   pack/manifest               # `encode_manifest` output
-///   pack/objects/<sha256>       # component wasm (+ config), content-addressed
+///   pack/objects/<sha256>       # component wasm (+ config) and named objects, content-addressed
 ///   pack/assets/…               # the `--assets` tree, verbatim
 /// ```
 ///
@@ -107,10 +118,13 @@ pub struct PackageArgs {
 /// - **`--components` / `--spec`** — a real product: the chosen chassis
 ///   binary plus only the selected components, with per-component
 ///   `config` / `name` / `export` and the chassis `title` / `window_mode`
-///   / `tick_hz` / `clear_color` riding into `pack/manifest`.
+///   / `tick_hz` / `clear_color` riding into `pack/manifest`, plus any
+///   named objects (`--named`, or a spec's `named` list).
 ///
 /// Each object is referenced from the manifest by its sha256 hash, so
-/// identity is the content and a name is a label.
+/// identity is the content and a name is a label. A named object is also
+/// listed under the path a running engine reads it at, with its size; the
+/// run prints one line per named object.
 pub fn run(args: &PackageArgs) -> Result<()> {
     let metadata = MetadataCommand::new().no_deps().exec().context("run cargo metadata")?;
     let target_dir = metadata.target_directory.as_std_path();
@@ -119,28 +133,30 @@ pub fn run(args: &PackageArgs) -> Result<()> {
     // A `--spec` file or an explicit `--components` set makes this a product
     // emit; with neither it is the discover-everything sweep.
     let selected = args.spec.is_some() || !args.components.is_empty();
-    let (chassis_bin, components, settings) = if selected {
-        let plan = resolve_package_plan(
-            args.spec.as_deref(),
-            args.chassis,
-            &args.components,
-            &args.configs,
-            ChassisSettings {
+    let (chassis_bin, components, named, settings) = if selected {
+        let flags = FlagSelection {
+            chassis: args.chassis,
+            components: &args.components,
+            configs: &args.configs,
+            named: &args.named,
+            settings: ChassisSettings {
                 title: args.title.clone(),
                 window_mode: args.window_mode.clone(),
                 tick_hz: args.tick_hz,
                 clear_color: args.clear_color.clone(),
             },
-        )?;
+        };
+        let plan = resolve_package_plan(args.spec.as_deref(), flags)?;
         let (chassis_package, chassis_bin) = plan.chassis.substrate();
         let components = build_planned_components(&plan, target_dir, args.profile)?;
+        let named = resolve_named(&plan, target_dir, args.profile)?;
         build_named_chassis(chassis_package, chassis_bin, args.profile)?;
-        (chassis_bin, components, plan.settings)
+        (chassis_bin, components, named, plan.settings)
     } else {
         let (chassis_package, chassis_bin) = PACKAGE_CHASSIS;
         let components = sweep_components(&metadata, target_dir, args.profile)?;
         build_named_chassis(chassis_package, chassis_bin, args.profile)?;
-        (chassis_bin, components, ChassisSettings::default())
+        (chassis_bin, components, BTreeMap::new(), ChassisSettings::default())
     };
 
     // `package` builds host-target only (no `--target`), so cargo's on-disk
@@ -148,19 +164,17 @@ pub fn run(args: &PackageArgs) -> Result<()> {
     // that filename verbatim so the shipped binary is runnable as-is.
     let chassis_file = host_binary_filename(chassis_bin);
     let chassis_src = target_dir.join(args.profile.as_str()).join(&chassis_file);
-    let manifest = emit_depot(
-        &out,
-        metadata.workspace_root.as_std_path(),
-        &chassis_src,
-        &chassis_file,
-        &components,
-        settings,
-        args.assets.as_deref(),
-    )?;
+    let contents = PackContents { components: &components, named: &named, settings };
+    let workspace_root = metadata.workspace_root.as_std_path();
+    let manifest = emit_depot(&out, workspace_root, &chassis_src, &chassis_file, contents, args.assets.as_deref())?;
 
+    for (path, object) in &manifest.named {
+        println!("package: named path={path} sha256={} size={}", object.sha256, object.size);
+    }
     println!(
-        "package: {} component object(s) + {} chassis bin -> {}",
+        "package: {} component object(s) + {} named object(s) + {} chassis bin -> {}",
         manifest.entries.len(),
+        manifest.named.len(),
         chassis_file,
         out.display(),
     );

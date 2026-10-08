@@ -1,16 +1,10 @@
 {
-  "camera": "main",
-  "mode": "Orbit",
-  "pan_speed": 0.15,
-  "yaw_speed": 0.02,
-  "pitch_speed": 0.015,
-  "zoom_rate": 0.985,
-  "pitch_limit": 1.5,
-  "distance_floor": 1.0,
-  "seed": {
-    "target": [0.0, 0.6, 0.0],
-    "yaw": 0.6,
-    "pitch": -0.4,
-    "distance": 2.4
-  }
+  "camera": "aether.kit.camera:main",
+  "window": "aether.window/aether.window.instance:main",
+  "orbit_radians_per_pixel": 0.005,
+  "key_turn_radians_per_sec": 1.5,
+  "zoom_per_wheel_step": 0.9,
+  "key_pan_distances_per_sec": 1.0,
+  "nearest": 0.05,
+  "farthest": 10000.0
 }

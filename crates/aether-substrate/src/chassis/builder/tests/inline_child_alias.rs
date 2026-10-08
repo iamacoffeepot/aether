@@ -6,13 +6,12 @@ use crate::actor::monitor::MonitorHandle;
 use crate::actor::native::Dispatch;
 use crate::actor::native::ctx::NativeCtx;
 use crate::actor::native::spawn::Subname;
-use crate::actor::registry::MonitorError;
 use crate::chassis::builder::{Builder, PassiveChassis};
 use crate::mail::KindId;
 use crate::mail::MailboxId;
 use crate::mail::registry::effect::{EffectBatch, PreparedAliasRoute, RegistryEffect};
-use crate::mail::registry::lineage_mailbox_id;
 use crate::mail::registry::{MailboxEntry, Registry, RouteContract};
+use crate::testing::canonical_id;
 use crate::testing::{TestChassis, await_settled, await_signal, bare_substrate};
 use crate::{BootError, NativeActor, NativeInitCtx};
 use aether_actor::{ActorRef, Addressable, ErasedActorRef, HandlesKind};
@@ -25,13 +24,13 @@ use std::time::Duration;
 pod_kind!(AliasWatchOrder { target_id: u64 }, "test.alias_close.watch_order", 0x5AFE_0241_0008_0001);
 
 /// Watcher for the alias-close scenarios: monitors whatever address an
-/// `AliasWatchOrder` names and reports each registration's outcome and the
-/// sender of each `MonitorNotice` as it handles them. A registration's outcome
-/// lands inside the order's own chain, so the scenario reads it after
+/// `AliasWatchOrder` names and reports the reference it monitored and the
+/// sender of each `MonitorNotice` as it handles them. The reference is
+/// reported inside the order's own chain, so the scenario reads it after
 /// settlement; a notice is a close-tail fan-out outside any root the scenario
 /// holds, so the watcher also signals `arrived` once it has reported one.
 struct AliasWatcher {
-    monitored: Sender<Result<ErasedActorRef, MonitorError>>,
+    monitored: Sender<ErasedActorRef>,
     notices: Sender<Option<ErasedActorRef>>,
     arrived: Sender<()>,
     handles: Vec<MonitorHandle>,
@@ -41,11 +40,15 @@ impl Addressable for AliasWatcher {
     type Resolver = aether_actor::Many;
 }
 impl aether_actor::Root for AliasWatcher {}
-impl HandlesKind<AliasWatchOrder> for AliasWatcher {}
-impl HandlesKind<aether_kinds::MonitorNotice> for AliasWatcher {}
+impl HandlesKind<AliasWatchOrder> for AliasWatcher {
+    type Sender = aether_actor::Anyone;
+}
+impl HandlesKind<aether_kinds::MonitorNotice> for AliasWatcher {
+    type Sender = aether_actor::Anyone;
+}
 impl aether_actor::Lifecycle<Self> for AliasWatcher {
     type Config = ();
-    type Params = (Sender<Result<ErasedActorRef, MonitorError>>, Sender<Option<ErasedActorRef>>, Sender<()>);
+    type Params = (Sender<ErasedActorRef>, Sender<Option<ErasedActorRef>>, Sender<()>);
     type InitError = BootError;
     type InitCtx<'a> = NativeInitCtx<'a>;
     type Ctx<'a> = NativeCtx<'a, Self>;
@@ -68,19 +71,17 @@ impl NativeActor for AliasWatcher {
 impl Dispatch<Self> for AliasWatcher {
     fn dispatch(
         state: &mut Self,
-        ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+        ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
         kind: KindId,
         payload: &[u8],
     ) -> Option<()> {
         if kind.0 == AliasWatchOrder::ID.0 {
             let position = MailboxId(AliasWatchOrder::decode_from_bytes(payload)?.target_id);
-            let outcome = ctx.resolve_live(position).map_err(|_| MonitorError::TargetNotFound).and_then(|target| {
-                ctx.monitor(target).map(|handle| {
-                    state.handles.push(handle);
-                    target
-                })
-            });
-            let _ = state.monitored.send(outcome);
+            let Ok(target) = ctx.resolve_live(position) else {
+                panic!("the watched address must route live at order time");
+            };
+            state.handles.push(ctx.monitor(target));
+            let _ = state.monitored.send(target);
             return Some(());
         }
         if kind.0 == <aether_kinds::MonitorNotice as Kind>::ID.0 {
@@ -97,7 +98,7 @@ impl Dispatch<Self> for AliasWatcher {
 /// notices report on.
 struct WatcherProbe {
     actor: ActorRef<AliasWatcher>,
-    monitored: Receiver<Result<ErasedActorRef, MonitorError>>,
+    monitored: Receiver<ErasedActorRef>,
     notices: Receiver<Option<ErasedActorRef>>,
     arrived: Receiver<()>,
 }
@@ -114,9 +115,9 @@ impl WatcherProbe {
         Self { actor, monitored, notices, arrived }
     }
 
-    /// Order the watcher to monitor `target` and read the outcome its handler
-    /// reported inside the order's chain.
-    fn watch(&self, chassis: &PassiveChassis<TestChassis>, target: MailboxId) -> Result<ErasedActorRef, MonitorError> {
+    /// Order the watcher to monitor `target` and read the reference its
+    /// handler reported inside the order's chain.
+    fn watch(&self, chassis: &PassiveChassis<TestChassis>, target: MailboxId) -> ErasedActorRef {
         let (_, settled) = chassis.send_tracked(self.actor, &AliasWatchOrder { target_id: target.0 }, None);
         await_settled(&settled, "test.alias_close.watch_order");
         self.monitored.try_recv().expect("the watcher handles its order")
@@ -135,7 +136,7 @@ impl WatcherProbe {
 fn publish_alias(registry: &Registry, host: MailboxId) -> (MailboxId, String) {
     let host_name = registry.mailbox_name(host).expect("host registers a canonical name");
     let alias_name = format!("{host_name}/test.inline.child:widget");
-    let alias_id = lineage_mailbox_id(&alias_name);
+    let alias_id = canonical_id(&alias_name);
     let published = registry
         .submit(EffectBatch::new(vec![RegistryEffect::PublishAlias(PreparedAliasRoute::new(
             alias_id,
@@ -153,11 +154,12 @@ fn publish_alias(registry: &Registry, host: MailboxId) -> (MailboxId, String) {
 
 /// Issue 4228 and ADR-0241 §8: despawning an inline child closes it. Its
 /// alias's watchers are notified, the alias tombstones so a later watch is
-/// refused, and the alias route retires. Before #4228, `despawn_inline_child`
+/// answered with its notice at once, and the alias route retires. Before #4228, `despawn_inline_child`
 /// tore the child down guest-side only: the alias kept resolving to the
 /// host's slot, so the address outlived the actor it named and no watcher
 /// ever heard it depart. Before #7065 the despawn only drained the alias, so a
-/// new watcher could still register against the dead child.
+/// new watcher could still register against the dead child and never hear
+/// of it.
 ///
 /// Drives both halves the guest despawn path composes: `NativeCtx::close_alias`
 /// for the tombstone and the notice, and the `RetireAlias` effect for the
@@ -183,7 +185,9 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
         type Resolver = aether_actor::Many;
     }
     impl aether_actor::Root for Host {}
-    impl HandlesKind<DespawnOrder> for Host {}
+    impl HandlesKind<DespawnOrder> for Host {
+        type Sender = aether_actor::Anyone;
+    }
     impl aether_actor::Lifecycle<Self> for Host {
         type Config = ();
         type Params = Sender<bool>;
@@ -205,7 +209,7 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
     impl Dispatch<Self> for Host {
         fn dispatch(
             state: &mut Self,
-            ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+            ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -230,9 +234,7 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
     let (alias_id, alias_name) = publish_alias(&registry, host_id);
 
     let watcher = WatcherProbe::spawn(&chassis);
-    let alias_ref = watcher
-        .watch(&chassis, alias_id)
-        .expect("the watcher must be able to register against the inline child's alias");
+    let alias_ref = watcher.watch(&chassis, alias_id);
 
     // Order the host to close the watcher's own address first — a live
     // mailbox that is not an alias folded onto this host. It must refuse, or a
@@ -255,14 +257,21 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
     assert_eq!(chassis.actor_registry().monitor_count(alias_id), 0, "monitors_of[alias] must drain after fan-out");
 
     // The alias still routes until the owner-staged retirement lands, so the
-    // watcher proves it live; the monitor is refused all the same, because
-    // the child it named has closed.
-    assert!(registry.is_live_alias(alias_id), "the alias still routes until the retirement lands");
+    // watcher proves it live. The child it names has closed, so the watch
+    // returns and the watcher is posted the alias's notice at once, with no
+    // entry left for a close that has already run.
     assert_eq!(
-        watcher.watch(&chassis, alias_id),
-        Err(MonitorError::TargetTombstoned),
-        "a despawned alias must refuse a new watcher rather than hold it past the child's close",
+        registry.resolve_route_state(<aether_kinds::MonitorNotice as Kind>::ID, alias_id),
+        RouteResolution::Live,
+        "the alias still routes until the retirement lands",
     );
+    let rewatched = watcher.watch(&chassis, alias_id);
+    assert_eq!(
+        watcher.next_notice(),
+        Some(rewatched),
+        "a watch on a despawned alias must be answered with a notice sent from the alias",
+    );
+    assert_eq!(chassis.actor_registry().monitor_count(alias_id), 0, "a closed alias holds no watcher");
 
     // The route itself: retiring it is the owner-staged half the trampoline
     // submits alongside the notice.
@@ -274,7 +283,6 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
         "retiring a live alias must apply",
     );
 
-    assert!(!registry.is_live_alias(alias_id), "a despawned alias must stop resolving to its host's slot");
     assert_eq!(
         registry.resolve_route_state(<aether_kinds::MonitorNotice as Kind>::ID, alias_id),
         RouteResolution::Dropped,
@@ -315,8 +323,8 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
 /// child of a parent that closes. The close tail tombstones each alias folded
 /// onto the closing actor before fanning its notice out, so a watcher that
 /// hears the child depart finds its name already spent. Catches a close tail
-/// that only drains an alias, which would leave it watchable and its key
-/// spawnable after its parent is gone.
+/// that only drains an alias, which would let a later watch register against
+/// it and leave its key spawnable after its parent is gone.
 #[test]
 fn a_closing_parent_tombstones_its_inline_children() {
     // Self-shutdown trigger for the host.
@@ -336,9 +344,7 @@ fn a_closing_parent_tombstones_its_inline_children() {
     let (alias_id, _) = publish_alias(&registry, host_id);
 
     let watcher = WatcherProbe::spawn(&chassis);
-    let alias_ref = watcher
-        .watch(&chassis, alias_id)
-        .expect("the watcher must be able to register against the inline child's alias");
+    let alias_ref = watcher.watch(&chassis, alias_id);
 
     let _ = chassis.send_tracked(host, &Quit { tag: 1 }, None);
     chassis.await_closed(host.erase());

@@ -47,8 +47,9 @@ impl WasmActor for UiWidget {
     /// `Tick` is a frame-lifecycle stage, so it subscribes on
     /// `aether.lifecycle` (ADR-0082) — the same path a real per-frame
     /// widget uses to be driven each frame.
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.subscribe::<LifecycleCapability, Tick>();
+        Ok(())
     }
 
     /// One widget's per-frame work. In the cached profile the draw is

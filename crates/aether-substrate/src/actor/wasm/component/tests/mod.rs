@@ -15,6 +15,7 @@ use super::*;
 use crate::actor::native::NativeBinding;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::wasm::host_fns;
+use crate::actor::wasm::module::Module as WasmModule;
 use crate::config::RegistryQueueCapacities;
 use crate::mail::attachments::EncodedMail;
 use crate::mail::mailer::Mailer;
@@ -27,19 +28,20 @@ use crate::mail::registry::Registry;
 use crate::mail::registry::RegistryOwnerLease;
 use crate::mail::registry::RouteContract;
 use crate::mail::registry::effect::{EffectBatch, PreparedAliasRoute, RegistryEffect};
-use crate::mail::registry::lineage_mailbox_id;
 use crate::mail::{Mail, MailId, MailRef, MailboxId, Source};
 use crate::scheduler::WakeSink;
+use crate::testing::canonical_id;
 use crate::testing::{boot_authority, token_root};
 use aether_data::tagged_id::Tag;
 use std::sync::mpsc::Receiver;
-use std::time::Duration;
 
 mod address;
 mod blob;
 mod cast;
 mod held;
+mod memory;
 mod outbox;
+mod watch;
 
 /// A disarmed, unstamped inbound for `Component::deliver`: `payload` of `kind`
 /// routed to `recipient`, replying to `sender`.
@@ -83,8 +85,22 @@ fn ctx_at(
     sender: MailboxId,
     parent: Option<MailboxId>,
 ) -> ComponentCtx {
+    let module = WasmModule::bare_for_test(mailer.blob_store());
+    ctx_at_with_module(registry, mailer, outbound, sender, parent, module)
+}
+
+/// [`ctx_at`] over a given module, for a test whose guest reads that module's
+/// assets.
+fn ctx_at_with_module(
+    registry: Arc<Registry>,
+    mailer: Arc<Mailer>,
+    outbound: Arc<HubOutbound>,
+    sender: MailboxId,
+    parent: Option<MailboxId>,
+    module: WasmModule,
+) -> ComponentCtx {
     let binding = Arc::new(NativeBinding::new_for_test_with_parent(mailer, sender, parent));
-    ComponentCtx::new(binding, registry, outbound)
+    ComponentCtx::new(binding, registry, outbound, module)
 }
 
 /// `bytes` as a guest send's payload with nothing attached: what the
@@ -139,7 +155,9 @@ fn replacement_ctx_pair(sender: MailboxId, parent: MailboxId) -> (ComponentCtx, 
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), sender, Some(parent)));
-    let build = || ComponentCtx::new(Arc::clone(&binding), Arc::clone(&registry), HubOutbound::disconnected());
+    let module = WasmModule::bare_for_test(mailer.blob_store());
+    let build =
+        || ComponentCtx::new(Arc::clone(&binding), Arc::clone(&registry), HubOutbound::disconnected(), module.clone());
     (build(), build())
 }
 
@@ -395,8 +413,24 @@ const WAT_WIRE_UNWIRE: &str = r#"
                 i32.const 0))
     "#;
 
-/// WAT whose `wire` traps. Tests that `Component::instantiate`
-/// surfaces the trap as a wasmtime error rather than swallowing.
+/// WAT whose `wire` stages the 12-byte message at offset 16 through
+/// `init_failed_p32` and returns 1, as the `export!` shim does for a hook
+/// that returned an error.
+const WAT_WIRE_REFUSES: &str = r#"
+        (module
+            (import "aether" "init_failed_p32" (func $init_failed (param i32 i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 16) "wire refused")
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
+                i32.const 0)
+            (func (export "wire") (param i64) (result i32)
+                i32.const 16
+                i32.const 12
+                call $init_failed
+                i32.const 1))
+    "#;
+
+/// WAT whose `wire` traps.
 const WAT_WIRE_TRAPS: &str = r#"
         (module
             (memory (export "memory") 1)
@@ -407,8 +441,7 @@ const WAT_WIRE_TRAPS: &str = r#"
     "#;
 
 /// WAT whose `unwire` traps. Tests that `Component::unwire`
-/// contains the trap (logs but doesn't propagate), same pattern
-/// as `on_dehydrate`'s trap-is-contained behaviour.
+/// contains the trap (logs but doesn't propagate).
 const WAT_UNWIRE_TRAPS: &str = r#"
         (module
             (memory (export "memory") 1)
@@ -453,6 +486,44 @@ const WAT_SAVES_TOO_LARGE: &str = r#"
                     (i32.const 0x00200000))) ;; 2 MiB — over the cap
                 i32.const 0))
     "#;
+
+/// WAT whose replace hook `export`, declared with `params`, stages the
+/// 12-byte message at offset 16 through `init_failed_p32` and returns 1, as
+/// the `export!` shim does for a hook that returned an error. Exports
+/// `realloc_p32` so a rehydrate's bundle has a region to land in.
+fn wat_replace_hook_refuses(export: &str, params: &str) -> String {
+    format!(
+        r#"
+        (module
+            (import "aether" "init_failed_p32" (func $init_failed (param i32 i32)))
+            (memory (export "memory") 1)
+            {WAT_REALLOC}
+            (data (i32.const 16) "hook refused")
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
+                i32.const 0)
+            (func (export "{export}") {params} (result i32)
+                i32.const 16
+                i32.const 12
+                call $init_failed
+                i32.const 1))
+    "#
+    )
+}
+
+/// WAT whose replace hook `export`, declared with `params`, traps.
+fn wat_replace_hook_traps(export: &str, params: &str) -> String {
+    format!(
+        r#"
+        (module
+            (memory (export "memory") 1)
+            {WAT_REALLOC}
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
+                i32.const 0)
+            (func (export "{export}") {params} (result i32)
+                unreachable))
+    "#
+    )
+}
 
 /// ADR-0016 load-side: `on_rehydrate(version, ptr, len)` copies `len` bytes
 /// from `ptr` (the delivery region the host placed the state in) to offset
@@ -583,15 +654,15 @@ fn wat_sends(recipient: u64, kind_id: u64) -> String {
 fn on_dehydrate_invokes_export_and_writes_marker() {
     let mut component = instantiate(WAT_HOOKS);
     assert_eq!(component.read_u32(200), 0);
-    component.on_dehydrate();
+    component.on_dehydrate().expect("the hook returned zero");
     assert_eq!(component.read_u32(200), 0x11);
 }
 
 #[test]
 fn on_dehydrate_on_component_without_export_is_noop() {
     let mut component = instantiate(WAT_NO_HOOKS);
-    // Just needs to not panic. No marker to check.
-    component.on_dehydrate();
+    // No marker to check: a guest with no export has nothing to refuse.
+    component.on_dehydrate().expect("no export is success");
 }
 
 /// ADR-0090 / ADR-0095: `Component::instantiate` places `config_bytes` in a
@@ -761,7 +832,7 @@ fn instantiate_config_without_allocator_returns_clean_error() {
 fn on_dehydrate_save_state_populates_bundle() {
     let mut component = instantiate(WAT_SAVES_STATE);
     assert!(component.take_saved_state().is_none());
-    component.on_dehydrate();
+    component.on_dehydrate().expect("the hook returned zero");
     let bundle = component.take_saved_state().expect("bundle saved");
     assert_eq!(bundle.version, 7);
     assert_eq!(bundle.bytes, vec![0xDE, 0xAD, 0xBE, 0xEF]);
@@ -803,24 +874,70 @@ fn unwire_invokes_export_and_writes_marker() {
     assert_eq!(component.read_u32(104), 0x88);
 }
 
-/// Issue 584 Phase 2b / Issue 640 Phase 2: a wire trap is
-/// fatal — `Component::wire` returns the wasmtime error so the
-/// trampoline can log it. Pre-issue-640 the wire call lived
-/// inside `Component::instantiate`, so a wire trap aborted load
-/// directly; post-issue-640 it lives on the trampoline's
-/// `NativeActor::wire` lifecycle hook, so the trap surfaces
-/// after instantiation succeeds and the trampoline logs +
-/// continues (matching `unwire`'s contained-trap policy).
+/// Catches a trap and a returned error merged into one fault (ADR-0247 rule
+/// 3). The two decide what the trampoline may do next: a guest that returned
+/// an error is intact and its `unwire` runs, and a guest that trapped runs no
+/// more code. A returned error must also carry the message the guest staged,
+/// which is what the birth's asker reads.
 #[test]
-fn wire_trap_propagates_via_component_wire() {
-    let mut component = instantiate(WAT_WIRE_TRAPS);
-    let result = component.wire(None);
-    assert!(result.is_err(), "Component::wire must propagate the guest trap as wasmtime::Error");
+fn wire_reports_a_returned_error_with_its_message_and_a_trap_as_a_trap() {
+    let refused = instantiate(WAT_WIRE_REFUSES).wire(None);
+    let Err(HookFault::Returned(message)) = refused else {
+        panic!("a wire that returned non-zero is a returned error: {refused:?}");
+    };
+    assert_eq!(message, "wire refused", "the returned error carries the message the guest staged");
+
+    let trapped = instantiate(WAT_WIRE_TRAPS).wire(None);
+    let Err(fault @ HookFault::Trapped(_)) = trapped else {
+        panic!("a wire that trapped is a trap: {trapped:?}");
+    };
+    assert!(fault.is_trap(), "a trapped guest is reported as one that must not run again");
 }
 
-/// Issue 584 Phase 2b: `unwire` traps are contained the same way
-/// `on_dehydrate` traps are — logged but not propagated (per
-/// ADR-0015, panicking hooks must not stall teardown).
+/// Catches an `on_dehydrate` trap and a returned error merged into one fault,
+/// or its return code ignored (ADR-0249 §1, §2). The two decide abort against
+/// refuse: a guest that returned an error keeps running and its republish is
+/// refused with the message it staged, and a trap in the live guest aborts
+/// the engine.
+#[test]
+fn on_dehydrate_reports_a_returned_error_with_its_message_and_a_trap_as_a_trap() {
+    let refused = instantiate(&wat_replace_hook_refuses("on_dehydrate", "")).on_dehydrate();
+    let Err(HookFault::Returned(message)) = refused else {
+        panic!("an on_dehydrate that returned non-zero is a returned error: {refused:?}");
+    };
+    assert_eq!(message, "hook refused", "the returned error carries the message the guest staged");
+
+    let trapped = instantiate(&wat_replace_hook_traps("on_dehydrate", "")).on_dehydrate();
+    let Err(fault @ HookFault::Trapped(_)) = trapped else {
+        panic!("an on_dehydrate that trapped is a trap: {trapped:?}");
+    };
+    assert!(fault.is_trap(), "a trapped guest is reported as one that must not run again");
+}
+
+/// Catches `on_rehydrate`'s return code ignored, which reads a guest that
+/// refused its prior state as one that took it, and a trap merged with a
+/// returned error: a reinstated guest that returns an error closes, and one
+/// that traps aborts the engine (ADR-0249 §4).
+#[test]
+fn call_on_rehydrate_reports_a_returned_error_with_its_message_and_a_trap_as_a_trap() {
+    let bundle = StateBundle { version: 1, bytes: vec![9, 9, 9] };
+    let params = "(param i32 i32 i32)";
+
+    let refused = instantiate(&wat_replace_hook_refuses("on_rehydrate_p32", params)).call_on_rehydrate(&bundle);
+    let Err(HookFault::Returned(message)) = refused else {
+        panic!("an on_rehydrate that returned non-zero is a returned error: {refused:?}");
+    };
+    assert_eq!(message, "hook refused", "the returned error carries the message the guest staged");
+
+    let trapped = instantiate(&wat_replace_hook_traps("on_rehydrate_p32", params)).call_on_rehydrate(&bundle);
+    let Err(fault @ HookFault::Trapped(_)) = trapped else {
+        panic!("an on_rehydrate that trapped is a trap: {trapped:?}");
+    };
+    assert!(fault.is_trap(), "a trapped guest is reported as one that must not run again");
+}
+
+/// Issue 584 Phase 2b: an `unwire` trap is contained — logged but not
+/// propagated (per ADR-0015, a panicking `unwire` must not stall teardown).
 #[test]
 fn unwire_trap_is_contained() {
     let mut component = instantiate(WAT_UNWIRE_TRAPS);
@@ -901,7 +1018,7 @@ fn deliver_to_guest_without_allocator_dropped() {
 #[test]
 fn on_dehydrate_save_state_without_export_leaves_bundle_empty() {
     let mut component = instantiate(WAT_NO_HOOKS);
-    component.on_dehydrate();
+    component.on_dehydrate().expect("no export is success");
     assert!(component.take_saved_state().is_none());
     assert!(component.take_save_error().is_none());
 }
@@ -909,7 +1026,9 @@ fn on_dehydrate_save_state_without_export_leaves_bundle_empty() {
 #[test]
 fn save_state_over_cap_records_error_and_no_bundle() {
     let mut component = instantiate(WAT_SAVES_TOO_LARGE);
-    component.on_dehydrate();
+    // The guest drops the save's status and returns zero, as a hook that
+    // discards the save's error does; the host's own record still refuses.
+    component.on_dehydrate().expect("the hook returned zero");
     let err = component.take_save_error().expect("error recorded");
     assert!(err.contains("exceeds"), "got: {err}");
     assert!(component.take_saved_state().is_none());
@@ -1582,7 +1701,7 @@ fn inline_alias_folded_id_matches_post_1920_convention() {
         Tag::Mailbox,
         aether_data::fold_lineage(parent_carry, aether_data::ActorId::instanced("test.inline.child", "widget")),
     ));
-    let from_path = lineage_mailbox_id("test.inline.parent/test.inline.child:widget");
+    let from_path = canonical_id("test.inline.parent/test.inline.child:widget");
     assert_eq!(folded, from_path, "the host-fn alias fold matches the rendered-name parse → fold");
 }
 
@@ -1596,14 +1715,14 @@ fn inline_spawns_extend_the_executing_inline_actor() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let root_name = "test.inline.nested_root";
-    let root = lineage_mailbox_id(root_name);
+    let root = canonical_id(root_name);
     let (_captured, root_handler) = lineage_capture_handler();
     registry
         .try_register_inbox_with_id(&boot_authority(), root, root_name, root_handler)
         .expect("register component root");
 
     let parent_name = format!("{root_name}/test.inline.child:branch");
-    let parent = lineage_mailbox_id(&parent_name);
+    let parent = canonical_id(&parent_name);
     let mut ctx = ctx_at(Arc::clone(&registry), mailer, HubOutbound::disconnected(), root, None);
     ctx.stage_alias(PreparedAliasRoute::new(parent, parent_name.clone(), root, RouteContract::empty()));
     ctx.install_inline_children([(TEST_INLINE_TAG, test_inline_child_type())]);
@@ -1614,7 +1733,7 @@ fn inline_spawns_extend_the_executing_inline_actor() {
         .expect("deliver nested spawn turn");
 
     let expected_inline_name = format!("{parent_name}/test.inline.child:leaf");
-    let expected_inline = lineage_mailbox_id(&expected_inline_name);
+    let expected_inline = canonical_id(&expected_inline_name);
     let aliases = component.drain_pending_aliases();
     let inline = aliases.iter().find(|alias| alias.alias == expected_inline).expect("nested inline alias staged");
     assert_eq!(&*inline.rendered_name, expected_inline_name);
@@ -1632,12 +1751,12 @@ fn inline_spawns_reject_a_foreign_parent() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let root_name = "test.inline.scoped_root";
-    let root = lineage_mailbox_id(root_name);
+    let root = canonical_id(root_name);
     let (_captured, root_handler) = lineage_capture_handler();
     registry
         .try_register_inbox_with_id(&boot_authority(), root, root_name, root_handler)
         .expect("register component root");
-    let foreign = lineage_mailbox_id("test.inline.foreign");
+    let foreign = canonical_id("test.inline.foreign");
     let mut ctx = ctx_at(registry, mailer, HubOutbound::disconnected(), root, None);
     ctx.install_inline_children([(TEST_INLINE_TAG, test_inline_child_type())]);
     let mut component = instantiate_with_ctx(&wat_inline_spawn(foreign, TEST_INLINE_TAG), ctx);
@@ -1659,7 +1778,7 @@ fn inline_spawns_refuse_an_undeclared_tag() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let root_name = "test.inline.undeclared_root";
-    let root = lineage_mailbox_id(root_name);
+    let root = canonical_id(root_name);
     let (_captured, root_handler) = lineage_capture_handler();
     registry
         .try_register_inbox_with_id(&boot_authority(), root, root_name, root_handler)
@@ -1685,7 +1804,7 @@ fn inline_alias_routes_into_parent_slot_inbox() {
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let (captured, capture_handler) = lineage_capture_handler();
     let parent_name = "test.inline.parent".to_owned();
-    let parent_id = lineage_mailbox_id(&parent_name);
+    let parent_id = canonical_id(&parent_name);
     registry
         .try_register_inbox_with_id(&boot_authority(), parent_id, parent_name.clone(), capture_handler)
         .expect("parent registers under its lineage id");
@@ -1700,7 +1819,7 @@ fn inline_alias_routes_into_parent_slot_inbox() {
     // Mirror the host/trampoline split: fold the alias id, then let the owner
     // publish only the logical alias-to-parent relation.
     let alias_name = format!("{parent_name}/test.inline.child:widget");
-    let alias_id = lineage_mailbox_id(&alias_name);
+    let alias_id = canonical_id(&alias_name);
     let completion = registry
         .submit(EffectBatch::new(vec![RegistryEffect::PublishAlias(PreparedAliasRoute::new(
             alias_id,
@@ -1710,10 +1829,7 @@ fn inline_alias_routes_into_parent_slot_inbox() {
         ))]))
         .expect("owner accepts the alias batch");
     owner.run_once();
-    completion
-        .wait_timeout(Duration::from_millis(100))
-        .expect("alias completion arrives")
-        .expect("alias route publishes");
+    completion.try_take().expect("alias completion arrives").expect("alias route publishes");
 
     // Name resolution (the wire `Call` path) resolves the alias.
     assert_eq!(registry.lookup(&alias_name), Some(alias_id), "the rendered alias name resolves to the folded alias id");

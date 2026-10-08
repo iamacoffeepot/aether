@@ -45,7 +45,7 @@ use aether_data::ErasedActorPath;
 
 use aether_kinds::{CaptureFrame, CaptureFrameResult, MonitorNotice};
 
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending};
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::render::visual;
 use aether_substrate::render::{
@@ -85,7 +85,7 @@ mod holds;
 mod instances;
 mod material;
 // The one accumulator every overlay verb pushes into (ADR-0105 / ADR-0213),
-// so painter order inside the overlay pass is receipt order across the three.
+// so painter order inside the overlay pass is receipt order across them all.
 mod overlay;
 mod pipeline;
 // The ADR-0170 authored-render-program registry + executor: register-time
@@ -100,6 +100,9 @@ mod surface;
 // unlike its siblings this one carries the feature gate.
 #[cfg(feature = "desktop")]
 mod target;
+// What the renderer holds to draw text (ADR-0248 §10): the font registry,
+// the glyph atlas's packer and cache, and layout into textured quads.
+mod text;
 mod texture;
 // Texture arrays in the texture registry (ADR-0246 decision 6): fixed
 // side and layer count, each layer written in place.
@@ -117,6 +120,10 @@ mod view_source;
 // wiring channel.
 pub use self::config::{RenderParams, RenderTuningConfig, RenderTuningConfigLayer, RenderTuningOverlay};
 pub use self::pipeline::RenderGpu;
+// How a window surface presents, which the desktop driver names on
+// `attach_window` and `set_window_present`.
+#[cfg(feature = "desktop")]
+pub use self::surface::SurfacePresent;
 
 use self::pipeline::{OverlayObservation, record_material_batches, record_overlay_batches};
 use self::surface::{boot_offscreen, build_wireframe_overlay_pipeline, try_boot_offscreen};
@@ -135,18 +142,21 @@ pub use self::geometry::{GeometryRegistry, RealizedGeometry, StagedGeometry};
 pub use self::instances::{InstancesRegistry, StagedInstances};
 pub use self::material::MaterialBatch;
 pub use self::overlay::OverlayBatch;
+use self::overlay::{OverlayFrame, Placement};
 use self::program::{DispatchResources, ProgramRegistry};
-pub use self::texture::{TextureRegistry, WHITE_TEXTURE_ID};
+use self::text::{FontParse, FontParseOutput, TextState};
+pub use self::texture::{GLYPH_ATLAS_TEXTURE_ID, TextureRegistry, WHITE_TEXTURE_ID};
 use self::view_source::FollowedView;
 
 use super::{
-    CreateDrawSet, CreateDrawSetResult, CreateGeometry, CreateGeometryResult, CreateInstances, CreateInstancesResult,
-    CreateTexture, CreateTextureArray, CreateTextureArrayResult, CreateTextureResult, CreateTextureVolume,
-    CreateTextureVolumeResult, DRAW_TRIANGLE_BYTES, DestroyDrawSet, DestroyGeometry, DestroyInstances, DestroyTexture,
-    DrawMaterialCoverage, DrawMaterialTextured, DrawScreenTriangles, DrawShapes, DrawTexturedQuads, DrawTriangle,
-    Frame, Occluded, PreSettled, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult,
-    ProgramTimings, ProgramTimingsResult, RenderCapability, UpdateDrawSet, UpdateDrawSetResult, UpdateGeometry,
-    UpdateInstances, UpdateTexture, ViewFrom, ViewFromResult, ViewProjection, WriteTextureLayer,
+    CreateDrawSet, CreateDrawSetResult, CreateFont, CreateFontResult, CreateGeometry, CreateGeometryResult,
+    CreateInstances, CreateInstancesResult, CreateTexture, CreateTextureArray, CreateTextureArrayResult,
+    CreateTextureResult, CreateTextureVolume, CreateTextureVolumeResult, DRAW_TRIANGLE_BYTES, DestroyDrawSet,
+    DestroyGeometry, DestroyInstances, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawScreenTriangles,
+    DrawShapes, DrawText, DrawTexturedQuads, DrawTriangle, FontMetricsRequest, FontMetricsResult, Frame, Occluded,
+    PreSettled, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult, ProgramTimings,
+    ProgramTimingsResult, RenderCapability, UpdateDrawSet, UpdateDrawSetResult, UpdateGeometry, UpdateInstances,
+    UpdateTexture, ViewFrom, ViewFromResult, ViewProjection, WriteTextureLayer,
 };
 
 /// Wedge-to-`Err` cap for a parked capture (ADR-0161): if a capture's
@@ -168,11 +178,17 @@ pub struct RenderCapabilityState {
     /// The view source the renderer follows, absent until the first
     /// `aether.render.view_from` and again once that source closes.
     view_source: Option<FollowedView>,
-    overlay_frame: Vec<OverlayBatch>,
+    /// This frame's overlay batches, each filed under its sender. The frame
+    /// commit sorts them into `overlay_last_submitted` (ADR-0248 §4).
+    overlay_frame: OverlayFrame,
+    /// The last committed overlay list, in painter order.
     overlay_last_submitted: Vec<OverlayBatch>,
     material_frame: Vec<MaterialBatch>,
     material_last_submitted: Vec<MaterialBatch>,
     textures: TextureRegistry,
+    /// The fonts and the glyph atlas's packer and cache (ADR-0248 §10).
+    /// The atlas pixels are the reserved glyph-atlas entry of `textures`.
+    text: TextState,
     /// ADR-0171 geometry resources: the session-scoped registry. Staged
     /// here at create/update; the draw-pass record path realizes and
     /// consumes the wgpu buffers.
@@ -340,15 +356,18 @@ impl RenderCapabilityState {
     /// selects the adapter/device and builds shared pipelines; later
     /// attachments must support the same copy-compatible color format.
     /// Every fallible operation completes before insertion, so failure leaves
-    /// both the target map and shared GPU state unchanged. `ctx` is the
-    /// render actor's own: the first attachment installs the device, which
-    /// answers every request that was waiting for one.
+    /// both the target map and shared GPU state unchanged. `present` is how
+    /// the window's surface presents, and a surface that cannot serve it
+    /// fails the attachment naming the modes it offers. `ctx` is the render
+    /// actor's own: the first attachment installs the device, which answers
+    /// every request that was waiting for one.
     #[cfg(feature = "desktop")]
-    pub fn attach_window<M: ReplyMode, A>(
+    pub fn attach_window<M: ReplyMode, A, S>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut NativeCtx<'_, A, S, M>,
         path: ErasedActorPath,
         window: Arc<Window>,
+        present: SurfacePresent,
     ) -> Result<(), String> {
         if self.offscreen_size.is_some() {
             return Err("cannot attach a window target to an explicitly surfaceless render runtime".to_owned());
@@ -361,11 +380,17 @@ impl RenderCapabilityState {
             let device = Arc::clone(&gpu.device);
             let format = gpu.color_format;
             self.targets.attach_with(path, || {
-                RenderTarget::attach_to_booted_gpu(context, &device, window, (size.width, size.height), format)
+                RenderTarget::attach_to_booted_gpu(context, &device, window, (size.width, size.height), format, present)
             })?
         } else if self.gpu.is_none() && self.desktop_gpu.is_none() {
             self.targets.attach_with(path, || {
-                RenderTarget::boot_first(window, (size.width, size.height), wireframe.as_deref(), vertex_buffer_bytes)
+                RenderTarget::boot_first(
+                    window,
+                    (size.width, size.height),
+                    wireframe.as_deref(),
+                    vertex_buffer_bytes,
+                    present,
+                )
             })?
         } else {
             return Err("render GPU boot state cannot accept desktop window targets".to_owned());
@@ -378,12 +403,29 @@ impl RenderCapabilityState {
         Ok(())
     }
 
+    /// Reconfigure one attached window's surface to present as `present`
+    /// asks. An unknown window is an `Err`, as is a surface that cannot
+    /// serve `present`, which names the modes it offers and stays configured
+    /// as it was.
+    #[cfg(feature = "desktop")]
+    pub fn set_window_present(&mut self, path: &ErasedActorPath, present: SurfacePresent) -> Result<(), String> {
+        let (Some(gpu), Some(context)) = (self.gpu.as_ref(), self.desktop_gpu.as_ref()) else {
+            return Err(format!("no render device is booted to present window {path}"));
+        };
+        let target = self.targets.get_mut(path).ok_or_else(|| format!("unknown window target {path}"))?;
+        target.set_present(context, &gpu.device, present)
+    }
+
     /// Detach one window surface. A capture selected for that target fails
     /// immediately; captures for other targets and the shared scene survive.
     /// `ctx` is the render actor's own, which answers the failed capture's
     /// held reply.
     #[cfg(feature = "desktop")]
-    pub fn detach_window<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, path: &ErasedActorPath) -> bool {
+    pub fn detach_window<M: ReplyMode, A, S>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A, S, M>,
+        path: &ErasedActorPath,
+    ) -> bool {
         let removed = self.targets.detach(path).is_some();
         if removed {
             self.fail_capture_for_detached_window(ctx, path);
@@ -392,9 +434,9 @@ impl RenderCapabilityState {
     }
 
     #[cfg(feature = "desktop")]
-    fn fail_capture_for_detached_window<M: ReplyMode, A>(
+    fn fail_capture_for_detached_window<M: ReplyMode, A, S>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut NativeCtx<'_, A, S, M>,
         path: &ErasedActorPath,
     ) {
         if self.pending_capture.as_ref().is_some_and(|pending| pending.window.as_ref() == Some(path)) {
@@ -432,9 +474,9 @@ impl RenderCapabilityState {
     /// resolve the similarity reference, and dispatch the pre-mails with
     /// their settlement bridged back here. `Err` is the message the caller
     /// is answered with; nothing has moved when it returns one.
-    fn accept_capture<M: ReplyMode>(
+    fn accept_capture<S, M: ReplyMode>(
         &mut self,
-        ctx: &NativeCtx<'_, RenderCapability, M>,
+        ctx: &NativeCtx<'_, RenderCapability, S, M>,
         mail: CaptureFrame,
     ) -> Result<AcceptedCapture, String> {
         self.device_recovery.refresh();
@@ -491,9 +533,9 @@ impl RenderCapabilityState {
     /// Publish the first render device, then answer every request that was
     /// waiting for one, in arrival order, each with the answer it gets now.
     /// `ctx` is the render actor's own, which answers the held replies.
-    fn install_first_device<M: ReplyMode, A>(
+    fn install_first_device<M: ReplyMode, A, S>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut NativeCtx<'_, A, S, M>,
         gpu: RenderGpu,
         wire_pipeline: Option<wgpu::RenderPipeline>,
     ) {
@@ -543,7 +585,7 @@ impl RenderCapabilityState {
     /// Boot the explicit surfaceless harness GPU. Desktop GPUs are booted by
     /// `attach_window`, never by a frame or a shared handle. `ctx` is the
     /// render actor's own, handed to the install.
-    fn ensure_offscreen_gpu_booted<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>) {
+    fn ensure_offscreen_gpu_booted<M: ReplyMode, A, S>(&mut self, ctx: &mut NativeCtx<'_, A, S, M>) {
         if !self.awaits_first_device() {
             return;
         }
@@ -627,7 +669,7 @@ impl RenderCapabilityState {
     /// canonical desktop target map are built off to the side; registry
     /// realizations are then switched in the same actor-owned commit. A
     /// failed device or surface acquisition is terminal.
-    fn recover_gpu_if_needed<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>) -> Result<(), String> {
+    fn recover_gpu_if_needed<M: ReplyMode, A, S>(&mut self, ctx: &mut NativeCtx<'_, A, S, M>) -> Result<(), String> {
         self.device_recovery.refresh();
         if let Some(error) = self.device_recovery.unusable_error() {
             return Err(error);
@@ -666,9 +708,9 @@ impl RenderCapabilityState {
         Ok(())
     }
 
-    fn finish_failed_replacement<M: ReplyMode, A>(
+    fn finish_failed_replacement<M: ReplyMode, A, S>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut NativeCtx<'_, A, S, M>,
         ticket: device::ReplacementTicket,
         reason: String,
     ) {
@@ -701,7 +743,7 @@ impl RenderCapabilityState {
         true
     }
 
-    fn fail_pending_capture_for_device<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, error: String) {
+    fn fail_pending_capture_for_device<M: ReplyMode, A, S>(&mut self, ctx: &mut NativeCtx<'_, A, S, M>, error: String) {
         let Some(pending) = self.pending_capture.take() else {
             return;
         };
@@ -720,10 +762,16 @@ impl RenderCapabilityState {
         Ok(generation)
     }
 
+    /// Commit the frame's accumulators into the lists the record path reads.
+    /// The overlay batches are sorted here, once, by the lineage order of the
+    /// actor that sent each (ADR-0248 §4), read when the batch was filed; the
+    /// sorted list then takes the same commit-or-replay outcome as the other
+    /// two, so a replayed frame keeps its order.
     fn commit_scene(&mut self, replay_cache_when_idle: bool) {
         commit_or_replay(&mut self.frame_vertices, &mut self.last_submitted, replay_cache_when_idle);
         commit_or_replay(&mut self.material_frame, &mut self.material_last_submitted, replay_cache_when_idle);
-        commit_or_replay(&mut self.overlay_frame, &mut self.overlay_last_submitted, replay_cache_when_idle);
+        let mut overlay = self.overlay_frame.commit();
+        commit_or_replay(&mut overlay, &mut self.overlay_last_submitted, replay_cache_when_idle);
     }
 
     /// Drop only scene caches that may have been submitted ambiguously on
@@ -862,7 +910,7 @@ impl RenderCapabilityState {
         Ok(capture_meta)
     }
 
-    fn complete_capture<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, meta: CaptureMeta) {
+    fn complete_capture<M: ReplyMode, A, S>(&mut self, ctx: &mut NativeCtx<'_, A, S, M>, meta: CaptureMeta) {
         let pending = self.pending_capture.take().expect("capture metadata requires a pending capture");
         for item in pending.after_mails {
             let _ = ctx.deliver_detached(item);
@@ -914,13 +962,20 @@ fn discard_replay_cache<T>(last: &mut Vec<T>) {
 
 /// The canonical path of the live actor `window` names, or the capture error
 /// naming `window` when it does not prove.
-fn canonical_window<M: ReplyMode, A>(
-    ctx: &NativeCtx<'_, A, M>,
+fn canonical_window<M: ReplyMode, A, S>(
+    ctx: &NativeCtx<'_, A, S, M>,
     window: &ErasedActorPath,
 ) -> Result<ErasedActorPath, String> {
     ctx.resolve_path(window)
         .map(|target| ctx.actor_path(target))
         .map_err(|error| format!("capture_frame failed: window {window} does not resolve: {error}"))
+}
+
+/// Where the overlay draw `ctx` is handling lies in the frame's painter
+/// order (ADR-0248 §4): at its sender's place in the actor tree, or unplaced
+/// when the mail was pushed from outside the tree and has no sender.
+fn overlay_placement(ctx: &NativeCtx<'_, RenderCapability>) -> Placement {
+    ctx.sender().map_or(Placement::Unplaced, |sender| Placement::At(ctx.lineage_order(sender)))
 }
 
 fn deduplicate_windows(windows: Vec<ErasedActorPath>) -> BTreeSet<ErasedActorPath> {
@@ -938,7 +993,7 @@ impl NativeActor for RenderCapability {
     fn init(
         config: RenderTuningConfig,
         params: RenderParams,
-        _ctx: &mut NativeInitCtx<'_>,
+        ctx: &mut NativeInitCtx<'_>,
     ) -> Result<RenderCapabilityState, BootError> {
         Ok(RenderCapabilityState {
             frame_vertices: Vec::with_capacity(config.vertex_buffer_bytes),
@@ -946,12 +1001,13 @@ impl NativeActor for RenderCapability {
             triangles_rendered: 0,
             camera_state: IDENTITY_VIEW_PROJ,
             view_source: None,
-            overlay_frame: Vec::new(),
+            overlay_frame: OverlayFrame::default(),
             overlay_last_submitted: Vec::new(),
             material_frame: Vec::new(),
             material_last_submitted: Vec::new(),
-            textures: TextureRegistry::new(),
-            geometries: GeometryRegistry::new(),
+            textures: TextureRegistry::with_memory(ctx.memory_gauge("textures")),
+            text: TextState::new(),
+            geometries: GeometryRegistry::with_memory(ctx.memory_gauge("geometry")),
             instances: InstancesRegistry::new(),
             draw_sets: DrawSetRegistry::new(),
             programs: ProgramRegistry::new(config.pass_timings),
@@ -1307,13 +1363,14 @@ impl NativeActor for RenderCapability {
         state.programs.timings(&mail)
     }
 
-    /// `DrawTexturedQuads` accumulator (ADR-0105), on the owned `overlay_frame`.
+    /// `DrawTexturedQuads` accumulator (ADR-0105), on the owned
+    /// `overlay_frame`, filed under the mail's sender.
     #[handler::tell]
-    fn on_draw_textured_quads(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawTexturedQuads) {
+    fn on_draw_textured_quads(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrawTexturedQuads) {
         if state.warn_drop_if_unusable("draw_textured_quads") {
             return;
         }
-        state.overlay_frame.push(OverlayBatch::textured(mail));
+        state.overlay_frame.file(overlay_placement(ctx), OverlayBatch::textured(mail));
     }
 
     /// `DrawScreenTriangles` (iamacoffeepot/aether#5504), on the owned
@@ -1321,23 +1378,99 @@ impl NativeActor for RenderCapability {
     /// so flat 2D content keeps its proportions on a non-square window
     /// without a camera publishing a projection for it.
     #[handler::tell]
-    fn on_draw_screen_triangles(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawScreenTriangles) {
+    fn on_draw_screen_triangles(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrawScreenTriangles) {
         if state.warn_drop_if_unusable("draw_screen_triangles") {
             return;
         }
         let batch = OverlayBatch::screen_triangles(mail, &mut state.textures);
-        state.overlay_frame.push(batch);
+        state.overlay_frame.file(overlay_placement(ctx), batch);
     }
 
     /// `DrawShapes` (ADR-0213), on the owned `overlay_frame` — rounded,
     /// stroked, shadowed boxes evaluated as a distance field on the overlay
-    /// pass, at the same painter position as the quad batches.
+    /// pass, ordered with the quad batches: by sender across actors, and by
+    /// send order inside one.
     #[handler::tell]
-    fn on_draw_shapes(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawShapes) {
+    fn on_draw_shapes(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrawShapes) {
         if state.warn_drop_if_unusable("draw_shapes") {
             return;
         }
-        state.overlay_frame.push(OverlayBatch::shapes(mail));
+        state.overlay_frame.file(overlay_placement(ctx), OverlayBatch::shapes(mail));
+    }
+
+    /// Register a font from the bytes of a TrueType or OpenType file.
+    ///
+    /// The reply is held and the parse staged to a blocking worker, so the
+    /// parse never runs on the driver thread; `on_font_parsed` answers. It
+    /// reads no device, so it is accepted while the device is lost.
+    ///
+    /// # Agent
+    /// Reply: `CreateFontResult`. `bytes` is the whole font file as a blob:
+    /// `{"$hex": ...}` from a session, or the blob a component got from
+    /// `aether.fs.read` or from its module's assets. `Ok { font_id }` names the font
+    /// in `draw_text` and `font_metrics` for the rest of the session; `Err`
+    /// says why the bytes are not a font.
+    #[handler::request]
+    fn on_create_font(
+        _state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        mail: CreateFont,
+    ) -> Pending<CreateFontResult> {
+        let (pending, held) = ctx.hold::<CreateFontResult>();
+        text::stage_font_parse(ctx, held, mail.bytes);
+        pending
+    }
+
+    /// Font-parse completion (ADR-0243 §9): register the parsed font, or
+    /// build the error, and answer the `create_font` whose held reply the
+    /// task carried.
+    #[handler(task)]
+    fn on_font_parsed(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<FontParseOutput>) {
+        let Some(FontParse { held }) = ctx.take_context() else {
+            return;
+        };
+        held.answer(ctx, &state.text.register(done.into_output()));
+    }
+
+    /// A registered font's size-independent metrics table, answered inside
+    /// the call. It reads no device.
+    ///
+    /// # Agent
+    /// Reply: `FontMetricsResult`. `Ok { metrics }` is every measure in
+    /// font units; scale one to a draw size with
+    /// `value * size_pixels / units_per_em` to measure a string exactly as
+    /// `draw_text` lays it out. An unknown `font_id` replies `Err`.
+    #[handler::request]
+    fn on_font_metrics(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: FontMetricsRequest,
+    ) -> FontMetricsResult {
+        state.text.metrics(mail.font_id)
+    }
+
+    /// `DrawText` (ADR-0248 §10), on the owned `overlay_frame`: lay the
+    /// runs out, write any glyph not yet in the reserved atlas texture, and
+    /// file one textured batch under the mail's sender.
+    ///
+    /// # Agent
+    /// Fire-and-forget; send it every frame the text should show. The
+    /// batch is one overlay draw in your own send order: a `draw_shapes`
+    /// you send after it lies over it. Against another actor's draws it
+    /// sorts by lineage order: over your parent's and over those of an
+    /// actor created before you. A run with an unknown `font_id` or a
+    /// size that is not finite and positive is dropped with a warning and
+    /// the other runs draw. The first draw of a font shows.
+    #[handler::tell]
+    fn on_draw_text(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrawText) {
+        if state.warn_drop_if_unusable("draw_text") {
+            return;
+        }
+        let quads = state.text.lay_out(&mut state.textures, &mail);
+        if quads.is_empty() {
+            return;
+        }
+        state.overlay_frame.file(overlay_placement(ctx), OverlayBatch::glyphs(mail.clip, mail.space, quads));
     }
 
     /// `DrawMaterialTextured` (ADR-0140), on the owned material stream.
@@ -1571,8 +1704,10 @@ mod tests {
     use aether_harness_substrate_capture::test_helpers::require_wgpu_adapter;
     use aether_kinds::QuadSpace;
     use aether_math::Rgba;
+    use aether_substrate::Subname;
     use aether_substrate::chassis::builder::ReplyTarget;
     use aether_substrate::mail::outbound::EgressEvent;
+    use aether_substrate::memory::{Charged, MemoryGauge};
     use aether_substrate::testing::{
         PumpedDriver, boot_bare_test_chassis, decode_session_reply, fresh_substrate_and_rx,
     };
@@ -1582,8 +1717,9 @@ mod tests {
         ErasedActorPath::new(&format!("aether.window/aether.window.instance:{name}")).expect("fixture window path")
     }
 
-    fn test_staged_texture(pixels: Vec<u8>) -> StagedTexture {
-        StagedTexture {
+    fn test_staged_texture(pixels: Vec<u8>) -> Charged<StagedTexture> {
+        let bytes = pixels.len();
+        let texture = StagedTexture {
             width: 2,
             height: 2,
             format: TextureFormat::Rgba8,
@@ -1592,7 +1728,9 @@ mod tests {
             pixels: TexturePixels::Received(Blob::from(pixels)),
             realized: None,
             dirty: true,
-        }
+        };
+
+        MemoryGauge::detached().charged(bytes, texture)
     }
 
     /// A minimal headless state for the state tests — no window, no GPU
@@ -1604,11 +1742,12 @@ mod tests {
             triangles_rendered: 0,
             camera_state: IDENTITY_VIEW_PROJ,
             view_source: None,
-            overlay_frame: Vec::new(),
+            overlay_frame: OverlayFrame::default(),
             overlay_last_submitted: Vec::new(),
             material_frame: Vec::new(),
             material_last_submitted: Vec::new(),
             textures: TextureRegistry::new(),
+            text: TextState::new(),
             geometries: GeometryRegistry::new(),
             instances: InstancesRegistry::new(),
             draw_sets: DrawSetRegistry::new(),
@@ -1639,8 +1778,8 @@ mod tests {
     /// boot one. Every mail reaches the cap through the chassis and runs
     /// through production dispatch when the slot drains; replies go to a
     /// session on the loopback egress.
-    struct RenderFixture {
-        cap: PumpedDriver<RenderCapability>,
+    pub(super) struct RenderFixture {
+        pub(super) cap: PumpedDriver<RenderCapability>,
         egress: Receiver<EgressEvent>,
     }
 
@@ -1658,7 +1797,7 @@ mod tests {
     }
 
     impl RenderFixture {
-        fn boot(params: RenderParams) -> Self {
+        pub(super) fn boot(params: RenderParams) -> Self {
             let (registry, mailer, egress) = fresh_substrate_and_rx();
             let chassis = boot_bare_test_chassis(&registry, &mailer);
             let tuning = RenderTuningConfig {
@@ -1690,7 +1829,7 @@ mod tests {
             self.cap.send_and_settle(self.cap.chassis().actor_ref::<RenderCapability>(), mail, reply);
         }
 
-        fn send<K: Kind>(&mut self, mail: &K)
+        pub(super) fn send<K: Kind>(&mut self, mail: &K)
         where
             RenderCapability: HandlesKind<K>,
         {
@@ -1708,7 +1847,7 @@ mod tests {
         }
 
         /// [`Self::ask`], with the reply decoded.
-        fn request<K: Kind, R: Kind>(&mut self, mail: &K) -> R
+        pub(super) fn request<K: Kind, R: Kind>(&mut self, mail: &K) -> R
         where
             RenderCapability: HandlesKind<K>,
         {
@@ -1729,7 +1868,7 @@ mod tests {
                 .collect()
         }
 
-        fn read<T>(&self, read: impl FnOnce(&RenderCapabilityState) -> T) -> T {
+        pub(super) fn read<T>(&self, read: impl FnOnce(&RenderCapabilityState) -> T) -> T {
             self.cap.read_state(read).expect("the slot is live")
         }
     }
@@ -2014,9 +2153,94 @@ mod tests {
         );
     }
 
+    /// A peer that draws: it forwards each `DrawShapes` it is sent to the
+    /// renderer as mail of its own, so the renderer's turn reads this actor
+    /// as the stamped sender, as it reads any component that draws.
+    struct Drawer;
+
+    #[aether_actor::actor(instanced, root, depends(RenderCapability))]
+    impl NativeActor for Drawer {
+        const NAMESPACE: &'static str = "test.render.drawer";
+        type Config = ();
+
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self)
+        }
+
+        #[handler::tell]
+        fn on_draw_shapes(&mut self, ctx: &mut NativeCtx<'_>, mail: DrawShapes) {
+            let _ = self;
+            ctx.send::<RenderCapability>(&mail);
+        }
+    }
+
+    /// A shapes batch of `count` boxes: the count tells one batch from
+    /// another in the committed list.
+    fn shapes_batch(count: usize) -> DrawShapes {
+        let shape = Shape {
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 4.0,
+            corner_radius: 0.0,
+            fill: Some(Rgba::WHITE),
+            stroke: None,
+            shadow: None,
+            texture: None,
+        };
+
+        DrawShapes { space: QuadSpace::Screen, clip: None, shapes: vec![shape; count] }
+    }
+
+    fn shape_count(batch: &OverlayBatch) -> usize {
+        let OverlayBatch::Shapes { shapes, .. } = batch else {
+            panic!("the drawers send only shape batches");
+        };
+
+        shapes.len()
+    }
+
+    /// ADR-0248 §4. Three drawers are created in the reverse of their names'
+    /// order and draw in the reverse of the order they were created, one of
+    /// them twice with another's draw in between; a draw with no sender
+    /// arrives last. Every draw reaches the renderer as production mail and
+    /// its chain settles before the next is sent. The commit lays the
+    /// senderless batch first and the drawers' in creation order, and the
+    /// drawer that drew twice keeps its own order.
+    ///
+    /// It catches a commit that falls back to receipt order, a sort keyed on
+    /// path text, a sort that is not stable, and a handler that files its
+    /// batch under no sender.
+    #[test]
+    fn the_commit_orders_overlay_batches_by_sender_lineage_and_keeps_each_senders_own_order() {
+        let mut render = RenderFixture::boot(RenderParams::default());
+        let [oldest, middle, newest] = ["c", "b", "a"].map(|key| {
+            let spawned = render.cap.chassis().spawn_actor_for_test::<Drawer>(Subname::Named(key), (), ()).finish();
+            spawned.expect("the drawer spawns")
+        });
+
+        render.cap.send_and_settle(newest, &shapes_batch(1), None);
+        render.cap.send_and_settle(middle, &shapes_batch(2), None);
+        render.cap.send_and_settle(oldest, &shapes_batch(3), None);
+        render.cap.send_and_settle(middle, &shapes_batch(4), None);
+        render.send(&shapes_batch(5));
+
+        assert_eq!(
+            render.read(|state| state.overlay_frame.filed().map(shape_count).collect::<Vec<_>>()),
+            [1, 2, 3, 4, 5],
+            "the batches arrived in the order they were sent",
+        );
+        render.cap.host_turn(|state, _ctx| state.commit_scene(false)).expect("the slot is live");
+        assert_eq!(
+            render.read(|state| state.overlay_last_submitted.iter().map(shape_count).collect::<Vec<_>>()),
+            [5, 3, 2, 4, 1],
+            "no sender first, then the drawers in creation order, each drawer's own batches in send order",
+        );
+    }
+
     /// ADR-0213. Catches `draw_shapes` accumulating anywhere but the one
-    /// overlay accumulator, which would break painter order against the
-    /// other overlay verbs, and a first solid send that leaves the reserved
+    /// overlay accumulator, which would break one sender's send order
+    /// against the other overlay verbs, and a first solid send that leaves the reserved
     /// white texture uninserted.
     #[test]
     fn draw_shapes_accumulates_in_painter_order() {
@@ -2042,8 +2266,8 @@ mod tests {
         render.send(&DrawShapes { space: QuadSpace::Screen, clip: None, shapes: vec![shape.clone()] });
 
         render.read(|state| {
-            assert_eq!(state.overlay_frame.len(), 2, "both batches share the one overlay accumulator");
-            let OverlayBatch::Shapes { shapes, .. } = &state.overlay_frame[1] else {
+            assert_eq!(state.overlay_frame.filed().len(), 2, "both batches share the one overlay accumulator");
+            let Some(OverlayBatch::Shapes { shapes, .. }) = state.overlay_frame.filed().last() else {
                 panic!("a shape submission must accumulate as a shape batch, after the triangles sent before it");
             };
             assert_eq!(shapes.as_slice(), &[shape]);

@@ -11,7 +11,14 @@
 //!
 //! `TcpCapability` is the supervisor of its listener fleet: it spawns
 //! listeners, monitors them, and replies to unbind requests on their
-//! close. The cap holds its own listener entries, each with the proof
+//! close. It keeps the same kind of entry for each session it dialed, and
+//! it monitors every consumer something of its own is bound to: when a
+//! consumer closes, the cap mails `Close` to each listener bound to it and
+//! `SessionClose` to each session dialed for it, so such a listener reaches
+//! the cap as the same listener notice an unbind produces. The engine does
+//! not close an actor's children with it, so a listener holds an entry for
+//! each session it accepted and closes them when it closes. The cap holds
+//! its own listener entries, each with the proof
 //! its spawn returned; it does NOT walk the chassis-wide actor registry
 //! to enumerate children. Cap handlers don't introspect the registry — the
 //! cap-as-supervisor pattern keeps the actor model intact (caps
@@ -21,10 +28,10 @@
 //! ## Mail surface
 //!
 //! Control plane (mailed to `aether.tcp`):
-//! - `Connect { addr, name?, consumer? }` → `ConnectResult`
+//! - `Connect { addr, name?, consumer }` → `ConnectResult`
 //! - `ConnectSelf { addr, name? }` → `ConnectResult` (the sender is the
 //!   consumer)
-//! - `BindListener { addr, name?, consumer? }` → `BindListenerResult`
+//! - `BindListener { addr, name?, consumer }` → `BindListenerResult`
 //! - `BindListenerSelf { addr, name? }` → `BindListenerResult` (the sender
 //!   is the consumer)
 //! - `UnbindListener { listener_name }` → `UnbindListenerResult`
@@ -35,12 +42,19 @@
 //! A consumer covers the [`TcpConsumer`] protocol: it handles
 //! [`SessionData`] and [`SessionClosed`] silently. The explicit `consumer`
 //! is a `ProtocolPath<TcpConsumer>` proven at decode, a path that does not
-//! prove is answered `Err(Consumer(..))`, and a `_self` request casts its
-//! sender to the protocol at receipt, so every session holds its consumer as
-//! a `ProtocolRef<TcpConsumer>`.
+//! prove is answered `Err(Consumer(..))`, and a `_self` request's handler
+//! requires the protocol of its sender (ADR-0231 §11): the send builds only
+//! for an actor that covers it, the engine casts the sender before the
+//! handler runs, and a sender that does not cover it is answered
+//! `Err(Consumer(..))`. So every session holds its consumer as a
+//! `ProtocolRef<TcpConsumer>`.
 //!
-//! Listener (mailed to `aether.tcp.listener:<name>`):
+//! Listener (mailed to `aether.tcp/aether.tcp.listener:<name>`):
 //! - `Close` → cooperative shutdown via `ctx.shutdown()`
+//!
+//! A consumer is required of every bind and connect. A listener also
+//! closes when the consumer it was bound for closes, and takes the sessions
+//! it accepted with it; a dialed session closes when its consumer closes.
 //!
 //! ## Threading
 //!

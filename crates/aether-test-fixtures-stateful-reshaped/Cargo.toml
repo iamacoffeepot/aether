@@ -8,9 +8,9 @@ publish = false
 # ADR-0113 decode-miss companion / replace TARGET: same
 # `NAMESPACE = "test.stateful.typed"` and `CounterState` kind name as the typed
 # satellite, but a reshaped state shape (an added `generation` field
-# changes `Kind::ID`). Replacing the typed fixture with this one makes the
-# generated `on_rehydrate` decode-miss and boot fresh. Standalone for the
-# same two-binary reason as the typed satellite.
+# changes `Kind::ID`). Republishing the typed fixture with this one makes the
+# generated `on_rehydrate` decode-miss and return an error, which refuses the
+# republish. Standalone for the same two-binary reason as the typed satellite.
 [lib]
 crate-type = ["cdylib"]
 

@@ -64,16 +64,18 @@ impl WasmActor for Typed {
         Ok(Self)
     }
 
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.send::<Peer>(&Ping { seq: 1 });
+        Ok(())
     }
 
     fn unwire(&mut self, ctx: &mut WasmCtx<'_>) {
         ctx.send::<Peer>(&Ping { seq: 2 });
     }
 
-    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) {
+    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) -> Result<(), ActorInitError> {
         ctx.send::<Peer>(&Ping { seq: 3 });
+        Ok(())
     }
 
     #[handler::tell]

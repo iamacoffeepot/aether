@@ -1,11 +1,11 @@
 ---
 name: implement
-description: "Implement a currently approved Aether issue in an issue-specific worktree, open a draft pull request, drive its current head green, review it directly, and resolve findings. Use for digest-bound approved issues, quick mechanical runs, resume, or a confirmed sweep."
+description: "Implement a currently approved Aether issue in an issue-specific worktree, open a draft pull request, drive its current head green, and repair native review blockers. Use for digest-bound approved issues, quick mechanical runs, resume, or a confirmed sweep."
 ---
 
 # Implement
 
-Read [Codex harness](../_shared/codex-harness.md) and [GitHub workflow](../_shared/github-workflow.md) completely before acting. This is the only issue-to-reviewed-draft path. It never lands a pull request.
+Read [Codex harness](../_shared/codex-harness.md) and [GitHub workflow](../_shared/github-workflow.md) completely before acting. This is the only issue-to-draft path. It never lands a pull request.
 
 ## Inputs
 
@@ -36,7 +36,7 @@ Re-run `approval_records.py`, `plan_digest.py`, and the surface resolver; do not
 
 ### Quick gate
 
-Use quick mode only when explicitly requested and the Plan is complete, mechanical, and contains no public API, wire format, lifecycle, cross-crate design choice, or exploration. Quick skips only the routed worker; it still uses the approved base, issue worktree, draft pull request, checks, direct review, and finding loop.
+Use quick mode only when explicitly requested and the Plan is complete, mechanical, and contains no public API, wire format, lifecycle, cross-crate design choice, or exploration. Quick skips only the routed worker; it still uses the approved base, issue worktree, draft pull request, checks, and native blocker repair.
 
 ### Resume gate
 
@@ -47,9 +47,8 @@ Reconstruct progress from observable facts:
 - dirty worktree: continue only the remaining Plan work;
 - committed branch without a pull request: review the diff and continue at local verification;
 - open draft with pending or red current-head checks: continue the CI loop;
-- green draft without a trusted current-head hidden direct-review `APPROVE` record: run direct review;
-- a current hidden semantic `REQUEST_CHANGES`, native change request, finding, or unresolved thread: continue the integrated repair loop;
-- trusted hidden semantic `APPROVE`, no native review blocker, and resolved threads: implementation is complete and ready for `$land <PR>`.
+- green draft with an active native change request or an unresolved thread: continue native blocker repair;
+- green current head with no active native change request and every thread resolved: implementation is complete and ready for `$land <PR>`.
 
 On resume, require the current body digest and route to match the trusted approval and require the approval base to be an ancestor of the branch head. Do not require remote-tracking main to remain equal to the approval base after work started. Refuse `--quick --resume`.
 
@@ -129,29 +128,18 @@ Classify red checks:
 
 For every fix, re-run local format/clippy, overflow pricing, and worker-result cleanliness before pushing. Never amend or force-push reviewed commits without explicit owner approval. At the real-failure retry cap, record ordered attempts in one pull-request comment and return to Plan. A pending service at the wall-clock limit is an environment stop, not a scope failure.
 
-## Direct review
+## Native blocker repair
 
-After the current head is green, the implementer captures the pull-request head and freshly recomputed Plan digest, then directly inspects the complete current-head diff against every Plan step, current code, and applicable tests and conventions, inspecting overflow hunks like every other hunk. The implementer owns both the judgment and every repair; do not dispatch a hosted or separate formal review pass.
-
-Post actionable findings, when a durable handoff is useful, as tight current-head inline comments written in ordinary human prose. Record the semantic verdict only as the shared workflow's canonical hidden issue-body direct-review record, using its file-backed, byte-for-byte concurrency guard and post-mutation provenance validation. Never put machine JSON/HTML in a pull-request review or comment, request a native self-approval, or treat a native `APPROVED` review as the semantic record. A restart-level recommendation stops the loop, records human-readable evidence, and hands the issue to the recommended Define, Design, or Plan artifact. Otherwise:
-
-- a trusted current-head hidden semantic `APPROVE` with no actionable findings or independent native/thread blocker proceeds to the success state;
-- semantic `REQUEST_CHANGES`, a native change request, or actionable findings enter the integrated repair loop;
-- a head or managed-Plan change invalidates the verdict and requires fresh direct inspection of the new facts.
-
-## Integrated finding repair
-
-For each actionable review finding on the current head:
+A green current head needs no review record. An active native change request or an unresolved review thread, read under the shared contract, blocks it. For each one on the current head:
 
 1. reproduce and verify it;
 2. fix it, at any path (overflow is priced at landing), or write a concrete evidence-backed justification;
 3. commit fixes conventionally and push without rewriting history;
 4. rerun local checks, overflow pricing, and current-head CI;
 5. reply to the anchored thread with the fix commit or justification;
-6. resolve a thread only after its item is actually addressed;
-7. directly confirm every prior finding against the delta, then append the new head's hidden semantic record when needed under the shared idempotency rule.
+6. resolve a thread only after its item is actually addressed.
 
-Never silently waive a finding. A change requiring new scope or design stops with a rescope recommendation. Allow at most three repair iterations; a fourth requested-change result returns to Plan with the ordered history. Finish externally visible replies and resolutions before waiting again.
+Never silently waive an item, put machine JSON/HTML in a pull-request review or comment, or request a native self-approval. A native `CHANGES_REQUESTED` stays active until that reviewer approves or GitHub reports it dismissed. A change requiring new scope or design stops with a rescope recommendation. Allow at most three repair iterations; a fourth returns to Plan with the ordered history. Finish externally visible replies and resolutions before waiting again.
 
 ## Success state
 
@@ -162,13 +150,13 @@ Implementation succeeds when all of these are true for the same current head:
 - worktree and branch are present and clean;
 - priced overflow is reported;
 - required checks are green;
-- the newest trusted hidden direct-review record for the current issue, pull request, head, and digest says `APPROVE`, no active per-reviewer native `CHANGES_REQUESTED` decision remains under the shared contract, and every review thread is resolved;
+- no active per-reviewer native `CHANGES_REQUESTED` decision remains under the shared contract, and every review thread is resolved;
 - pull request remains draft and unmerged.
 
-Report issue, pull request, branch, worktree, digest/base, changed paths, checks, review, threads, retries, and the next action `$land <PR>`.
+Report issue, pull request, branch, worktree, digest/base, changed paths, checks, native reviews, threads, retries, and the next action `$land <PR>`.
 
 ## Sweep mode
 
 Sweep is two-turn. First enumerate open issues with complete managed artifacts and a current trusted approval at fresh `origin/main`. Apply every fresh gate, inspect worktree/branch claims, detect exact or pattern surface overlap, read route files, and show the bounded dispatch plan plus every drop. End for owner confirmation.
 
-After confirmation, revalidate the exact set and queue one issue per routed worker within live collaboration capacity. Never pack unrelated issues or dispatch overlapping surfaces concurrently. As workers finish, the parent performs review, checks, overflow pricing, push, draft creation, CI, direct review, and finding repair for that issue. One failure never authorizes edits in another worktree.
+After confirmation, revalidate the exact set and queue one issue per routed worker within live collaboration capacity. Never pack unrelated issues or dispatch overlapping surfaces concurrently. As workers finish, the parent performs review, checks, overflow pricing, push, draft creation, CI, and native blocker repair for that issue. One failure never authorizes edits in another worktree.

@@ -28,6 +28,8 @@ use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::ResolvePathError;
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::component::ComponentCtx;
+#[cfg(feature = "wasm")]
+use crate::actor::wasm::module::Module;
 use crate::chassis::settlement::SettlementRegistry;
 use crate::mail::attachments::{EncodedMail, encode_envelope, inline_payload, plain_payload};
 use crate::mail::capability::CapabilityRegistry;
@@ -35,10 +37,13 @@ use crate::mail::cost::CostTable;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::effect::ACTIVATION_BARRIER_KIND;
 use crate::mail::registry::{
-    AddressResolutionError, CapturedDisposition, DispatchParts, MailDispatch, OwnedDispatch, ParkAdmission, Registry,
-    RegistryQueueMetrics, RegistrySubscription, ResolvedAddress, RouteContinuation, RouteEndpoint, RouteRelayHandle,
+    AddressResolutionError, CapturedDisposition, DispatchParts, LineageOrder, MailDispatch, OwnedDispatch,
+    ParkAdmission, Registry, RegistryQueueMetrics, RegistrySubscription, ResolvedAddress, RouteContinuation,
+    RouteEndpoint, RouteRelayHandle,
 };
 use crate::mail::{Mail, Source, SourceAddr};
+use crate::memory::{self, BlobStoreMemory, MemoryLedger, MemoryReport, OwnerMemory};
+use crate::runtime::actor_clock::ActorClock;
 use crate::runtime::thread_name;
 use crate::runtime::trace::{SentRecord, SettlementHold, TraceHandle};
 use crate::scheduler::pending_depth;
@@ -124,6 +129,11 @@ pub struct Mailer {
     /// fold (that runs lock-free through the per-actor cache). Allocated
     /// empty by [`Self::new`] (like `trace_handle`).
     cost_table: Arc<CostTable>,
+    /// The engine's memory ledger: one row per live
+    /// [`MemoryGauge`](crate::memory::MemoryGauge), written by its owner as
+    /// its bytes change and read by [`Self::memory_report`]. A sibling of
+    /// [`Self::cost_table`], and like it never touched on mail dispatch.
+    memory_ledger: Arc<MemoryLedger>,
     /// ADR-0080 §6: the engine's one chassis-root correlation counter. Every
     /// chassis-root push mints `MailId(CHASSIS_MAILBOX_ID, n)` from here, so no
     /// two senders can mint the same root. Starts at 1; 0 is the sentinel.
@@ -132,6 +142,10 @@ pub struct Mailer {
     /// `Mailer` per engine and every ctx reaches it through its binding, so
     /// `NativeCtx::check_in` lands every native check-in here.
     blob_store: BlobStore,
+    /// The engine's one actor clock, fixed when the `Mailer` is built. Every
+    /// ctx reaches it through its binding, so a guest's and a native actor's
+    /// `ctx.now()` read the same clock.
+    actor_clock: ActorClock,
 }
 
 /// A chassis root minted from the [`Mailer`]'s counter, its `Sent` recorded,
@@ -177,8 +191,10 @@ impl Mailer {
             route_relay: OnceLock::new(),
             capability_registry: Arc::new(CapabilityRegistry::new()),
             cost_table: Arc::new(CostTable::new()),
+            memory_ledger: Arc::new(MemoryLedger::default()),
             chassis_roots: AtomicU64::new(1),
             blob_store: BlobStore::new().expect("spawn the blob reclaim thread"),
+            actor_clock: ActorClock::running(),
         }
     }
 
@@ -186,6 +202,12 @@ impl Mailer {
     /// only public route to it is `NativeCtx::check_in`.
     pub(crate) const fn blob_store(&self) -> &BlobStore {
         &self.blob_store
+    }
+
+    /// The engine's actor clock. Crate-private, so the only public route to
+    /// a reading is a ctx's `now()`.
+    pub(crate) const fn actor_clock(&self) -> &ActorClock {
+        &self.actor_clock
     }
 
     /// ADR-0080 §5 chassis-mail router installation. Called once by
@@ -221,6 +243,15 @@ impl Mailer {
     #[must_use]
     pub fn with_trace_handle(mut self, handle: TraceHandle) -> Self {
         self.trace_handle = handle;
+        self
+    }
+
+    /// Swap in a non-default [`ActorClock`]. Every engine keeps the running
+    /// clock [`Self::new`] anchors; a harness whose test steps the clock by
+    /// hand passes a stepped one here before the `Arc` wrap.
+    #[must_use]
+    pub fn with_actor_clock(mut self, clock: ActorClock) -> Self {
+        self.actor_clock = clock;
         self
     }
 
@@ -434,6 +465,28 @@ impl Mailer {
             .expect("a minted reference names a route whose proven canonical name the registry keeps for the session")
     }
 
+    /// Where the actor `reference` proves stands in the actor tree by creation
+    /// order, as [`Registry::lineage_order`] reads it. The crate-private path
+    /// behind
+    /// [`NativeCtx::lineage_order`](crate::actor::native::ctx::NativeCtx::lineage_order).
+    ///
+    /// # Panics
+    ///
+    /// When the route table holds no record for `reference` or for one of its
+    /// ancestors. The registry mints a reference only for a route that holds
+    /// a record, refuses a birth whose parent holds none, and keeps every
+    /// record through `Dropped`. A record leaves the table only when a
+    /// `Starting` reservation is cancelled, or a claim is withdrawn before
+    /// any actor could have observed it; neither follows a mint that
+    /// survives, and the births a starting actor staged beneath itself are
+    /// discarded with it. So a missing record is a broken invariant
+    /// (ADR-0063).
+    pub(crate) fn lineage_order(&self, reference: ErasedActorRef) -> LineageOrder {
+        self.registry.lineage_order(reference).expect(
+            "a minted reference names a route whose record, and every ancestor's, the registry keeps for the session",
+        )
+    }
+
     /// The reference for a host-stamped position that holds a route record,
     /// as [`Registry::stamped_sender`] mints it. The crate-private path behind
     /// [`NativeCtx::sender`](crate::actor::native::ctx::NativeCtx::sender).
@@ -474,9 +527,15 @@ impl Mailer {
     /// crate-private builder behind
     /// [`NativeInitCtx::guest_ctx`](crate::actor::native::NativeInitCtx::guest_ctx) and
     /// [`NativeCtx::guest_ctx`](crate::actor::native::ctx::NativeCtx::guest_ctx).
+    /// `module` is the module the guest runs.
     #[cfg(feature = "wasm")]
-    pub(crate) fn guest_ctx(&self, binding: Arc<NativeBinding>, outbound: Arc<HubOutbound>) -> ComponentCtx {
-        ComponentCtx::new(binding, Arc::clone(&self.registry), outbound)
+    pub(crate) fn guest_ctx(
+        &self,
+        binding: Arc<NativeBinding>,
+        outbound: Arc<HubOutbound>,
+        module: Module,
+    ) -> ComponentCtx {
+        ComponentCtx::new(binding, Arc::clone(&self.registry), outbound, module)
     }
 
     /// Subscribe `target` to the registry's inventory changes, as
@@ -510,6 +569,45 @@ impl Mailer {
     /// recipient-group cells from it at flush.
     pub fn cost_table(&self) -> &Arc<CostTable> {
         &self.cost_table
+    }
+
+    /// The engine's memory ledger. Crate-private: an actor mints its gauge
+    /// through [`NativeInitCtx::memory_gauge`](crate::actor::native::NativeInitCtx::memory_gauge),
+    /// and a hosted guest's ctx mints its own.
+    pub(crate) const fn memory_ledger(&self) -> &Arc<MemoryLedger> {
+        &self.memory_ledger
+    }
+
+    /// What the engine holds right now: the process's resident set, the blob
+    /// store's three counters, and one row per owner and label from the
+    /// ledger, sorted by owner then label. An owner the registry holds no
+    /// name for is named by its tagged id text, so no row is dropped. Two
+    /// gauges one owner holds under one label, as a guest and its
+    /// replacement do while a republish prepares, are one row with their
+    /// sum. The crate-private path behind
+    /// [`NativeCtx::memory_report`](crate::actor::native::ctx::NativeCtx::memory_report).
+    pub(crate) fn memory_report(&self) -> MemoryReport {
+        let mut owners: Vec<OwnerMemory> = self
+            .memory_ledger
+            .rows()
+            .into_iter()
+            .map(|row| OwnerMemory {
+                owner: self.registry.mailbox_name(row.owner).unwrap_or_else(|| row.owner.to_string()),
+                label: row.label,
+                bytes: memory::report_bytes(row.bytes),
+            })
+            .collect();
+        owners.sort_by(|a, b| (a.owner.as_str(), a.label).cmp(&(b.owner.as_str(), b.label)));
+
+        MemoryReport {
+            process_bytes: memory::resident_set_bytes(),
+            blob_store: BlobStoreMemory {
+                resident_bytes: memory::report_bytes(self.blob_store.resident_bytes()),
+                slab_bytes: memory::report_bytes(self.blob_store.slab_bytes()),
+                slab_member_bytes: memory::report_bytes(self.blob_store.slab_member_bytes()),
+            },
+            owners,
+        }
     }
 
     /// Hand `mail` to the substrate for dispatch. `Inbox`-bound

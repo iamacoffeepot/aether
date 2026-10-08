@@ -59,7 +59,7 @@ impl Spawner {
                     await_internal_signal(&rx, gate, frame_loop::DRAIN_BUDGET, cap, TerminalDisposition::Panic, None);
             }
             None => assert!(
-                self.actor_registry.is_closed_at(id),
+                self.actor_registry().is_closed_at(id),
                 "{gate}: {id} is not a pooled instanced actor; await_closed covers only those"
             ),
         }

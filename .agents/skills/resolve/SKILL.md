@@ -1,6 +1,6 @@
 ---
 name: resolve
-description: "Resolve a named Aether draft pull request's content conflicts by merging current main into its branch, preserving both intents with overflow priced at landing, and driving the resolved head through CI, direct review, and repair. Use when `$land` reports a content conflict; never rebases, force-pushes, or merges."
+description: "Resolve a named Aether draft pull request's content conflicts by merging current main into its branch, preserving both intents with overflow priced at landing, and driving the resolved head through CI and repair. Use when `$land` reports a content conflict; never rebases, force-pushes, or merges."
 ---
 
 # Resolve
@@ -18,7 +18,7 @@ $resolve <PR> --retry-cap <N> --wall-clock <minutes>
 
 Defaults are three real code-failure retries and 30 minutes after the first resolution push.
 
-The invocation authorizes one ordinary merge of current `origin/main` into the named draft's branch, repair commits, plain pushes of that branch, inline finding replies, thread resolution, and the hidden direct-review append for this pull request. It does not authorize rebasing, amending, force-pushing, clearing draft state, or merging.
+The invocation authorizes one ordinary merge of current `origin/main` into the named draft's branch, repair commits, plain pushes of that branch, review-thread replies, and thread resolution for this pull request. It does not authorize rebasing, amending, force-pushing, clearing draft state, or merging.
 
 ## Preconditions
 
@@ -57,16 +57,14 @@ Tie every step to the new current head:
 2. classify and repair deterministic failures at any path; overflow is priced;
 3. commit each repair conventionally and plain-push;
 4. rerun local checks, overflow pricing, and CI after every change;
-5. directly inspect the complete current-head diff against the Plan, both merge intents, current code, and applicable tests and conventions;
-6. post any tight inline findings in ordinary human prose, then append and re-read the hidden issue-body direct-review record through the shared file-backed, byte-for-byte concurrency guard and post-mutation provenance check; never put machine JSON/HTML in a pull-request review or comment;
-7. verify, fix, or justify findings, reply with the fix commit, resolve addressed threads, and directly confirm prior findings against the delta before recording the new head's verdict.
+5. verify, fix, or justify each active native change request and unresolved thread, reply with the fix commit, and resolve addressed threads; never put machine JSON/HTML in a pull-request review or comment.
 
-The parent owns the merge resolution, the review judgment, and every repair; do not dispatch a hosted or separate formal review pass or a separate finding-handling skill. A head change invalidates old CI and review evidence.
+The parent owns the merge resolution and every repair; do not dispatch a hosted or separate formal review pass or a separate finding-handling skill. A head change invalidates old CI evidence.
 
-At most three repair iterations are allowed. A fourth requested-change result or a current-code contradiction returns a `$scope <issue> --phase plan` recommendation with ordered evidence. Authentication, runner, or network failure preserves the branch and reports the exact retry point.
+At most three repair iterations are allowed. A fourth red or blocked result or a current-code contradiction returns a `$scope <issue> --phase plan` recommendation with ordered evidence. Authentication, runner, or network failure preserves the branch and reports the exact retry point.
 
 ## Return to land
 
-Resolution completes only when the same current head is CI-green, overflow priced, approved by a trusted hidden issue-body semantic record for the exact issue, pull request, head, and digest, free of active native change requests, and has every review thread resolved. Leave the pull request draft and unmerged, keep the clean worktree and branch, and report `$land <PR>` as the next action.
+Resolution completes only when the same current head is CI-green, overflow priced, free of active native change requests, and has every review thread resolved. Leave the pull request draft and unmerged, keep the clean worktree and branch, and report `$land <PR>` as the next action.
 
-Never open a new pull request, clear draft state, merge, edit managed Plan sections or any issue-body byte except the canonical hidden direct-review append, expand Declared surface, rebase, amend, or force-push.
+Never open a new pull request, clear draft state, merge, edit managed Plan sections or any other issue-body byte, expand Declared surface, rebase, amend, or force-push.

@@ -23,6 +23,8 @@ pub use aether_substrate::chassis::error::BootError;
 
 pub use crate::config::TcpSessionConfig;
 
+use std::mem;
+
 use aether_actor::{ProtocolRef, runtime};
 use aether_codec::frame::pop_frame;
 // The moved handler bodies name the cap kinds backing their signatures; bring
@@ -47,19 +49,33 @@ pub const READ_BUFFER_BYTES: usize = 64 * 1024;
 pub struct TcpSessionState {
     pub peer: String,
     pub session_name: String,
-    /// The bound consumer, proven by the cap at receipt to cover
-    /// [`TcpConsumer`] (ADR-0230, ADR-0231 §3/§4), so a fan-out through it
-    /// compiles only for `SessionData` and `SessionClosed`. Every delivery
-    /// inherits the handler's causal chain; a proof rather than a runtime
-    /// name, because a name cannot reach a nested actor such as a component
-    /// loaded beneath a parent at `parent/NS:key`.
-    pub consumer: Option<ProtocolRef<TcpConsumer>>,
+    /// The consumer, proven by the cap at receipt to cover [`TcpConsumer`]
+    /// (ADR-0230, ADR-0231 §3/§4), so a send through it compiles only for
+    /// `SessionData` and `SessionClosed`. Every delivery inherits the
+    /// handler's causal chain; a proof rather than a runtime name, because a
+    /// name cannot reach a nested actor such as a component loaded beneath a
+    /// parent at `parent/NS:key`.
+    ///
+    /// This session does not watch it. The cap monitors the consumer and,
+    /// when it closes, closes each session it dialed and each listener it
+    /// bound, and a closing listener closes the sessions it accepted.
+    pub consumer: ProtocolRef<TcpConsumer>,
     pub read_buffer: Vec<u8>,
     pub write_half: TcpStream,
     pub shutdown: Arc<AtomicBool>,
-    pub read_start: Option<mpsc::Sender<()>>,
-    pub read_thread: Option<JoinHandle<()>>,
+    /// Where the read sidecar stands between parked, running, and stopped.
+    pub read_sidecar: ReadSidecar,
     pub bytes_rx: mpsc::Receiver<Result<Vec<u8>, String>>,
+}
+
+/// Where the read sidecar stands between parked, running, and stopped.
+pub enum ReadSidecar {
+    /// The thread was spawned in `init` and the gate is not yet released.
+    Parked { gate: mpsc::Sender<()>, thread: JoinHandle<()> },
+    /// `wire` released the gate and the thread is reading.
+    Running { thread: JoinHandle<()> },
+    /// Shutdown was requested and the thread was joined.
+    Stopped,
 }
 
 #[runtime]
@@ -70,14 +86,13 @@ impl NativeActor for TcpSessionActor {
     type Config = TcpSessionConfig;
     const NAMESPACE: &'static str = "aether.tcp.session";
 
-    fn init(mut config: TcpSessionConfig, ctx: &mut NativeInitCtx<'_>) -> Result<TcpSessionState, BootError> {
-        let stream = config.stream.take().expect("TcpSessionConfig::stream consumed exactly once");
+    fn init(config: TcpSessionConfig, ctx: &mut NativeInitCtx<'_>) -> Result<TcpSessionState, BootError> {
         // Split read/write via try_clone — both halves point at
         // the same underlying socket, but each is independently
         // owned. Read sidecar uses one for blocking reads; the
         // dispatcher uses the other for writes + Shutdown.
-        let read_half = stream.try_clone().map_err(|e| BootError::Other(Box::new(e)))?;
-        let write_half = stream;
+        let read_half = config.stream.try_clone().map_err(|e| BootError::Other(Box::new(e)))?;
+        let write_half = config.stream;
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_for_thread = Arc::clone(&shutdown);
@@ -151,16 +166,21 @@ impl NativeActor for TcpSessionActor {
             read_buffer: Vec::new(),
             write_half,
             shutdown,
-            read_start: Some(read_start_tx),
-            read_thread: Some(thread),
+            read_sidecar: ReadSidecar::Parked { gate: read_start_tx, thread },
             bytes_rx,
         })
     }
 
-    fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
-        if let Some(start) = state.read_start.take() {
-            let _ = start.send(());
+    fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
+        let sidecar = mem::replace(&mut state.read_sidecar, ReadSidecar::Stopped);
+        match sidecar {
+            ReadSidecar::Parked { gate, thread } => {
+                let _ = gate.send(());
+                state.read_sidecar = ReadSidecar::Running { thread };
+            }
+            other => state.read_sidecar = other,
         }
+        Ok(())
     }
 
     fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
@@ -170,8 +190,16 @@ impl NativeActor for TcpSessionActor {
         // Best-effort: a peer that already closed gives EBADF or
         // ENOTCONN here, which is fine.
         let _ = state.write_half.shutdown(Shutdown::Both);
-        if let Some(t) = state.read_thread.take() {
-            let _ = t.join();
+        let sidecar = mem::replace(&mut state.read_sidecar, ReadSidecar::Stopped);
+        match sidecar {
+            ReadSidecar::Parked { gate, thread } => {
+                drop(gate);
+                let _ = thread.join();
+            }
+            ReadSidecar::Running { thread } => {
+                let _ = thread.join();
+            }
+            ReadSidecar::Stopped => {}
         }
         tracing::info!(
             target: "aether_tcp",
@@ -196,7 +224,7 @@ impl NativeActor for TcpSessionActor {
                     loop {
                         match pop_frame(&mut state.read_buffer) {
                             Ok(Some(bytes)) => {
-                                ctx.fanout(
+                                ctx.send_to(
                                     state.consumer,
                                     &SessionData {
                                         session_name: state.session_name.clone(),
@@ -214,7 +242,7 @@ impl NativeActor for TcpSessionActor {
                                     error = %error,
                                     "tcp session frame rejected",
                                 );
-                                ctx.fanout(
+                                ctx.send_to(
                                     state.consumer,
                                     &SessionClosed {
                                         session_name: state.session_name.clone(),
@@ -234,7 +262,7 @@ impl NativeActor for TcpSessionActor {
                     } else {
                         format!("{reason}; dropped {} trailing frame bytes", state.read_buffer.len())
                     };
-                    ctx.fanout(
+                    ctx.send_to(
                         state.consumer,
                         &SessionClosed { session_name: state.session_name.clone(), peer: state.peer.clone(), reason },
                     );
@@ -263,9 +291,11 @@ impl NativeActor for TcpSessionActor {
         }
     }
 
-    /// Cooperative external close. Peer mails this, we call
-    /// `ctx.shutdown()`, the dispatcher drains remaining inbox
-    /// mail, runs `unwire` (which joins the read thread).
+    /// Cooperative external close. The consumer mails this to end one
+    /// session, the cap mails it to a session it dialed when that session's
+    /// consumer closes, and a closing listener mails it to each session it
+    /// accepted. We call `ctx.shutdown()`, the dispatcher drains remaining
+    /// inbox mail, runs `unwire` (which joins the read thread).
     // Stateless close-request handler: shutdown is via ctx, so `_state`
     // is unused.
     #[handler::tell]

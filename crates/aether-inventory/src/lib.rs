@@ -4,7 +4,7 @@
 //! (the MCP harness) reads the running substrate's **own, per-build**
 //! state instead of a drift-prone compiled-in copy.
 //!
-//! Five request kinds, each replying synchronously (ADR-0112 `-> R`):
+//! Six request kinds, each replying synchronously (ADR-0112 `-> R`):
 //!
 //! - [`Manifest`] → [`ManifestResult`]: the compile-time manifest —
 //!   every link-time [`NameEntry`](aether_data::name_inventory::NameEntry)
@@ -42,9 +42,15 @@
 //!   the reply per `namespace` so a native cap (`aether.fs`,
 //!   `aether.render`, …) surfaces its `In -> Out` the way
 //!   `describe_component` surfaces a wasm component's.
+//! - [`ListMemory`] → [`ListMemoryResult`]: what the engine holds, by
+//!   owner — the process's resident set size, the blob store's three byte
+//!   counts, and one row per owner and label from the engine's memory
+//!   ledger (each live wasm component's linear memory, the render
+//!   capability's staged textures and geometry). A debug overlay asks about
+//!   once a second.
 //!
 //! The `Manifest` / `Resolve` / `ResolveAddress` / `ListKinds` /
-//! `ListHandlers` family is
+//! `ListHandlers` / `ListMemory` family is
 //! owned here in [`kinds`], per the `capability-anatomy.md` rule. Its one
 //! upstream consumer, `aether-mcp`, takes this crate identity-only
 //! (`default-features = false`) exactly as it takes `aether-fs` — the
@@ -54,7 +60,8 @@
 //! holdout in `aether-kinds`: `aether-fleet` uses it for component config
 //! descriptors, so it is shared vocabulary rather than cap-owned.
 //!
-//! The cap is stateless. `ResolveAddress`, `ListKinds`, and `Resolve`'s
+//! The cap is stateless. `ListMemory` reads the engine's memory ledger
+//! through `NativeCtx::memory_report`. `ResolveAddress`, `ListKinds`, and `Resolve`'s
 //! mailbox and kind ids read the engine's `Registry` through handler ctx read
 //! verbs (`NativeCtx::canonical_path`, `kind_descriptors`, `tagged_id_name`)
 //! — the same registry the component-host cap stages its loaded kinds into,
@@ -69,11 +76,11 @@
 #![forbid(unsafe_code)]
 
 // Handler-signature kinds must be importable at module root because
-// `#[actor]` emits `impl HandlesKind<K> for InventoryCapability {}`
+// `#[actor]` emits `impl HandlesKind<K> for InventoryCapability { type Sender = aether_actor::Anyone; }`
 // markers always-on, outside the `feature = "runtime"` gate. The reply
 // kinds are named only by the gated handler bodies, so they ride the
 // runtime gate below.
-use kinds::{ListHandlers, ListKinds, Manifest, Resolve, ResolveAddress};
+use kinds::{ListHandlers, ListKinds, ListMemory, Manifest, Resolve, ResolveAddress};
 
 use aether_actor::actor;
 
@@ -106,7 +113,7 @@ pub struct InventoryCapability;
 // helpers, the `aether_substrate`-typed imports, and the state struct
 // sit behind the one `feature = "runtime"` gate.
 #[cfg(not(target_family = "wasm"))]
-use kinds::{HandlersResult, ListKindsResult, ManifestResult, ResolveAddressResult, ResolveResult};
+use kinds::{HandlersResult, ListKindsResult, ListMemoryResult, ManifestResult, ResolveAddressResult, ResolveResult};
 
 // The runtime half — the `aether_substrate`-typed imports, the state
 // struct, the `#[runtime] impl`, and the cap's tests — lives under the

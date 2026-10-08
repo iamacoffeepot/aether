@@ -1,6 +1,7 @@
 //! Typed actor paths (ADR-0230 §2, ADR-0231 §3): [`ActorPath`] and
-//! [`ProtocolPath`], descriptions with a codec, and [`ResolveError`], why a
-//! receiver's `resolve` could not prove one.
+//! [`ProtocolPath`], descriptions with a codec, [`TypedPath`], which names
+//! the proof each resolves to, and [`ResolveError`], why a receiver's
+//! `resolve` could not prove one.
 //!
 //! A typed path is an [`ErasedActorPath`] under a compile-time claim: that an
 //! `R` lives at the text, or an actor covering the protocol `P`. The claim is
@@ -18,6 +19,7 @@
 //! proofs: a path names, a reference sends.
 
 use alloc::vec::Vec;
+use core::cmp::Ordering;
 use core::fmt::{self, Debug, Display, Formatter};
 use core::hash::{Hash, Hasher};
 
@@ -30,7 +32,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// The value, kind-field, encode, and serialize traits both typed paths
 /// share, over the text alone and with no bound on the phantom parameter.
-/// `Clone`, `PartialEq`, `Eq`, and `Hash` compare the text. `Debug` prints
+/// `Clone`, `PartialEq`, `Eq`, `PartialOrd`, `Ord`, and `Hash` compare the text. `Debug` prints
 /// `Name("text")`, because a path is a name, not a position, and `Display`
 /// prints the text. The kind-field, encode, and serialize traits delegate to
 /// [`ErasedActorPath`]'s. Each type writes its own decodes beside it, over
@@ -52,6 +54,18 @@ macro_rules! typed_path_traits {
         }
 
         impl<$param> Eq for $name<$param> {}
+
+        impl<$param> PartialOrd for $name<$param> {
+            fn partial_cmp(&self, other: &Self) -> Option<super::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        impl<$param> Ord for $name<$param> {
+            fn cmp(&self, other: &Self) -> super::Ordering {
+                self.path.cmp(&other.path)
+            }
+        }
 
         impl<$param> super::Hash for $name<$param> {
             fn hash<H: super::Hasher>(&self, state: &mut H) {
@@ -104,11 +118,13 @@ mod actor_path;
 mod path_refused;
 mod protocol_path;
 mod resolve_error;
+mod typed_path;
 
 pub use actor_path::ActorPath;
 pub use path_refused::{PathRefusal, PathRefused};
 pub use protocol_path::ProtocolPath;
 pub use resolve_error::ResolveError;
+pub use typed_path::{ConfirmedLive, TypedPath};
 
 /// A decoded typed path is a well-formed canonical path (ADR-0230 §2,
 /// ADR-0231 §3): a typed path is written from actor types, so it never has a
@@ -268,6 +284,46 @@ mod tests {
             }),
         );
         assert!(Carries::decode_from_bytes(&wire(CANONICAL)).is_none(), "the shorthand has no context");
+    }
+
+    /// A decode consults the published routes only while a `ProtocolPath`
+    /// field decodes, once per field. In a guest each ask is a host call, so
+    /// a decode that asked for a kind with no protocol path — for an erased
+    /// path, an `ActorPath`, or once per kind whatever its fields — would put
+    /// a host call on every mail, and one that asked once for a kind with two
+    /// paths would leave the second unproven.
+    #[test]
+    fn a_decode_asks_the_routes_once_per_protocol_path_and_never_otherwise() {
+        #[aether_data::kind(name = "test.path.pathless")]
+        struct Pathless {
+            seq: u32,
+            erased: ErasedActorPath,
+            member: ActorPath<Member>,
+        }
+
+        #[aether_data::kind(name = "test.path.pair", no_serde)]
+        struct Pair {
+            first: ProtocolPath<Poking>,
+            second: Option<ProtocolPath<Poking>>,
+        }
+
+        let canonical = ErasedActorPath::new(CANONICAL).expect("a well-formed path");
+        let singleton = ErasedActorPath::new("test.unit").expect("a well-formed path");
+        let routes = Recording::answering(<<Poking as Protocol>::Rows as RowSet>::CONTRACTS);
+
+        let pathless =
+            Pathless { seq: 7, erased: canonical.clone(), member: ActorPath::from_erased(canonical.clone()) };
+        Pathless::decode_with(&pathless.encode_into_bytes(), &mut DecodeCtx::empty().routes(&routes))
+            .expect("a kind with no protocol path decodes");
+        assert!(routes.asked.borrow().is_empty(), "a kind with no protocol path asks nothing");
+
+        let pair = Pair {
+            first: ProtocolPath::from_erased(canonical.clone()),
+            second: Some(ProtocolPath::from_erased(singleton.clone())),
+        };
+        Pair::decode_with(&pair.encode_into_bytes(), &mut DecodeCtx::empty().routes(&routes))
+            .expect("both paths prove against covering rows");
+        assert_eq!(*routes.asked.borrow(), [canonical, singleton], "one ask per protocol path, in field order");
     }
 
     /// An `ActorPath<R>` that exists names an `R`: a decode that claimed `R`

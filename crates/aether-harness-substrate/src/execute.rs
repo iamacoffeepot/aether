@@ -26,12 +26,12 @@ use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_actor::{ActorRef, At, Direct, ErasedActorRef, HandlesKind, Protocol, ProtocolRef, RowAt};
-use aether_data::{ErasedActorPath, Kind, KindId};
+use aether_actor::{ActorPath, ActorRef, At, Direct, ErasedActorRef, HandlesKind, Protocol, ProtocolRef, RowAt};
+use aether_data::{Kind, KindId};
 use aether_kinds::trace::TraceTail;
 use aether_kinds::{CostTail, LogTail, NamedMail};
 use aether_substrate::{PassiveChassis, ReplyTarget, mail::MailId};
-use aether_window::{InjectWindowEvent, WindowCapability};
+use aether_window::{InjectWindowEvent, WindowCapability, WindowInstance};
 use crossbeam_channel::Receiver;
 
 use super::chassis::SubstrateHarnessChassis;
@@ -389,14 +389,18 @@ impl HarnessOp {
     }
 
     /// Inject any typed event as originating from the window at `window`, a
-    /// window's canonical path (`aether_window::window_path`), through the
+    /// window's typed path (`aether_window::WindowInstance::path`), through the
     /// synthetic window capability `synthetic` proves — the reference
     /// [`SubstrateHarness::actor_ref`] returns for it.
     ///
     /// `K` is inferred from `event`; the synthetic runtime forwards its
     /// already-encoded payload without a maintained window-event kind list.
     #[must_use]
-    pub fn window_event<K: Kind>(synthetic: &ActorRef<WindowCapability>, window: ErasedActorPath, event: &K) -> Self {
+    pub fn window_event<K: Kind>(
+        synthetic: &ActorRef<WindowCapability>,
+        window: ActorPath<WindowInstance>,
+        event: &K,
+    ) -> Self {
         let injection = InjectWindowEvent { window, kind: K::ID, payload: event.encode_into_bytes() };
         Self::send_and_settle(synthetic, &injection)
     }
@@ -454,7 +458,7 @@ impl HarnessOp {
     /// # use aether_harness_substrate::{HarnessOp, SubstrateHarness};
     /// # use aether_window::{ListWindows, ListWindowsResult, WindowCapability};
     /// # let harness = SubstrateHarness::start().expect("boot");
-    /// # let surviving = aether_window::window_path(&aether_data::LoadName::new("main").expect("name"));
+    /// # let surviving = aether_window::WindowInstance::path(&aether_data::LoadName::new("main").expect("name"));
     /// let window = harness.actor_ref::<WindowCapability>();
     /// HarnessOp::poll_until(&window, &ListWindows, move |reply: &ListWindowsResult| {
     ///     matches!(reply, ListWindowsResult::Ok { windows }

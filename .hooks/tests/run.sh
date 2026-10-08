@@ -34,7 +34,7 @@ sgit init -q
 ERRF="$SCAFFOLD/.git/hooktest.stderr"
 sgit config user.email test@example.com
 sgit config user.name test
-printf '/research/\n/.claude/worktrees/\n/.agents/worktrees/\n' > "$SCAFFOLD/.gitignore"
+printf '/research/\n/.claude/worktrees/\n/.agents/worktrees/\n/.agents/ledger/\n' > "$SCAFFOLD/.gitignore"
 mkdir -p "$SCAFFOLD/src" "$SCAFFOLD/research" "$SCAFFOLD/.hooks"
 printf 'fn main() {}\n' > "$SCAFFOLD/src/lib.rs"
 cp "$HOOKS"/*.sh "$SCAFFOLD/.hooks/"
@@ -293,6 +293,161 @@ expect "codex bind: thread id -> worktree and context" bind-session-worktree-cod
 assert "codex bind: worktree created" test -d "$SCAFFOLD/.agents/worktrees/codex-t1"
 expect "codex bind: no id -> silent" bind-session-worktree-codex.sh '{}' 0
 if [ -z "$OUT" ]; then ok "codex bind: no id -> no output" "[empty]"; else bad "codex bind: no id -> no output" "unexpected stdout"; fi
+
+# The agent-wait hooks key on `agent_id`, which the harness sets only on a
+# subagent's hook input. Their ledger lands in the scaffold (CLAUDE_PROJECT_DIR).
+LEDGER="$SCAFFOLD/.agents/ledger/agent-waits.jsonl"
+ledger_lines() { if [ -f "$LEDGER" ]; then wc -l < "$LEDGER" | tr -d ' '; else echo 0; fi; }
+# ledger_grew <desc> <before> <want-delta>
+ledger_grew() {
+    OUT=""
+    ERR=""
+    local got=$(( $(ledger_lines) - $2 ))
+    if [ "$got" = "$3" ]; then ok "$1" "[+$got]"; else bad "$1" "want +$3 ledger lines, got +$got"; fi
+}
+# agentbash <agent_type|""> <command> [extra tool_input object]  — "" is the main session
+agentbash() {
+    local extra="${3:-}"
+    [ -n "$extra" ] || extra='{}'
+    jq -nc --arg t "$1" --arg c "$2" --argjson x "$extra" \
+        '{session_id:"SESS",tool_name:"Bash",tool_input:({command:$c} + $x)}
+         + (if $t == "" then {} else {agent_id:"a1",agent_type:$t} end)'
+}
+# A file modification time <secs> in the past, portable across BSD and GNU.
+age_file() {
+    local at=$(( $(date +%s) - $2 )) stamp
+    stamp=$(date -r "$at" +%Y%m%d%H%M.%S 2>/dev/null) || stamp=$(date -d "@$at" +%Y%m%d%H%M.%S)
+    touch -t "$stamp" "$1"
+}
+
+echo "## check-agent-wait.sh — PreToolUse: a subagent ends at a wait"
+# Each refused shape: a subagent wait that would slip through, and the same
+# command in the main session, which owns the wait and must not be refused.
+while IFS= read -r shape; do
+    expect "subagent: $shape -> block" check-agent-wait.sh "$(agentbash general-purpose "$shape")" 2 "hand the handle"
+    expect "main session: $shape -> allow" check-agent-wait.sh "$(agentbash "" "$shape")" 0
+done <<'SHAPES'
+scripts/wave-status.sh --wait 12
+gh run watch 123
+gh pr checks 12 --watch
+until gh pr view 12 --json state | grep -q MERGED; do sleep 20; done
+while pgrep cargo >/dev/null; do sleep 5; done
+sleep 240
+sleep 5m
+SHAPES
+# The wait hides behind a directory change, a wrapper, or `bash -c`.
+expect "subagent: cd && bash wave-status --wait -> block" check-agent-wait.sh \
+    "$(agentbash general-purpose 'cd /repo && bash scripts/wave-status.sh --wait 12')" 2 "waits on a gate"
+expect "subagent: timeout-wrapped gh run watch -> block" check-agent-wait.sh \
+    "$(agentbash general-purpose 'timeout 600 gh run watch 123 --exit-status')" 2 "waits on a gate"
+expect "subagent: bash -c wave-status --wait -> block" check-agent-wait.sh \
+    "$(agentbash general-purpose 'bash -c "scripts/wave-status.sh --wait 12"')" 2 "waits on a gate"
+# No agent type is exempt: the implementer has the same five-minute cache.
+expect "implementer: wave-status --wait -> block" check-agent-wait.sh \
+    "$(agentbash implementer 'scripts/wave-status.sh --wait 12')" 2 "waits on a gate"
+# The bounded job wait is the wait a subagent makes; the unbounded one is the
+# dispatching session's.
+expect "subagent: agent-job wait -> allow" check-agent-wait.sh \
+    "$(agentbash implementer 'scripts/agent-job.sh wait issue-12-clippy' '{"timeout":240000}')" 0
+expect "subagent: agent-job wait --until-done -> block" check-agent-wait.sh \
+    "$(agentbash implementer 'cd /repo && scripts/agent-job.sh wait issue-12-clippy --until-done')" 2 "waits on a gate"
+expect "main session: agent-job wait --until-done -> allow" check-agent-wait.sh \
+    "$(agentbash "" 'scripts/agent-job.sh wait issue-12-clippy --until-done' '{"timeout":600000}')" 0
+# One-shot reads and short pauses are how a subagent finds the handle to hand back.
+expect "subagent: wave-status without --wait -> allow" check-agent-wait.sh \
+    "$(agentbash general-purpose 'scripts/wave-status.sh 12')" 0
+expect "subagent: gh pr checks without --watch -> allow" check-agent-wait.sh \
+    "$(agentbash general-purpose 'gh pr checks 12')" 0
+expect "subagent: grep for the wait command text -> allow" check-agent-wait.sh \
+    "$(agentbash general-purpose 'grep -n "wave-status.sh --wait" CLAUDE.md')" 0
+expect "subagent: short sleep -> allow" check-agent-wait.sh "$(agentbash general-purpose 'sleep 30')" 0
+# A counted `for` loop that sleeps is the same poll under another keyword.
+expect "subagent: counted for loop that sleeps -> block" check-agent-wait.sh \
+    "$(agentbash general-purpose 'for i in $(seq 1 118); do pgrep -f job >/dev/null || break; sleep 5; done')" 2 "polls in a loop"
+expect "subagent: read loop, then a short sleep after it -> allow" check-agent-wait.sh \
+    "$(agentbash general-purpose 'while read -r l; do echo "$l"; done < f; sleep 2')" 0
+expect "general-purpose: foreground timeout over the cache -> block" check-agent-wait.sh \
+    "$(agentbash general-purpose 'cargo build' '{"timeout":600000}')" 2 "outlives your cache"
+expect "implementer: foreground timeout over the cache -> block" check-agent-wait.sh \
+    "$(agentbash implementer 'cargo build' '{"timeout":600000}')" 2 "agent-job.sh start"
+expect "implementer: timeout just over the limit -> block" check-agent-wait.sh \
+    "$(agentbash implementer 'cargo build' '{"timeout":240001}')" 2 "outlives your cache"
+expect "general-purpose: timeout at the limit -> allow" check-agent-wait.sh \
+    "$(agentbash general-purpose 'cargo build' '{"timeout":240000}')" 0
+expect "general-purpose: long timeout in the background -> allow" check-agent-wait.sh \
+    "$(agentbash general-purpose 'cargo build' '{"timeout":600000,"run_in_background":true}')" 0
+expect "main session: long foreground timeout -> allow" check-agent-wait.sh \
+    "$(agentbash "" 'cargo build' '{"timeout":600000}')" 0
+before=$(ledger_lines)
+expect "subagent: refused wait (ledger case)" check-agent-wait.sh "$(agentbash general-purpose 'gh run watch 9')" 2
+ledger_grew "refusal appends one ledger line" "$before" 1
+assert "refusal line names the rule and the agent" \
+    jq -e -s 'last | .refused == "gate-wait" and .agent_id == "a1" and .command == "gh run watch 9"' "$LEDGER"
+# A ledger that cannot be written must not turn a refusal into a pass or a pass into a failure.
+printf 'not a directory\n' > "$SCAFFOLD/research/blocked"
+ENVX=(CLAUDE_PROJECT_DIR="$SCAFFOLD/research/blocked")
+expect "unwritable ledger: refusal still refuses" check-agent-wait.sh "$(agentbash general-purpose 'gh run watch 9')" 2 "waits on a gate"
+
+echo "## check-agent-stop.sh — SubagentStop: no parking on an own background task"
+TRANSCRIPTS="$SCAFFOLD/research/transcripts"
+mkdir -p "$TRANSCRIPTS/SESS/subagents"
+AGENT_T="$TRANSCRIPTS/SESS/subagents/agent-a1.jsonl"
+printf '%s\n' '{"type":"user","message":{"content":"Command running in background with ID: bash_70. Agent a1."}}' > "$AGENT_T"
+# stopjson <transcript-path> <background_tasks array>
+stopjson() {
+    jq -nc --arg p "$1" --argjson b "$2" \
+        '{session_id:"SESS",hook_event_name:"SubagentStop",agent_id:"a1",agent_type:"general-purpose",agent_transcript_path:$p,stop_hook_active:false,background_tasks:$b}'
+}
+expect "stop: own shell task running -> block" check-agent-stop.sh \
+    "$(stopjson "$AGENT_T" '[{"id":"bash_70","type":"shell","status":"running","description":"build"}]')" 2 "bash_70"
+# The harness lists the whole session's tasks; the main session's must not hold a subagent.
+expect "stop: only the main session's task running -> allow" check-agent-stop.sh \
+    "$(stopjson "$AGENT_T" '[{"id":"bash_9","type":"shell","status":"running","description":"wait"}]')" 0
+expect "stop: another task whose id is a prefix of an own id -> allow" check-agent-stop.sh \
+    "$(stopjson "$AGENT_T" '[{"id":"bash_7","type":"shell","status":"running","description":"wait"}]')" 0
+expect "stop: own shell task finished -> allow" check-agent-stop.sh \
+    "$(stopjson "$AGENT_T" '[{"id":"bash_70","type":"shell","status":"completed","description":"build"}]')" 0
+# The stopping agent is itself listed as a running subagent task and names itself in its transcript.
+expect "stop: the agent's own subagent entry -> allow" check-agent-stop.sh \
+    "$(stopjson "$AGENT_T" '[{"id":"a1","type":"subagent","status":"running","description":"me"}]')" 0
+expect "stop: transcript path unreadable -> allow" check-agent-stop.sh \
+    "$(stopjson "$TRANSCRIPTS/missing.jsonl" '[{"id":"bash_70","type":"shell","status":"running","description":"build"}]')" 0
+
+echo "## check-agent-resume.sh — PreToolUse: no message to an agent past its cache"
+: > "$TRANSCRIPTS/SESS.jsonl"
+# resumejson <to>
+resumejson() {
+    jq -nc --arg p "$TRANSCRIPTS/SESS.jsonl" --arg to "$1" \
+        '{session_id:"SESS",transcript_path:$p,tool_name:"SendMessage",tool_input:{to:$to,summary:"s",message:"m"}}'
+}
+META="$TRANSCRIPTS/SESS/subagents/agent-a1.meta.json"
+printf '{"agentType":"general-purpose"}\n' > "$META"
+age_file "$AGENT_T" 60
+expect "resume: general-purpose idle 60s -> allow" check-agent-resume.sh "$(resumejson a1)" 0
+age_file "$AGENT_T" 600
+expect "resume: general-purpose idle 600s -> block" check-agent-resume.sh "$(resumejson a1)" 2 "fresh agent"
+# No agent type has a longer cache, so none has a longer limit.
+printf '{"agentType":"implementer"}\n' > "$META"
+expect "resume: implementer idle 600s -> block" check-agent-resume.sh "$(resumejson a1)" 2 "limit 300"
+# A teammate or a name with no subagent transcript is not this hook's business.
+expect "resume: target without a transcript -> allow" check-agent-resume.sh "$(resumejson nobody)" 0
+
+echo "## record-agent-wait.sh — PostToolUse: ledger of long subagent calls"
+# postjson <agent_type|""> <duration_ms> <command>
+postjson() {
+    agentbash "$1" "$3" | jq -c --argjson d "$2" '. + {duration_ms:$d}'
+}
+before=$(ledger_lines)
+expect "record: subagent call below five minutes" record-agent-wait.sh "$(postjson general-purpose 299999 'cargo test')" 0
+ledger_grew "record: below the threshold writes nothing" "$before" 0
+expect "record: main-session long call" record-agent-wait.sh "$(postjson "" 900000 'cargo test')" 0
+ledger_grew "record: main session writes nothing" "$before" 0
+LONG_CMD=$(printf 'x%.0s' $(seq 1 400))
+expect "record: subagent call at five minutes" record-agent-wait.sh "$(postjson implementer 300000 "$LONG_CMD")" 0
+ledger_grew "record: at the threshold writes exactly one line" "$before" 1
+assert "record: line carries millis, agent type, and a 160-character command" \
+    jq -e -s 'last | .duration_millis == 300000 and .agent_type == "implementer" and (.command | length) == 160 and (has("refused") | not)' "$LEDGER"
+assert "ledger stays out of git status" test -z "$(sgit status --porcelain)"
 
 echo
 echo "$pass passed, $fail failed"

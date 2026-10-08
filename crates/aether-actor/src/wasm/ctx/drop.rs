@@ -2,17 +2,16 @@
 //! `on_dehydrate` save hook is handed, and [`CapturedState`], the in-memory
 //! deposit the ADR-0114 §5 composite dehydrate collects into.
 
+use alloc::format;
+use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use aether_data::{ActorMail, Kind};
+use aether_data::Kind;
 
-use crate::blob::guest::encode_guest;
-use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::persistence::Persistence;
-use crate::reference::Target;
-use crate::wasm::bridge::{mail, persist};
+use crate::wasm::ActorInitError;
+use crate::wasm::bridge::persist;
 use crate::wasm::inline::Registry;
-use alloc::vec::Vec;
 
 /// A `save_state` deposit captured in memory instead of forwarded to the
 /// host `save_state` import (ADR-0114 §5). The dehydrate compose hands the
@@ -35,16 +34,14 @@ impl CapturedState {
     }
 }
 
-/// Narrowed capability handle for the `on_dehydrate` save hook.
-/// Outbound mail goes only through a proof, by
-/// [`MailSender::send_detached_to`]; the typed-send, reply, and resolve
-/// surfaces are intentionally absent.
+/// Narrowed capability handle for the `on_dehydrate` save hook. It saves and
+/// does not send (ADR-0249 §8): the old guest keeps running when its republish
+/// aborts, and mail it sent from the save hook could not be taken back. The
+/// hook that announces a departure is `unwire`. The typed-send, reply, and
+/// resolve surfaces are absent for the same reason.
 // The `Wasm` prefix carries the native/wasm split signal; bare `DropCtx` loses that.
 #[allow(clippy::module_name_repetitions)]
 pub struct WasmDropCtx<'a> {
-    /// The actor's own mailbox id, stamped as the "from" half of every send
-    /// (issue 1987).
-    mailbox: u64,
     /// ADR-0114 §5: when `Some`, `save_state` records into this buffer
     /// instead of the host import, so the dehydrate compose can collect
     /// the parent's and each child's bundle and pack one composite. `None`
@@ -62,8 +59,8 @@ impl<'a> WasmDropCtx<'a> {
     /// Forwards `save_state` to the host import.
     #[doc(hidden)]
     #[must_use]
-    pub fn __new(mailbox: u64, inline: &'a Registry) -> Self {
-        Self { mailbox, capture: None, inline, _borrow: PhantomData }
+    pub fn __new(inline: &'a Registry) -> Self {
+        Self { capture: None, inline, _borrow: PhantomData }
     }
 
     /// Not part of the public API; called only by the dehydrate compose
@@ -72,26 +69,30 @@ impl<'a> WasmDropCtx<'a> {
     /// before a single real host `save_state`.
     #[doc(hidden)]
     #[must_use]
-    pub(crate) fn __new_capturing(mailbox: u64, capture: &'a mut CapturedState, inline: &'a Registry) -> Self {
-        Self { mailbox, capture: Some(capture), inline, _borrow: PhantomData }
+    pub(crate) fn __new_capturing(capture: &'a mut CapturedState, inline: &'a Registry) -> Self {
+        Self { capture: Some(capture), inline, _borrow: PhantomData }
     }
 
     /// Deposit a migration bundle. Mirrors [`Persistence::save_state`].
     /// When this ctx was built capturing (ADR-0114 §5), the deposit is
     /// recorded in the capture buffer; otherwise it forwards to the host.
     ///
-    /// # Panics
-    /// Panics if the host `save_state` import returns non-zero — fail-fast
-    /// per ADR-0063: the persistence bridge is part of the substrate
-    /// contract and a failure here means the runtime is in an
-    /// unrecoverable state. (The capturing path cannot fail.)
-    pub fn save_state(&mut self, version: u32, bytes: &[u8]) {
+    /// # Errors
+    /// When the host `save_state` import refuses the bundle, with the status
+    /// it returned: the bundle is past the size cap, the host has no memory
+    /// for it, or the range is outside guest memory. The capturing path
+    /// cannot fail.
+    pub fn save_state(&mut self, version: u32, bytes: &[u8]) -> Result<(), ActorInitError> {
         if let Some(capture) = self.capture.as_mut() {
             capture.saved = Some((version, bytes.to_vec()));
-            return;
+            return Ok(());
         }
+
         let status = persist::save_state(version, bytes);
-        assert_eq!(status, 0, "aether-actor: save_state failed (status {status})");
+        if status == 0 {
+            return Ok(());
+        }
+        Err(ActorInitError::from(format!("the host refused the saved state (status {status})")))
     }
 
     /// Persist a typed kind value. Mirrors
@@ -100,42 +101,28 @@ impl<'a> WasmDropCtx<'a> {
     /// replacement's [`PriorState::decode_kind`](crate::PriorState::decode_kind)
     /// to claim back (ADR-0243 §6).
     ///
-    /// # Panics
-    ///
-    /// When `value` does not encode: a length past the `u32` ceiling, or a
-    /// `Held` this instance does not hold live.
-    pub fn save_state_kind<K: Kind>(&mut self, version: u32, value: &K) {
-        let bytes = self.inline.encode_saved_state(value);
-        self.save_state(version, &bytes);
-    }
-}
-
-impl MailSender for WasmDropCtx<'_> {
-    fn prev_correlation(&self) -> u64 {
-        mail::prev_correlation()
-    }
-
-    // By-id detached send, stamping the caller's id as the sender.
-    // The encoded values it names by hash stay alive across the host call,
-    // whose resolve on send attaches their entries (ADR-0238 decision 3).
-    fn send_detached_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K) {
-        let encoded = encode_guest(payload);
-        mail::send_mail(target.erased().id().0, K::ID.0, &encoded.bytes, 1, true, self.mailbox);
+    /// # Errors
+    /// When `value` does not encode (a length past the `u32` ceiling, or a
+    /// `Held` this instance does not hold live), or when the host refuses the
+    /// bundle as [`Self::save_state`] describes.
+    pub fn save_state_kind<K: Kind>(&mut self, version: u32, value: &K) -> Result<(), ActorInitError> {
+        let bytes = self.inline.encode_saved_state(value)?;
+        self.save_state(version, &bytes)
     }
 }
 
 impl Persistence for WasmDropCtx<'_> {
-    fn save_state(&mut self, version: u32, bytes: &[u8]) {
+    fn save_state(&mut self, version: u32, bytes: &[u8]) -> Result<(), ActorInitError> {
         // Route through the inherent `save_state` so the ADR-0114 §5
         // capture path applies — the generated `on_dehydrate` hooks reach
         // the bundle through `Persistence::save_state_kind`, which calls
         // this trait method, so a capturing ctx must intercept here too.
-        WasmDropCtx::save_state(self, version, bytes);
+        WasmDropCtx::save_state(self, version, bytes)
     }
 
     // The generated `on_dehydrate` saves `type State` through this trait
     // method, so the ledger-granting inherent form must apply here too.
-    fn save_state_kind<K: Kind>(&mut self, version: u32, value: &K) {
-        WasmDropCtx::save_state_kind(self, version, value);
+    fn save_state_kind<K: Kind>(&mut self, version: u32, value: &K) -> Result<(), ActorInitError> {
+        WasmDropCtx::save_state_kind(self, version, value)
     }
 }

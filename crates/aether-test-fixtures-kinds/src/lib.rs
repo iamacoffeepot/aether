@@ -17,10 +17,12 @@ extern crate alloc;
 
 pub mod wire_corpus;
 
+use aether_actor::{PathRefused, ProtocolPath};
 use aether_bloomery_kinds::{Head, ProgramName};
-use aether_data::{Blob, OpaqueBytes, Ref, Utf8Text};
+use aether_data::{Blob, ErasedActorPath, LoadName, OpaqueBytes, Ref, Utf8Text};
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::time::Duration;
 
 /// Typed root marker for the substrate harness's observer mailbox, the
 /// sink the fixtures report to through
@@ -41,7 +43,9 @@ impl aether_actor::Addressable for SubstrateHarnessObserver {
     type Resolver = aether_actor::One;
 }
 
-impl<K: aether_data::Kind> aether_actor::HandlesKind<K> for SubstrateHarnessObserver {}
+impl<K: aether_data::Kind> aether_actor::HandlesKind<K> for SubstrateHarnessObserver {
+    type Sender = aether_actor::Anyone;
+}
 
 /// Broadcast payload emitted on each tick. Structured-shaped — schema
 /// rides in the wasm's `aether.kinds` custom section, so the harness's
@@ -66,10 +70,15 @@ pub struct BootObserved {
 
 /// Report the stateful-replace `Counter` fixture mails the harness observer
 /// from its `wire` hook, once per run of the hook. A scenario counts it to
-/// prove a guest reinstated after a failed replace runs `wire` again
-/// (ADR-0241 §7).
+/// prove the successor wired at prepare (ADR-0249 §3).
 #[aether_data::kind(name = "aether.test_fixture.wire_observed", default)]
 pub struct WireObserved;
+
+/// Report the group `Peer` fixture mails the harness observer from its
+/// `unwire` hook, once per run of the hook. A scenario counts it to prove
+/// commit unwires the old guest and abort leaves it wired (ADR-0249 §4).
+#[aether_data::kind(name = "aether.test_fixture.unwire_observed", default)]
+pub struct UnwireObserved;
 
 /// ADR-0147 boot fixture: broadcast the module's `boot` actor emits from
 /// its `unwire` hook, once when the boot singleton closes on a drop
@@ -142,10 +151,10 @@ pub struct ConfigEcho {
 #[aether_data::kind(name = "aether.test_fixtures.config_query", default)]
 pub struct ConfigQuery;
 
-/// ADR-0163 §3 (#3984) driver kind: ask the `QuietProbe` fixture to report
-/// what it pulled from its asset load window during `wire`. No-payload
-/// query; the reply is an [`AssetProbeResult`]. Structured unit struct so
-/// it exercises the schema-driven dispatch path like [`ConfigQuery`].
+/// Driver kind: ask the `QuietProbe` fixture to report what it pulled from
+/// its module's assets during `wire`. No-payload query; the reply is an
+/// [`AssetProbeResult`]. Structured unit struct so it exercises the
+/// schema-driven dispatch path like [`ConfigQuery`].
 #[aether_data::kind(name = "aether.test_fixtures.asset_probe", default)]
 pub struct AssetProbe;
 
@@ -157,13 +166,11 @@ pub struct AssetProbe;
 pub struct LogMarker;
 
 /// Reply kind for [`AssetProbe`]: the length and a wrapping-sum checksum of
-/// the bytes the fixture pulled through `AssetWindow::asset` in `wire`,
-/// stashed in state and surfaced from a post-`wire` handler. Lets a test
-/// assert the guest-side asset pull round-tripped the exact bytes across
-/// the FFI (the checksum is content-sensitive) and that the value survived
-/// the window closing (the read happens after `wire`). `pulled` is `false`
-/// when the window returned no such asset — a loud negative rather than a
-/// silent zero.
+/// the bytes the fixture pulled through `Assets::asset` in `wire`,
+/// stashed in state and surfaced from a handler. Lets a test assert the
+/// guest-side asset pull round-tripped the exact bytes across the FFI (the
+/// checksum is content-sensitive). `pulled` is `false` when the module
+/// returned no such asset — a loud negative rather than a silent zero.
 #[aether_data::kind(name = "aether.test_fixtures.asset_probe_result", default, eq)]
 pub struct AssetProbeResult {
     pub pulled: bool,
@@ -178,7 +185,7 @@ pub struct AssetProbeResult {
 pub struct EmptyAssetProbe;
 
 /// Reply kind for [`EmptyAssetProbe`]: the length each verb returned for
-/// `asset_empty.bin` (`AssetWindow::asset` as `copied_len`, `asset_blob` as
+/// `asset_empty.bin` (`Assets::asset` as `copied_len`, `asset_blob` as
 /// `blob_len`), `None` where the verb answered `None`.
 #[aether_data::kind(name = "aether.test_fixtures.empty_asset_probe_result", eq)]
 pub struct EmptyAssetProbeResult {
@@ -187,16 +194,15 @@ pub struct EmptyAssetProbeResult {
 }
 
 /// Driver kind: ask the `QuietProbe` fixture for the asset it took from its
-/// load window as a blob during `wire` and kept in its state (ADR-0163 §3).
+/// module as a blob during `wire` and kept in its state (ADR-0250).
 /// No-payload query; the reply is an [`AssetBlobProbeResult`].
 #[aether_data::kind(name = "aether.test_fixtures.asset_blob_probe", default)]
 pub struct AssetBlobProbe;
 
 /// Reply kind for [`AssetBlobProbe`]: the blob the fixture took through
-/// `AssetWindow::asset_blob` in `wire`, forwarded by handle from a
-/// post-`wire` handler, or `None` when its `wire` took none. Lets a test
-/// read the exact bytes of an asset that never entered the guest's memory,
-/// after the window that served it closed.
+/// `Assets::asset_blob` in `wire`, forwarded by handle from a handler, or
+/// `None` when its `wire` took none. Lets a test read the exact bytes of an
+/// asset that never entered the guest's memory.
 #[aether_data::kind(name = "aether.test_fixtures.asset_blob_probe_result")]
 pub struct AssetBlobProbeResult {
     pub blob: Option<Blob>,
@@ -292,6 +298,31 @@ pub struct RespawnChild;
 #[aether_data::kind(name = "aether.test_fixtures.respawn_result", copy, default, eq)]
 pub struct RespawnResult {
     pub alias_refused: bool,
+}
+
+/// Issue 7536: what the inline-unwire fixture's parent mails the harness
+/// observer from `unwire`. The observer records kinds in arrival order, so
+/// the three markers read back as the order the hooks ran in.
+#[aether_data::kind(name = "aether.test_fixture.inline_parent_unwired", default)]
+pub struct InlineParentUnwired;
+
+/// Issue 7536: what the inline-unwire fixture's child mails the harness
+/// observer from `unwire`.
+#[aether_data::kind(name = "aether.test_fixture.inline_child_unwired", default)]
+pub struct InlineChildUnwired;
+
+/// Issue 7536: what the inline-unwire fixture's leaf mails the harness
+/// observer from `unwire`.
+#[aether_data::kind(name = "aether.test_fixture.inline_leaf_unwired", default)]
+pub struct InlineLeafUnwired;
+
+/// Issue 7536: tells the inline-unwire fixture's child to despawn itself.
+/// `me` is the child's own path, which its sender read from the registry: an
+/// inline child holds no reference to itself, so it resolves the path to the
+/// proof `despawn_inline_child` takes.
+#[aether_data::kind(name = "aether.test_fixtures.despawn_self")]
+pub struct DespawnSelf {
+    pub me: ErasedActorPath,
 }
 
 /// Issue 6867: asks the inline-dependency fixture's holder how the spawn of
@@ -415,6 +446,27 @@ pub struct FsContextDemuxReport {
 /// position. Fieldless: the window cap reads the subscriber off the sender.
 #[aether_data::kind(name = "aether.test_fixtures.unsubscribe_keys", default)]
 pub struct UnsubscribeKeys;
+
+/// Ask a key probe to take key focus in the window named `window` for itself
+/// alone, so a scenario drives a guest's own take: the probe writes the
+/// window's typed path from the name and mails the window the take, and the
+/// window reads the holder off the sender. The field is the name because
+/// this crate does not depend on the window's, so it cannot spell the typed
+/// path the take carries.
+#[aether_data::kind(name = "aether.test_fixtures.take_key_focus")]
+pub struct TakeKeyFocusAt {
+    pub window: LoadName,
+}
+
+/// Report a key probe emits for each key focus notice the window sends it:
+/// `gained` is `true` for `aether.window.key_focus_gained` and `false` for
+/// `aether.window.key_focus_lost`, and `window` is the window the notice
+/// named.
+#[aether_data::kind(name = "aether.test_fixture.key_focus_observed")]
+pub struct KeyFocusObserved {
+    pub window: ErasedActorPath,
+    pub gained: bool,
+}
 
 /// Configure the listener lineage used by the TCP load probe when it echoes
 /// frames received from accepted sessions. The probe binds that listener on
@@ -551,38 +603,33 @@ pub const MATRIX_CELL_CHILD_TO_SIBLING: u32 = 3;
 /// [`MatrixPing::cell`] marker — child a to self (in place).
 pub const MATRIX_CELL_CHILD_TO_SELF: u32 = 4;
 
-/// Typed config for an editor-region probe. The probe intentionally does not
-/// subscribe to input itself: an editor shell must address each observation
-/// directly to the probe's mailbox.
-#[aether_data::kind(name = "aether.test_fixtures.editor_region_probe.config", default, eq)]
-pub struct EditorRegionProbeConfig {
-    pub name: String,
+/// Handler-set fixture request the adopter leaves to its set (ADR-0169). The
+/// adopter has no arm of its own for it, so the dispatch miss must reach the
+/// set's default body.
+#[aether_data::kind(name = "aether.test_fixtures.handler_set.ask_kept", default)]
+pub struct AskKept;
+
+/// Reply to [`AskKept`]; `answered_by` names the body that ran.
+#[aether_data::kind(name = "aether.test_fixtures.handler_set.ask_kept_result", copy, eq)]
+pub struct AskKeptResult {
+    pub answered_by: u32,
 }
 
-/// One raw input observed by an editor-region probe.
-#[derive(aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
-pub enum ObservedEditorInput {
-    PointerPress { button: u32, x_pixels: f32, y_pixels: f32 },
-    PointerRelease { button: u32, x_pixels: f32, y_pixels: f32 },
-    PointerMotion { x_pixels: f32, y_pixels: f32 },
-    Wheel { delta_x_pixels: f32, delta_y_pixels: f32, x_pixels: f32, y_pixels: f32 },
-    KeyPress { code: u32 },
-    KeyRelease { code: u32 },
-    TextInput { text: String },
-    ImePreedit { text: String, cursor_begin: Option<u32>, cursor_end: Option<u32> },
-    Modifiers { shift: bool, ctrl: bool, alt: bool, meta: bool },
+/// Handler-set fixture request the adopter overrides, so the adopter's body
+/// must run in place of the set's default.
+#[aether_data::kind(name = "aether.test_fixtures.handler_set.ask_replaced", default)]
+pub struct AskReplaced;
+
+/// Reply to [`AskReplaced`]; `answered_by` names the body that ran.
+#[aether_data::kind(name = "aether.test_fixtures.handler_set.ask_replaced_result", copy, eq)]
+pub struct AskReplacedResult {
+    pub answered_by: u32,
 }
 
-/// Query that drains an editor-region probe's observations.
-#[aether_data::kind(name = "aether.test_fixtures.drain_editor_inputs", default)]
-pub struct DrainEditorInputs;
-
-/// Reply containing every editor input observed since the previous drain.
-#[aether_data::kind(name = "aether.test_fixtures.drain_editor_inputs_result", partial_eq)]
-pub struct DrainEditorInputsResult {
-    pub region_name: String,
-    pub inputs: Vec<ObservedEditorInput>,
-}
+/// `answered_by` marker: the handler set's default body ran.
+pub const HANDLER_SET_DEFAULT_BODY: u32 = 1;
+/// `answered_by` marker: the adopter's override ran.
+pub const HANDLER_SET_OVERRIDE_BODY: u32 = 2;
 
 /// Stored kind id that makes the reactor fixture's shared fold refuse.
 pub const REACTOR_FOLD_FAIL_KIND: aether_data::KindId =
@@ -754,6 +801,18 @@ pub struct GuestLoad {
     pub export: Option<String>,
 }
 
+/// Issue 7629: asks the object loader to read the object at `path` from
+/// the `objects` file namespace, publish it, and spawn the type published
+/// as `namespace`. It replies the spawn's `SpawnResult`, or a
+/// `SpawnResult::Err` naming the stage that failed.
+#[aether_data::kind(name = "aether.test_fixtures.object_spawn")]
+pub struct ObjectSpawn {
+    /// The path the guest reads in `objects`.
+    pub path: String,
+    /// The published name the guest spawns once its publish answers.
+    pub namespace: String,
+}
+
 /// Issue 7086: asks the republish gate how many times its `wire` hook has
 /// run on this instance. It replies a [`CountReport`].
 #[aether_data::kind(name = "aether.test_fixtures.wire_count_query", default)]
@@ -766,7 +825,7 @@ pub struct WireCountQuery;
 #[aether_data::kind(name = "aether.test_fixtures.courier.config", default)]
 pub struct CourierConfig {
     pub wasm: Vec<u8>,
-    pub drop: Option<aether_data::ErasedActorPath>,
+    pub drop: Option<ErasedActorPath>,
 }
 
 /// Issue 7086: asks the republish courier what its successor's requests to
@@ -787,4 +846,376 @@ pub struct CourierQueryResult {
 #[aether_data::kind(name = "aether.test_fixtures.courier.state", copy, default, eq)]
 pub struct CourierState {
     pub hops: u32,
+}
+
+/// What a fixture's hook does when its config names an outcome for it: the
+/// `wire` of a `WireFault` fixture once it has sent its [`WireMarker`] (issue
+/// 7463), and the replace hooks of a `HookFault` fixture (issue 7535).
+#[derive(aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HookOutcome {
+    /// The hook returns `Ok(())`.
+    #[default]
+    Succeeds,
+    /// The hook returns an error: [`WIRE_REFUSAL`] from `wire`,
+    /// [`DEHYDRATE_REFUSAL`] from `on_dehydrate`, [`REHYDRATE_REFUSAL`] from
+    /// `on_rehydrate`.
+    Refuses,
+    /// The hook panics, which the host sees as a trap.
+    Traps,
+}
+
+/// Issue 7535: the message a `HookFault` fixture's `on_dehydrate` returns as
+/// its error, which the refused republish's answer must carry.
+pub const DEHYDRATE_REFUSAL: &str = "dehydrate refused: the fixture was told to fail";
+
+/// Issue 7535: the message a `HookFault` fixture's `on_rehydrate` returns as
+/// its error.
+pub const REHYDRATE_REFUSAL: &str = "rehydrate refused: the fixture was told to fail";
+
+/// Issue 7535: the config of the `HookFault` fixture, one outcome per replace
+/// hook. `successor_rehydrate` is what `on_rehydrate` does on an instance that
+/// has not dehydrated, a republish's successor; `reinstated_rehydrate` is what
+/// it does on the instance that dehydrated, handed its own state back after
+/// its republish was refused.
+#[aether_data::kind(name = "aether.test_fixtures.hook_fault.config", copy, default, eq)]
+pub struct HookFaultConfig {
+    pub dehydrate: HookOutcome,
+    pub successor_rehydrate: HookOutcome,
+    pub reinstated_rehydrate: HookOutcome,
+}
+
+/// Issue 7463: the message a `WireFault` or `WireRefuser` fixture's `wire`
+/// returns as its error, which the birth's answer must carry.
+pub const WIRE_REFUSAL: &str = "wire refused: the fixture was told to fail";
+
+/// Issue 7463: the config of the `WireFault` fixture.
+#[aether_data::kind(name = "aether.test_fixtures.wire_fault.config", copy, default, eq)]
+pub struct WireFaultConfig {
+    pub outcome: HookOutcome,
+}
+
+/// Issue 7463: what a `WireFault` fixture mails the harness observer from
+/// `wire`, before the hook returns or traps. A birth holds its `wire` mail
+/// until it goes live, so the observer sees one only for a birth that did.
+#[aether_data::kind(name = "aether.test_fixture.wire_marker", default)]
+pub struct WireMarker;
+
+/// Issue 7501: the protocol the `PathHolder` fixture is handed a path to,
+/// one silent row over [`Bump`]. A guest that tells on `Bump` covers it.
+#[aether_actor::protocol]
+pub trait PathPoking {
+    fn bump(mail: Bump);
+}
+
+/// Issue 7501: ask the `PathHolder` fixture to keep `target`. The holder's
+/// decode proves the path, its handler resolves it, and it answers
+/// [`PathAnswer`]: `Ok` naming the path it kept, or the refusal.
+#[aether_data::kind(name = "aether.test_fixtures.path_attach", no_serde)]
+pub struct PathAttach {
+    pub target: ProtocolPath<PathPoking>,
+}
+
+/// Issue 7501: the reply to [`PathAttach`].
+#[aether_data::kind(name = "aether.test_fixtures.path_answer", eq)]
+pub enum PathAnswer {
+    /// The path proved and a live actor stands at it.
+    Ok { path: ErasedActorPath },
+    /// The path did not prove, at decode or at `resolve`.
+    Err(PathRefused),
+}
+
+impl From<PathRefused> for PathAnswer {
+    fn from(refused: PathRefused) -> Self {
+        Self::Err(refused)
+    }
+}
+
+/// Issue 7501: the config of the `PathHolder` fixture and of its inline
+/// child. `target` is the path the actor itself keeps; a holder resolves it
+/// in `wire` and sends a [`Bump`] through it. `child_target` is the path a
+/// holder hands the inline child it spawns in `wire`; with none it spawns no
+/// child.
+#[aether_data::kind(name = "aether.test_fixtures.path_holder.config", default, no_serde)]
+pub struct PathHolderConfig {
+    pub target: Option<ProtocolPath<PathPoking>>,
+    pub child_target: Option<ProtocolPath<PathPoking>>,
+}
+
+/// Issue 7501: ask a `PathHolder` or its inline child which paths it holds.
+#[aether_data::kind(name = "aether.test_fixtures.path_echo", default)]
+pub struct PathEcho;
+
+/// Issue 7501: the reply to [`PathEcho`]: the path the actor's config named,
+/// and the path the last [`PathAttach`] it accepted named. An inline child
+/// accepts none.
+#[aether_data::kind(name = "aether.test_fixtures.path_echoed", eq)]
+pub struct PathEchoed {
+    pub config: Option<ErasedActorPath>,
+    pub attached: Option<ErasedActorPath>,
+}
+
+/// Issue 7501: the subname a `PathHolder` spawns its inline child under.
+pub const PATH_HOLDER_CHILD: &str = "child";
+
+/// Issue 7496: the protocol the republish watch family's ledger watches a
+/// provider through, one silent row over [`WatchNudge`]. Any actor that tells
+/// on `WatchNudge` covers it, a native fixture or a guest.
+#[aether_actor::protocol]
+pub trait WatchProvider {
+    fn nudge(mail: WatchNudge);
+}
+
+/// Issue 7496: a second protocol a provider may also answer, one silent row
+/// over [`WatchAudit`]. Its rows differ from [`WatchProvider`]'s, so it is a
+/// second watched type on the same actor.
+#[aether_actor::protocol]
+pub trait WatchAuditor {
+    fn audit(mail: WatchAudit);
+}
+
+/// Issue 7496: [`WatchProvider`]'s row. Nothing sends it; a handler for it is
+/// what makes an actor a provider.
+#[aether_data::kind(name = "aether.test_fixtures.watch.nudge", default)]
+pub struct WatchNudge;
+
+/// Issue 7496: [`WatchAuditor`]'s row. Nothing sends it.
+#[aether_data::kind(name = "aether.test_fixtures.watch.audit", default)]
+pub struct WatchAudit;
+
+/// Issue 7496: which protocol the watch ledger watched a provider through,
+/// and so which of its two departure handlers ran.
+#[derive(aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WatchThrough {
+    /// [`WatchProvider`], whose handler takes a context carrying a tag.
+    #[default]
+    Provider,
+    /// [`WatchAuditor`], whose handler takes no context.
+    Auditor,
+}
+
+/// Issue 7496: the config of the watch ledger. With `target` set, its `wire`
+/// resolves the path, watches the provider there with a context carrying
+/// `tag`, and then does what `outcome` says.
+#[aether_data::kind(name = "aether.test_fixtures.watch.ledger.config", default, no_serde)]
+pub struct WatchLedgerConfig {
+    pub target: Option<ProtocolPath<WatchProvider>>,
+    pub tag: u32,
+    pub outcome: HookOutcome,
+}
+
+/// Issue 7496: a provider admits itself to the watch ledger. The ledger casts
+/// the sender to the protocol `through` names, watches it, with a context
+/// carrying `tag` for [`WatchThrough::Provider`], keeps the id its `watch`
+/// returned under `tag`, and answers [`WatchAdmitResult`].
+#[aether_data::kind(name = "aether.test_fixtures.watch.admit", copy)]
+pub struct WatchAdmit {
+    pub tag: u32,
+    pub through: WatchThrough,
+}
+
+/// Issue 7496: the watch ledger's answer to a [`WatchAdmit`] or a
+/// [`WatchHeld`]: which id its `watch` returned, or why it watched nothing.
+///
+/// A `WatchId` has actor reach and never leaves the actor that holds it
+/// (ADR-0079 §8), so no kind of this family carries one. A watch fixture
+/// names an id by its ordinal: the id's index among the distinct ids that
+/// instance has been handed, by `watch` or by a departure event, in the order
+/// it first saw them. Two ordinals from one instance are equal exactly when
+/// the ids are. An instance a republish installs has been handed none, so its
+/// ordinals start again at zero.
+#[aether_data::kind(name = "aether.test_fixtures.watch.admit_result", eq)]
+pub enum WatchAdmitResult {
+    Ok { watch: u32 },
+    Err { error: String },
+}
+
+impl aether_actor::HeldReply for WatchAdmitResult {
+    fn unanswered() -> Self {
+        Self::Err { error: String::from("the relay closed before the ledger answered") }
+    }
+}
+
+/// Issue 7496: a provider asks the watch ledger to cast it and keep the
+/// reference without watching it.
+#[aether_data::kind(name = "aether.test_fixtures.watch.hold", default)]
+pub struct WatchHold;
+
+/// Issue 7496: tells the watch ledger to watch the reference its last
+/// [`WatchHold`] kept, with a context carrying `tag`, and to keep the id
+/// under `tag`. It answers [`WatchAdmitResult`].
+#[aether_data::kind(name = "aether.test_fixtures.watch.held", copy)]
+pub struct WatchHeld {
+    pub tag: u32,
+}
+
+/// Issue 7496: tells the watch ledger to `unwatch` the id it keeps under
+/// `tag`, the tag of the [`WatchAdmit`] or [`WatchHeld`] that watched. A tag
+/// the ledger keeps no id under does nothing.
+#[aether_data::kind(name = "aether.test_fixtures.watch.release", copy)]
+pub struct WatchRelease {
+    pub tag: u32,
+}
+
+/// Issue 7496: one departure a watch fixture's handler ran for, which it
+/// mails the harness observer and lists in its [`WatchLedgerReport`].
+#[aether_data::kind(name = "aether.test_fixtures.watch.departure", copy, eq)]
+pub struct WatchDeparture {
+    /// The protocol whose handler ran. A clerk's is always
+    /// [`WatchThrough::Provider`]'s form: a handler with a context.
+    pub through: WatchThrough,
+    /// The tag the handler's context carried, or `None` from the handler
+    /// that takes no context.
+    pub tag: Option<u32>,
+    /// The ordinal of the event's `watch` ([`WatchAdmitResult`]).
+    pub watch: u32,
+    /// Whether the event's `actor`, erased, is the handler's `ctx.sender()`.
+    pub actor_is_sender: bool,
+}
+
+/// Issue 7496: asks a watch ledger or a clerk what it has watched and which
+/// departures it has handled. It replies a [`WatchLedgerReport`].
+#[aether_data::kind(name = "aether.test_fixtures.watch.ledger_query", default)]
+pub struct WatchLedgerQuery;
+
+/// Issue 7496: the answer to a [`WatchLedgerQuery`]. Both lists are the
+/// answering instance's own memory, which a republish does not carry: a
+/// successor lists only what it handled itself, including the watch its own
+/// `wire` made at prepare.
+#[aether_data::kind(name = "aether.test_fixtures.watch.ledger_query_result", default, eq)]
+pub struct WatchLedgerReport {
+    /// The ordinal ([`WatchAdmitResult`]) of the id each run of `wire` on
+    /// this instance got from its `watch`, in order.
+    pub wired: Vec<u32>,
+    /// Each departure this instance's handlers ran for, in order.
+    pub handled: Vec<WatchDeparture>,
+}
+
+/// Issue 7496: the config of the watch peer. With `trap_on_rehydrate` set,
+/// the second version's peer traps in `on_rehydrate`, so a republish of its
+/// module fails there. With `trap_on_unwire` set, its `unwire` traps.
+#[aether_data::kind(name = "aether.test_fixtures.watch.peer.config", copy, default, eq)]
+pub struct WatchPeerConfig {
+    pub trap_on_rehydrate: bool,
+    pub trap_on_unwire: bool,
+}
+
+/// Issue 7496: tells the watch peer to admit itself to the watch ledger with
+/// a [`WatchAdmit`] carrying `tag`.
+#[aether_data::kind(name = "aether.test_fixtures.watch.peer_admit", copy)]
+pub struct WatchPeerAdmit {
+    pub tag: u32,
+}
+
+/// Issue 7496: tells a watch desk to spawn an inline clerk keyed `key`. The
+/// clerk's `wire` watches the desk keyed `target` with a context carrying
+/// `tag`. It is a tell, so the chain a sender settles on holds the clerk's
+/// alias publication, which a reply would arrive ahead of.
+#[aether_data::kind(name = "aether.test_fixtures.watch.clerk_spawn")]
+pub struct WatchClerkSpawn {
+    pub key: String,
+    pub target: String,
+    pub tag: u32,
+}
+
+/// Issue 7532: what a sender gate requires of whoever sends it a
+/// [`SenderGateTake`] or a [`SenderGateDial`] (ADR-0231 §11): a silent handler for the
+/// [`SenderGateGranted`] it mails back.
+#[aether_actor::protocol]
+pub trait SenderGateGrantee {
+    fn granted(mail: SenderGateGranted);
+}
+
+/// Issue 7532: a tell whose handler names [`SenderGateGrantee`] as its ctx's
+/// sender. A gate that runs it mails the sender a [`SenderGateGranted`]
+/// carrying `tag`.
+#[aether_data::kind(name = "aether.test_fixtures.sender_gate.take", copy)]
+pub struct SenderGateTake {
+    pub tag: u32,
+}
+
+/// Issue 7532: a request whose handler names [`SenderGateGrantee`] as its
+/// ctx's sender. A gate that runs it mails the sender a [`SenderGateGranted`]
+/// carrying `tag` and answers [`SenderGateDialed::Ok`].
+#[aether_data::kind(name = "aether.test_fixtures.sender_gate.dial", copy)]
+pub struct SenderGateDial {
+    pub tag: u32,
+}
+
+/// Issue 7532: the reply to [`SenderGateDial`].
+#[aether_data::kind(name = "aether.test_fixtures.sender_gate.dialed", eq)]
+pub enum SenderGateDialed {
+    /// The gate's handler ran for the dial carrying `tag`.
+    Ok { tag: u32 },
+    /// The engine refused the dial's sender before the handler ran.
+    Err(PathRefused),
+}
+
+impl From<PathRefused> for SenderGateDialed {
+    fn from(refused: PathRefused) -> Self {
+        Self::Err(refused)
+    }
+}
+
+/// Issue 7532: what a gate mails the sender it was handed, through the
+/// proven reference, carrying the tag of the mail that ran its handler.
+#[aether_data::kind(name = "aether.test_fixtures.sender_gate.granted", copy, eq)]
+pub struct SenderGateGranted {
+    pub tag: u32,
+}
+
+/// Issue 7532: ask a gate how many times each of its two handlers ran.
+#[aether_data::kind(name = "aether.test_fixtures.sender_gate.query", copy, default)]
+pub struct SenderGateQuery;
+
+/// Issue 7532: the reply to [`SenderGateQuery`].
+#[aether_data::kind(name = "aether.test_fixtures.sender_gate.query_result", copy, eq)]
+pub struct SenderGateQueryResult {
+    pub takes: u32,
+    pub dials: u32,
+}
+
+/// Issue 7532: tells a gate holder to send its gate a [`SenderGateTake`] and a
+/// [`SenderGateDial`], each carrying `tag`.
+#[aether_data::kind(name = "aether.test_fixtures.sender_gate.trigger", copy)]
+pub struct SenderGateTrigger {
+    pub tag: u32,
+}
+
+/// Issue 7532: ask a gate holder what it has heard back from its gate.
+#[aether_data::kind(name = "aether.test_fixtures.sender_gate.holder_query", copy, default)]
+pub struct SenderGateHolderQuery;
+
+/// Issue 7532: the reply to [`SenderGateHolderQuery`]: the tag of each
+/// [`SenderGateGranted`] the holder received, in order, and each
+/// [`SenderGateDialed`] it was answered with.
+#[aether_data::kind(name = "aether.test_fixtures.sender_gate.holder_query_result", eq)]
+pub struct SenderGateHolderQueryResult {
+    pub granted: Vec<u32>,
+    pub dialed: Vec<SenderGateDialed>,
+}
+
+/// Issue 7627: tells a clock probe to take a new reading of the engine's
+/// actor clock and keep it as its mark, in place of the one it took at
+/// `init`.
+#[aether_data::kind(name = "aether.test_fixtures.clock.mark", copy)]
+pub struct ClockMark;
+
+/// Issue 7627: ask a clock probe how long ago it last marked, by the
+/// engine's actor clock.
+#[aether_data::kind(name = "aether.test_fixtures.clock.elapsed", copy)]
+pub struct ClockElapsed;
+
+/// Issue 7627: the reply to [`ClockElapsed`].
+#[aether_data::kind(name = "aether.test_fixtures.clock.elapsed_result", copy, eq)]
+pub struct ClockElapsedResult {
+    /// The duration since the last mark, in nanoseconds.
+    pub elapsed_nanos: u64,
+}
+
+impl ClockElapsedResult {
+    /// The report for a probe whose last mark was `elapsed` ago.
+    #[must_use]
+    pub fn of(elapsed: Duration) -> Self {
+        Self { elapsed_nanos: u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX) }
+    }
 }

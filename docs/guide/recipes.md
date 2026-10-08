@@ -67,8 +67,8 @@ current source.
   the other and announces itself; the other keeps the envelope sender.
 - **Writing a behavior** (the middle) — compile a narrow filter, host it at a
   tree slot, and swap it without treating it as a security gate.
-- **Drawing your first text** (drive/build) — load a font, draw with explicit
-  origin/clip, and gather frame evidence.
+- **Drawing your first text** (drive/build) — register a font from its bytes,
+  draw with explicit origin/clip, and gather frame evidence.
 - **Authoring a render program** (drive-only) — register a WGSL pass graph,
   dispatch it with a uniform blob, and draw its output texture.
 - **Serving HTTP from a component** (recompile) — the `aether.http.server`

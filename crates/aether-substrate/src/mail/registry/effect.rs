@@ -14,6 +14,7 @@ use aether_data::{KindDescriptor, MailboxDescriptor, SchemaType};
 use crate::actor::native::offload::blocking::DeferredCompletion;
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::module::Module;
+use crate::chassis::error::BootError;
 
 use super::mailbox::MailboxEntry;
 use crate::mail::Mail;
@@ -196,11 +197,26 @@ pub trait PreparedSpawnActivation: Send {
 #[derive(Debug)]
 pub enum PreparedSpawnFailure {
     NativeHold(NativeHoldRefusal),
-    GuestNotPublished { namespace: String },
-    SubnameRetired { full_name: String },
-    SubnameInUse { full_name: String },
+    GuestNotPublished {
+        namespace: String,
+    },
+    SubnameRetired {
+        full_name: String,
+    },
+    SubnameInUse {
+        full_name: String,
+    },
+    /// The birth's name is nested beneath a parent the registry holds no
+    /// record for (ADR-0248 §5).
+    ParentUnknown {
+        full_name: String,
+    },
     ActivationRejected,
     OwnerClosed,
+    /// The actor's `wire` hook returned an error (ADR-0247 rule 3). Reported
+    /// by the birth's own activation job, which closed the actor before it
+    /// went `Live`; the owner never decides this one.
+    WireFailed(BootError),
 }
 
 /// Owner-retained handle for one activation running at its execution home.
@@ -446,6 +462,14 @@ pub enum RegistryEffect {
     /// its kinds and a failure later in the batch publishes nothing.
     #[cfg(feature = "wasm")]
     PublishModule(Module),
+    /// Withdraw one published namespace's row (ADR-0250 §5). Staged only by
+    /// [`RegistryBatch::unpublish_namespace`], carrying the hash the host
+    /// saw, so a concurrent republish cannot be withdrawn under the caller.
+    #[cfg(feature = "wasm")]
+    UnpublishNamespace {
+        namespace: String,
+        hash: BlobHash,
+    },
 }
 
 impl RegistryEffect {
@@ -511,11 +535,22 @@ pub enum RegistryApplied {
     /// Outcome of [`RegistryEffect::PublishModule`]: admission accepted the
     /// module, and every namespace it exports points at it.
     Published,
+    /// Outcome of [`RegistryEffect::UnpublishNamespace`]: the named
+    /// namespace no longer points at its module.
+    Unpublished,
 }
 
 #[derive(Debug)]
 pub enum RegistryEffectError {
     Name(super::NameConflict),
+    /// A birth whose name is nested beneath a parent the registry holds no
+    /// record for, in any lifecycle (ADR-0248 §5). Every record's ancestors
+    /// hold records, which is what lets `Registry::lineage_order` read one
+    /// birth serial per path segment with nothing to miss. `name` is the
+    /// refused birth's own.
+    ParentUnknown {
+        name: String,
+    },
     Drop(super::DropError),
     Kind(super::KindConflict),
     AliasTargetUnavailable {
@@ -534,6 +569,12 @@ pub enum RegistryEffectError {
     /// A module publish admission refused (ADR-0241 §4).
     #[cfg(feature = "wasm")]
     Admission(super::AdmissionRefusal),
+    /// A namespace unpublish refused (ADR-0250 §5): `reason` names why the
+    /// row stays.
+    Unpublish {
+        namespace: String,
+        reason: String,
+    },
     ActivationRejected,
     OwnerClosed,
 }
@@ -542,6 +583,9 @@ impl fmt::Display for RegistryEffectError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Name(error) => error.fmt(formatter),
+            Self::ParentUnknown { name } => {
+                write!(formatter, "mailbox name {name:?} is nested beneath a parent the registry holds no record for")
+            }
             Self::Drop(error) => error.fmt(formatter),
             Self::Kind(error) => error.fmt(formatter),
             Self::AliasTargetUnavailable { alias, target_parent } => {
@@ -553,6 +597,9 @@ impl fmt::Display for RegistryEffectError {
             Self::ContractUnpublished(id) => write!(formatter, "route {id} publishes no contract to replace"),
             #[cfg(feature = "wasm")]
             Self::Admission(refusal) => refusal.fmt(formatter),
+            Self::Unpublish { namespace, reason } => {
+                write!(formatter, "{namespace} cannot be unpublished: {reason}")
+            }
             Self::ActivationRejected => {
                 formatter.write_str("prepared actor activation could not reserve its lifecycle")
             }
@@ -596,6 +643,18 @@ impl RegistryBatch {
         let kinds = kind_effects(module.manifest().kinds().iter().cloned());
         Self {
             batch: EffectBatch::new(iter::once(RegistryEffect::PublishModule(module.clone())).chain(kinds).collect()),
+        }
+    }
+
+    /// Withdraw the one row `namespace` points at (ADR-0250 §5): the owner
+    /// proves the namespace is still published by `hash` and no live
+    /// instance needs it, then removes the row. Kinds and mailbox inventory
+    /// are untouched, because kinds only grow and no route changes.
+    #[cfg(feature = "wasm")]
+    #[must_use]
+    pub fn unpublish_namespace(namespace: &str, hash: BlobHash) -> Self {
+        Self {
+            batch: EffectBatch::new(vec![RegistryEffect::UnpublishNamespace { namespace: namespace.to_owned(), hash }]),
         }
     }
 
@@ -721,6 +780,16 @@ impl<T> RegistryCompletion<T> {
         timeout: Duration,
     ) -> Result<Result<T, RegistryEffectError>, crossbeam_channel::RecvTimeoutError> {
         self.receiver.recv_timeout(timeout)
+    }
+
+    /// Take the result the owner has already retired, without waiting.
+    ///
+    /// For a test that ran the owner step on its own thread: the batch is
+    /// retired before that step returns, so an empty channel is a failure
+    /// the caller reports at once, never something to wait for.
+    #[cfg(test)]
+    pub(crate) fn try_take(self) -> Result<Result<T, RegistryEffectError>, crossbeam_channel::TryRecvError> {
+        self.receiver.try_recv()
     }
 
     /// Block until the owner retires the batch.

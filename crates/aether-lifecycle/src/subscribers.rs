@@ -62,13 +62,15 @@ mod table {
 
     use crate::kinds::LifecycleSubscription;
 
-    /// The broadcast value of `$stage`: `Tick` carries the advance's elapsed
-    /// time (issue 4470), and every other stage is its empty signal.
+    /// The broadcast value of `$stage`: `Tick` is the tick the capability
+    /// built for this advance, carrying its elapsed time and the running
+    /// total (issue 4470, issue 7507), and every other stage is its empty
+    /// signal.
     macro_rules! stage_signal {
-        (Tick, $delta_micros:ident) => {
-            Tick { delta_micros: $delta_micros }
+        (Tick, $tick:ident) => {
+            $tick
         };
-        ($stage:ident, $delta_micros:ident) => {
+        ($stage:ident, $tick:ident) => {
             <$stage as Default>::default()
         };
     }
@@ -100,9 +102,9 @@ mod table {
                 /// Prove an explicit subscription's path live (ADR-0231 §3:
                 /// its decode already proved the path covers the stage) and
                 /// hold the proof, answering its key for the caller to watch.
-                pub fn subscribe<A, M: ReplyMode>(
+                pub fn subscribe<A, S, M: ReplyMode>(
                     &mut self,
-                    ctx: &NativeCtx<'_, A, M>,
+                    ctx: &NativeCtx<'_, A, S, M>,
                     subscription: &LifecycleSubscription,
                 ) -> Result<ErasedActorRef, ResolveError> {
                     match subscription {
@@ -118,9 +120,9 @@ mod table {
                 /// with no live actor holds nothing to remove: a closed
                 /// subscriber already left every stage through its
                 /// `MonitorNotice`.
-                pub fn unsubscribe<A, M: ReplyMode>(
+                pub fn unsubscribe<A, S, M: ReplyMode>(
                     &mut self,
-                    ctx: &NativeCtx<'_, A, M>,
+                    ctx: &NativeCtx<'_, A, S, M>,
                     subscription: &LifecycleSubscription,
                 ) {
                     match subscription {
@@ -136,9 +138,9 @@ mod table {
                 /// and hold it. `false` when `stage` is not a published stage
                 /// or the sender's published rows do not handle it silently or
                 /// manually, and nothing is held.
-                pub fn subscribe_sender<A, M: ReplyMode>(
+                pub fn subscribe_sender<A, S, M: ReplyMode>(
                     &mut self,
-                    ctx: &NativeCtx<'_, A, M>,
+                    ctx: &NativeCtx<'_, A, S, M>,
                     stage: KindId,
                     sender: ErasedActorRef,
                 ) -> bool {
@@ -177,14 +179,16 @@ mod table {
             /// fan-out through the references its set holds. The fan-out
             /// preserves the inbound `(parent, root)` lineage, so settlement
             /// counts each child against the advance's root (ADR-0080 §6).
-            pub fn broadcast_to_subscribers<A, M: ReplyMode>(
-                ctx: &mut NativeCtx<'_, A, M>,
+            /// `tick` is what the `Tick` stage broadcasts; every other stage
+            /// ignores it.
+            pub fn broadcast_to_subscribers<A, S, M: ReplyMode>(
+                ctx: &mut NativeCtx<'_, A, S, M>,
                 subscribers: &StageSubscribers,
                 stage: KindId,
-                delta_micros: u32,
+                tick: Tick,
             ) {
                 $(if stage == <$stage as Kind>::ID {
-                    ctx.fanout(subscribers.$field.values(), &stage_signal!($stage, delta_micros));
+                    ctx.fanout(subscribers.$field.values(), &stage_signal!($stage, tick));
                 })+
             }
         };

@@ -5,18 +5,15 @@
 //! side; the ADR-0079 §8 monitor surface on the other — register a watch,
 //! or close a single inline-child alias folded onto the caller (ADR-0114).
 
-use std::sync::Arc;
-
 use aether_actor::{ErasedActorRef, HandlesKind, RegistryChanged, ReplyMode};
 use aether_data::{Kind, MailId};
 
 use crate::actor::monitor::{MonitorHandle, notify_departure};
-use crate::actor::registry::MonitorError;
 use crate::mail::registry::{PreparedAliasRetirement, RegistrySubscription};
 
 use super::NativeCtx;
 
-impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
+impl<M: ReplyMode, A, S> NativeCtx<'_, A, S, M> {
     /// Issue 607 Phase 4a (ADR-0079): self-shutdown signal. Sets a
     /// flag the actor's dispatcher polls after each handler returns;
     /// when set, the trampoline drains any remaining inbox mail
@@ -50,59 +47,35 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         self.binding.fatal_abort(reason);
     }
 
-    /// Issue 607 Phase 4b (ADR-0079): register the calling actor as a
-    /// monitor of `target`. Returns a [`MonitorHandle`] whose `Drop`
-    /// deregisters the entry, so a handler that wants to unwatch
-    /// before the watcher itself dies just drops the handle.
+    /// Watch `target` (ADR-0079 §8): the calling actor is sent one
+    /// [`aether_kinds::MonitorNotice`] when `target` closes. It never fails.
     ///
-    /// The substrate drains the target's monitor list and fires one
-    /// [`aether_kinds::MonitorNotice`] per watcher when the target
-    /// goes away, on close, before the slot transitions `Live` → `Dead`
-    /// (ADR-0079 §8, amended). The watcher receives that notice as
-    /// ordinary mail whose envelope sender is the departed actor, so its
-    /// handler reads `ctx.sender()` to get the same [`ErasedActorRef`] it
-    /// monitored; the notice means state keyed by that reference is stale.
+    /// The notice is ordinary mail whose envelope sender is the departed
+    /// actor, so its handler reads `ctx.sender()` to get the same
+    /// [`ErasedActorRef`] it monitored; it means state keyed by that
+    /// reference is stale.
     ///
-    /// Validation: `target` is the ADR-0230 proof that an actor reached
-    /// `Live` in the routing [`Registry`](crate::Registry). The runtime check
-    /// still runs, and still fails, because the proof and the check read
-    /// different tables: the proof reads the published routes, while the
-    /// monitor index registers against the actor-slot map of the
-    /// [`ActorRegistry`](crate::ActorRegistry).
+    /// - **A target that has already closed** is noticed the same way. A
+    ///   reference proves its actor reached `Live`, never that it is `Live`
+    ///   now (ADR-0230 §1), so the target may have closed before this call.
+    ///   Its notice is then posted here, and the caller handles it after the
+    ///   handler that is running returns. State the caller keys on `target`
+    ///   in that handler is therefore in place when the notice arrives.
+    /// - **Dropping the returned [`MonitorHandle`]** stops the watch. A
+    ///   notice already posted when the handle drops still arrives, so a
+    ///   notice handler does nothing when it holds no state under its
+    ///   sender.
+    /// - **One notice per call.** Two monitors of one target are two
+    ///   registrations and receive two notices.
     ///
-    /// - [`MonitorError::TargetNotFound`] for a proven target with no `Live`
-    ///   actor slot: a chassis singleton not yet lifted into the slot map, and
-    ///   an inline-child alias (ADR-0114 §2), which is served by its target
-    ///   parent's slot and so has none of its own. The alias case is why the
-    ///   routing-registry fallback below stays — refusing an alias would make
-    ///   every row a cap keys on an inline child's stamped identity
-    ///   (ADR-0114 §4) unreclaimable.
-    /// - [`MonitorError::TargetTombstoned`] for a proven target that has since
-    ///   closed: a reference claims the actor reached `Live`, never that it is
-    ///   `Live` now (ADR-0230 §1). An inline child's alias closes with its
-    ///   child, on a despawn or its parent's close, so a despawned alias is
-    ///   refused the same way (ADR-0241 §8).
-    /// - [`MonitorError::Unsupported`] for a caller whose transport has no
-    ///   spawner wired (a test binding such as `testing::unrouted_binding`),
-    ///   so there is no monitor index at all — a property of the caller's
-    ///   binding, not of the target. Handlers that monitor their registrants
-    ///   treat it as "not monitorable" and stay drivable under test bindings.
-    pub fn monitor(&self, target: ErasedActorRef) -> Result<MonitorHandle, MonitorError> {
-        let target = target.id();
-        let spawner = self.binding.spawner().ok_or(MonitorError::Unsupported)?;
-        let registry = Arc::clone(spawner.actor_registry());
-        let watcher = self.binding.self_mailbox();
-        match registry.register_monitor(watcher, target) {
-            // ADR-0114 §2: an inline child's alias has no actor slot, so the
-            // slot-keyed check answers `TargetNotFound` for an address that
-            // is live and mailable. Its liveness lives in the routing
-            // registry; take that as the authority for an alias.
-            Err(MonitorError::TargetNotFound) if self.binding.mailer().registry().is_live_alias(target) => {
-                registry.register_alias_monitor(watcher, target)?;
-            }
-            other => other?,
-        }
-        Ok(MonitorHandle::new(registry, watcher, target))
+    /// `target` is any proven reference: an [`ErasedActorRef`], or an
+    /// `ActorRef<R>` or `ProtocolRef<P>` passed as it is.
+    /// Any proven target can be watched: an instanced actor, a composed or
+    /// pumped root, an inline-child alias (ADR-0114 §2). A caller whose
+    /// `wire` monitors before its own route is `Live` has a notice held
+    /// until its birth promotes.
+    pub fn monitor(&self, target: impl Into<ErasedActorRef>) -> MonitorHandle {
+        MonitorHandle::register(self.binding, self.binding.self_mailbox(), target.into().id())
     }
 
     /// ADR-0080 §6: subscribe the calling actor to one `K` notice when the
@@ -140,33 +113,27 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
 
     /// ADR-0241 §8: close one inline-child `alias` folded onto the calling
     /// actor's mailbox, because the child that occupied it was despawned. The
-    /// alias tombstones, so a later watch on it is refused
-    /// ([`MonitorError::TargetTombstoned`]) and a re-spawn of its key is
-    /// refused before any id reaches the guest; then its watchers drain and
+    /// alias tombstones, so a later watch on it is answered with its notice at
+    /// once and a re-spawn of its key is refused before any id reaches the
+    /// guest; then its watchers drain and
     /// each is sent one [`aether_kinds::MonitorNotice`] from the alias — the
     /// single-address form of what the close tail does for every alias of a
     /// closing actor.
     ///
     /// Self-service only: an actor can only close an alias that is folded
     /// onto its own mailbox, so a caller cannot reach a peer's inline
-    /// children. An alias that is not this actor's is a no-op
-    /// `false`, as is a transport with no spawner wired
-    /// (a test binding such as `testing::unrouted_binding`) — there is no
-    /// actor registry to tombstone in.
+    /// children. An alias that is not this actor's is a no-op `false`.
     ///
     /// Retiring the route itself is a separate, owner-staged step: the notice
     /// goes out from the despawning actor's own turn, while the route change
     /// lands through the registry owner. The token comes from the drained
     /// retirements (`Component::drain_pending_alias_retirements`).
     pub fn close_alias(&self, alias: &PreparedAliasRetirement) -> bool {
-        let Some(spawner) = self.binding.spawner() else {
-            return false;
-        };
-        if !self.binding.mailer().registry().is_alias_to(alias.alias, self.binding.self_mailbox()) {
+        let registry = self.binding.mailer().registry();
+        if !registry.is_alias_to(alias.alias, self.binding.self_mailbox()) {
             return false;
         }
-        let registry = spawner.actor_registry();
-        notify_departure(self.binding, alias.alias, registry.close_alias(alias.alias));
+        notify_departure(self.binding, alias.alias, registry.actor_registry().close_alias(alias.alias));
         true
     }
 }

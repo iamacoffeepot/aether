@@ -268,7 +268,7 @@ struct Routed {
     /// The retained user method's name (also the glue's call target).
     fn_name: Ident,
     /// The HTTP-method identifier (`Get` / `any` / …) — the grouping key's
-    /// method half and the source of the `Option<HttpMethod>` filter token.
+    /// method half and the source of the `MethodFilter` token.
     method_ident: Ident,
     /// The parsed path template.
     template: Template,
@@ -305,7 +305,7 @@ struct Group<'a> {
     key: (String, String),
     /// The static head registered with the cap.
     static_head: String,
-    /// The `Option<HttpMethod>` filter token for the registration, the
+    /// The `MethodFilter` token for the registration, the
     /// handler's group selection, and the `Route` handed to the route.
     method_expr: TokenStream2,
     /// The group's routes, sorted most-literal-first.
@@ -454,16 +454,16 @@ fn attr_is_route(attr: &Attribute) -> bool {
 }
 
 /// Map a `#[http::route]` method identifier to its
-/// `Option<HttpMethod>` filter token: `any` → `None`, a variant name →
-/// `Some(HttpMethod::Variant)`.
+/// `MethodFilter` token: `any` → `MethodFilter::Any`, a variant name →
+/// `MethodFilter::Only(HttpMethod::Variant)`.
 fn method_filter_token(method: &Ident) -> syn::Result<TokenStream2> {
     if method == "any" {
-        return Ok(quote! { ::core::option::Option::None });
+        return Ok(quote! { ::aether_http::kinds::MethodFilter::Any });
     }
     let known = ["Get", "Post", "Put", "Delete", "Patch", "Head", "Options"];
     if known.iter().any(|name| method == name) {
         return Ok(quote! {
-            ::core::option::Option::Some(::aether_http::kinds::HttpMethod::#method)
+            ::aether_http::kinds::MethodFilter::Only(::aether_http::kinds::HttpMethod::#method)
         });
     }
     Err(syn::Error::new(
@@ -650,7 +650,7 @@ fn emit_router_glue(groups: &[Group<'_>], first: &Routed) -> TokenStream2 {
             let __aether_path = __aether_request.path.clone();
             let __aether_segs: ::std::vec::Vec<&str> =
                 __aether_path.split('/').filter(|__aether_seg| !__aether_seg.is_empty()).collect();
-            let __aether_claims: [(&str, ::core::option::Option<::aether_http::kinds::HttpMethod>); #claim_count] =
+            let __aether_claims: [(&str, ::aether_http::kinds::MethodFilter); #claim_count] =
                 [#(#claims),*];
             let __aether_group = __aether_claims
                 .iter()
@@ -804,11 +804,13 @@ fn fill_actor(ty: &mut Type) {
     }
 }
 
-/// Refuse a route's transport ctx that names the `Unchecked`
-/// reply mode, as `NativeCtx<'_, Self, Unchecked>` does: its second type
-/// argument's last segment is `Unchecked`. The generated handler covers the
-/// `HttpRouter` row with a single handler, so it passes a single ctx, and a
-/// route answers by returning. The match is syntactic, like [`fill_actor`]'s.
+/// Refuse a route's transport ctx that names the `Unchecked` reply mode, as
+/// `NativeCtx<'_, Self, Anyone, Unchecked>` does: a type argument after its
+/// actor whose last segment is `Unchecked`, which covers the mode's own third
+/// position and a two-argument spelling that leaves the sender out. The
+/// generated handler covers the `HttpRouter` row with a single handler, so it
+/// passes a single ctx, and a route answers by returning. The match is
+/// syntactic, like [`fill_actor`]'s.
 fn reject_unchecked_ctx(ty: &Type) -> syn::Result<()> {
     let Type::Path(TypePath { path, .. }) = ty else {
         return Ok(());
@@ -816,12 +818,8 @@ fn reject_unchecked_ctx(ty: &Type) -> syn::Result<()> {
     let Some(PathArguments::AngleBracketed(args)) = path.segments.last().map(|seg| &seg.arguments) else {
         return Ok(());
     };
-    let Some(GenericArgument::Type(Type::Path(TypePath { path: mode, .. }))) =
-        args.args.iter().filter(|arg| matches!(arg, GenericArgument::Type(_))).nth(1)
-    else {
-        return Ok(());
-    };
-    if mode.segments.last().is_some_and(|seg| seg.ident == "Unchecked") {
+    let names_unchecked = args.args.iter().filter_map(type_argument_path).skip(1).any(ends_in_unchecked);
+    if names_unchecked {
         return Err(syn::Error::new(
             ty.span(),
             "a route takes the single ctx the #[http::router] handler passes, not an `Unchecked` one: it answers by \
@@ -829,6 +827,20 @@ fn reject_unchecked_ctx(ty: &Type) -> syn::Result<()> {
         ));
     }
     Ok(())
+}
+
+/// A generic argument's path when it is a path type, and `None` for a
+/// lifetime or any other argument.
+fn type_argument_path(arg: &GenericArgument) -> Option<&syn::Path> {
+    match arg {
+        GenericArgument::Type(Type::Path(TypePath { path, .. })) => Some(path),
+        _ => None,
+    }
+}
+
+/// Whether a path's last segment is `Unchecked`.
+fn ends_in_unchecked(path: &syn::Path) -> bool {
+    path.segments.last().is_some_and(|seg| seg.ident == "Unchecked")
 }
 
 /// Whether a transport ctx type is the wasm guest's `WasmCtx`, matched on its
@@ -872,10 +884,26 @@ fn synthesized_wire_ctx_type(base: Type) -> Type {
     base
 }
 
+/// The birth error a router-synthesized `wire` returns: each transport pins
+/// its own (`Lifecycle::InitError`), read off the route's ctx as
+/// [`synthesized_wire_ctx_type`] reads it.
+fn wire_error_type(base: &Type) -> Type {
+    if is_wasm_ctx(base) {
+        return parse_quote!(::aether_actor::ActorInitError);
+    }
+    parse_quote!(::aether_substrate::BootError)
+}
+
 /// Inject the per-group `RegisterRouteSelf` registrations into `wire` —
-/// appended to an author-written `wire` body, or synthesized as a new
-/// `wire` when the impl has none. Receiver and ctx shapes are copied
-/// from the first routed method, so one rewrite serves both transports.
+/// run after an author-written `wire` body that returned `Ok`, or
+/// synthesized as a new `wire` when the impl has none. Receiver and ctx
+/// shapes are copied from the first routed method, so one rewrite serves
+/// both transports.
+///
+/// `wire` returns the birth's result (ADR-0247 rule 3). An author-written
+/// body is bound whole, under the return type its signature declares, so its
+/// tail and its early returns keep their meaning; an `Err` from it leaves
+/// before any route is registered.
 /// `shared` is the impl-level `#[http::router(shared)]` flag (ADR-0136),
 /// applied uniformly to every group registration this impl emits.
 fn inject_registration(item: &mut ItemImpl, groups: &[Group<'_>], first: &Routed, shared: bool) -> syn::Result<()> {
@@ -886,10 +914,19 @@ fn inject_registration(item: &mut ItemImpl, groups: &[Group<'_>], first: &Routed
 
     if let Some(wire) = existing {
         let ctx = wire_ctx_ident(wire)?;
-        for group in groups {
-            let send = registration_send(group, &ctx, shared);
-            wire.block.stmts.push(parse_quote!(#send));
-        }
+        // A `wire` that declares no return type is refused by `#[actor]`
+        // with the signature to write, so it is left as written for that.
+        let ReturnType::Type(_, output) = wire.sig.output.clone() else {
+            return Ok(());
+        };
+        let sends = groups.iter().map(|group| registration_send(group, &ctx, shared));
+        let body = &wire.block;
+        wire.block = parse_quote!({
+            let __aether_wired: #output = #body;
+            __aether_wired?;
+            #(#sends)*
+            ::core::result::Result::Ok(())
+        });
         return Ok(());
     }
 
@@ -899,12 +936,15 @@ fn inject_registration(item: &mut ItemImpl, groups: &[Group<'_>], first: &Routed
     // strip the type args (`NativeCtx<'_, Self>` → `NativeCtx<'_>`).
     // `#[actor]` then types the base ctx by the router's actor.
     let first_arg = &first.first_arg;
-    let ctx_c = synthesized_wire_ctx_type(base_ctx_type(&first.ctx_c));
+    let base = base_ctx_type(&first.ctx_c);
+    let error = wire_error_type(&base);
+    let ctx_c = synthesized_wire_ctx_type(base);
     let ctx = format_ident!("__aether_ctx");
     let sends = groups.iter().map(|group| registration_send(group, &ctx, shared)).collect::<Vec<_>>();
     let wire: ImplItemFn = parse_quote! {
-        fn wire(#first_arg, #ctx: &mut #ctx_c) {
+        fn wire(#first_arg, #ctx: &mut #ctx_c) -> ::core::result::Result<(), #error> {
             #(#sends)*
+            ::core::result::Result::Ok(())
         }
     };
     item.items.push(ImplItem::Fn(wire));

@@ -1,17 +1,17 @@
 //! Root-command routing: the command view a manager retains of each window
 //! child, and the forward of a root-addressed command to the sole window.
 
-use aether_actor::{Protocol, ProtocolRef, ReplyMode, RowAt, protocol};
-use aether_data::{ActorMail, ErasedActorPath};
+use aether_actor::{ActorPath, Protocol, ProtocolRef, ReplyMode, RowAt, protocol};
+use aether_data::ActorMail;
 use aether_substrate::actor::native::NativeCtx;
 
 use crate::{
     CloseWindow, CloseWindowResult, FocusWindow, FocusWindowResult, RequestWindowRedraw, RequestWindowRedrawResult,
     SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult, SetWindowMode, SetWindowModeResult,
-    SetWindowTitle, SetWindowTitleResult,
+    SetWindowPresentation, SetWindowPresentationResult, SetWindowTitle, SetWindowTitleResult, WindowInstance,
 };
 
-/// The seven command rows a concrete window endpoint exposes, each naming the
+/// The eight command rows a concrete window endpoint exposes, each naming the
 /// reply its endpoint holds and answers later. A manager retains only this
 /// view of each successfully published child, so a root forward cannot select
 /// a kind outside the shared endpoint surface.
@@ -19,6 +19,7 @@ use crate::{
 pub trait WindowCommands {
     fn close(mail: CloseWindow) -> CloseWindowResult;
     fn set_mode(mail: SetWindowMode) -> SetWindowModeResult;
+    fn set_presentation(mail: SetWindowPresentation) -> SetWindowPresentationResult;
     fn set_title(mail: SetWindowTitle) -> SetWindowTitleResult;
     fn set_menu(mail: SetWindowMenu) -> SetWindowMenuResult;
     fn set_cursor(mail: SetWindowCursor) -> SetWindowCursorResult;
@@ -31,14 +32,14 @@ pub trait WindowCommands {
 /// the window (the desktop closing interval); it remains in cardinality and
 /// is refused for liveness when it is the sole entry.
 pub struct RoutableWindow {
-    pub path: ErasedActorPath,
+    pub path: ActorPath<WindowInstance>,
     pub target: Option<ProtocolRef<WindowCommands>>,
 }
 
 /// Re-dispatch one root-addressed per-window command at the sole live window,
 /// answering the *original* requester rather than this manager.
 ///
-/// The seven command kinds are the window endpoint's (`runtime::instance`), so
+/// The eight command kinds are the window endpoint's (`runtime::instance`), so
 /// the root owns no copy of their semantics: it proves the sole window live
 /// (ADR-0230) and forwards the request verbatim through that proof with the
 /// requester's own `reply_to` pinned, and the reply the endpoint holds
@@ -50,9 +51,9 @@ pub struct RoutableWindow {
 /// `Err` carries the refusal text for the two ambiguous cases and for a sole
 /// window that is no longer live, which the caller receives as the command's
 /// own `Err` variant rather than as silence or a forward into a dead mailbox.
-pub(super) fn route_to_sole_window<K: ActorMail, A, I, M: ReplyMode>(
+pub(super) fn route_to_sole_window<K: ActorMail, A, S, I, M: ReplyMode>(
     windows: &[RoutableWindow],
-    ctx: &mut NativeCtx<'_, A, M>,
+    ctx: &mut NativeCtx<'_, A, S, M>,
     mail: &K,
 ) -> Result<(), String>
 where
@@ -70,7 +71,7 @@ where
             ));
         }
     };
-    ctx.resolve_path(&window.path).map_err(|error| {
+    ctx.resolve_path(window.path.as_erased()).map_err(|error| {
         format!("{} reached the aether.window root, but window {} is not live: {error}", K::NAME, window.path)
     })?;
     let target = window
@@ -87,8 +88,8 @@ mod tests {
 
     use super::*;
     use crate::runtime::subscribers::fixture::Rig;
-    use crate::{CreateWindow, CreateWindowResult, RetireWindow, WindowCapability, WindowInstance};
-    use crate::{WindowMode, WindowSpec};
+    use crate::{CreateWindow, CreateWindowResult, RetireWindow, WindowCapability};
+    use crate::{WindowMode, WindowPresentation, WindowSpec};
 
     /// The sole window's child departs while a root command for it is
     /// already queued behind the departure: the window stays listed until
@@ -98,8 +99,13 @@ mod tests {
     #[test]
     fn sole_window_departure_is_refused_before_its_monitor_notice_is_processed() {
         let mut rig = Rig::synthetic();
-        let spec =
-            WindowSpec { name: "main".to_owned(), title: "Main".to_owned(), mode: WindowMode::Windowed, size: None };
+        let spec = WindowSpec {
+            name: "main".to_owned(),
+            title: "Main".to_owned(),
+            mode: WindowMode::Windowed,
+            size: None,
+            presentation: WindowPresentation::Display,
+        };
         rig.send(&CreateWindow { spec });
         let CreateWindowResult::Ok { window } = rig.reply::<CreateWindowResult>() else {
             panic!("the synthetic manager creates the window");
@@ -120,7 +126,7 @@ mod tests {
         let SetWindowTitleResult::Err { error } = rig.reply::<SetWindowTitleResult>() else {
             panic!("a dead child remains listed until its monitor notice, but cannot receive a root command");
         };
-        assert!(error.contains(window.path.as_str()), "the refusal names the window: {error}");
+        assert!(error.contains(&window.path.to_string()), "the refusal names the window: {error}");
         assert!(error.contains("not live"), "the refusal says why: {error}");
     }
 }

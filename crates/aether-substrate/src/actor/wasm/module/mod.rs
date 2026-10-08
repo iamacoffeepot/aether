@@ -4,21 +4,20 @@
 //! Checking code in through the engine's one [`ModuleCache`] derives
 //! everything the engine needs from the bytes once:
 //!
-//! - the compiled `wasmtime::Module`, once per code: the bytes without their
-//!   asset sections, so modules that differ only in their assets share one
-//!   compile;
-//! - the [`ModuleManifest`], every custom section the host reads (kinds,
-//!   exported and private actor groups, lineage, boot, namespace, the
-//!   no-default and content-addressed markers, and the asset catalog with
-//!   each asset's byte range), parsed once per content hash.
+//! - the compiled `wasmtime::Module` and the code-derived manifest, once per
+//!   code: the bytes without their asset sections, so modules that differ
+//!   only in their assets share one compile and one parse of the kinds,
+//!   exported and private actor groups, lineage, boot, namespace, and the
+//!   no-default and content-addressed markers;
+//! - the [`ModuleManifest`]'s per-file asset index, each asset checked in as
+//!   its own blob through the check-in handle, parsed once per file hash.
 //!
-//! The wasm bytes are used to compile and to parse, and are then let go:
-//! nothing here holds the code blob or any asset's payload, so the bytes
-//! leave the store once the caller drops its value. Every later load, boot
-//! and replace of the same bytes reads the entry instead of the bytes. An
-//! asset's payload passes only through a load window, which reads its range
-//! from the code the window's opener brought and lets go of it when the
-//! window closes (ADR-0163 §3).
+//! The wasm bytes are used to compile and to parse, and the file bytes are
+//! then let go: each asset is kept once as its own blob, deduplicated by the
+//! store, for as long as a `Module` holds it, so the bytes leave the store
+//! once the caller drops its value. Every later load, boot and replace of the
+//! same bytes reads the entry instead of the bytes. An instance reads its
+//! assets from its own module in every hook (ADR-0250).
 //!
 //! A module publishes the namespaces [`Module::published_groups`] names
 //! (ADR-0241 §3): its exported groups' declared namespaces, each qualified by
@@ -35,6 +34,8 @@ use std::sync::Arc;
 use aether_data::BlobHash;
 
 use crate::actor::wasm::kind_manifest::ActorInputs;
+#[cfg(test)]
+use {crate::actor::native::BlobCheckIn, crate::store::BlobStore, wasmtime::Engine};
 
 mod cache;
 mod code;
@@ -57,14 +58,30 @@ pub struct Module {
 }
 
 /// What a module's bytes are checked in as. Built only by
-/// [`ModuleCache::check_in`].
+/// [`ModuleCache::check_in`]: one entry per file hash, over one shared
+/// compile and code-derived manifest per code hash plus the file's own asset
+/// index.
 struct ModuleEntry {
     /// The hash of the whole file: the module's identity.
     hash: BlobHash,
-    /// The compile of the file's code, shared with every module whose file
-    /// differs from this one only in its asset sections.
+    /// The compile and code-derived manifest of the file's code, shared with
+    /// every module whose file differs from this one only in its asset
+    /// sections.
     code: Arc<cache::CompiledCode>,
+    /// The file's manifest: the shared code part cloned from `code`, plus the
+    /// file's own asset index.
     manifest: ModuleManifest,
+}
+
+#[cfg(test)]
+impl Module {
+    /// A module with no exports, no kinds and no assets, checked into
+    /// `store`: the module a test ctx holds when the test reads no assets.
+    pub(crate) fn bare_for_test(store: &BlobStore) -> Self {
+        let blobs = BlobCheckIn::new(store.clone());
+        let code = blobs.check_in(wat::parse_str("(module)").expect("compile WAT").into_boxed_slice());
+        ModuleCache::new(Arc::new(Engine::default())).check_in(&blobs, &code).expect("check the module in")
+    }
 }
 
 impl Module {
@@ -83,7 +100,8 @@ impl Module {
         self.entry.code.module()
     }
 
-    /// The module's custom sections, parsed once per hash.
+    /// The module's custom sections: the code-derived part shared with every
+    /// module over the same code, plus this file's own asset index.
     #[must_use]
     pub fn manifest(&self) -> &ModuleManifest {
         &self.entry.manifest

@@ -109,8 +109,8 @@ The workflow derives progress from concrete artifacts:
 | Owned issue worktree or branch | Implementation is in progress or paused |
 | Open draft pull request | Reviewable implementation exists |
 | Draft current head with pending/red required checks | Build/test proof is incomplete |
-| Green current head without a trusted current-fact direct-review record or clear thread facts | QA evidence is incomplete |
-| Green, contained current head with hidden direct review accepted and native reviews and threads clear | Landable draft; explicit landing authority is still required |
+| Green current head with an active native change request or an unresolved thread | Blocked until the item is repaired or cleared |
+| Green, contained current head with native reviews and threads clear | Landable draft; explicit landing authority is still required |
 | Named pull request merged and closing issue closed | Done |
 
 Never infer one row from another. Each consumer re-reads the exact facts it
@@ -146,40 +146,24 @@ Require every repository-required check for the current head to complete
 successfully. Current branch protection requires `CI pass` and `Lint title`.
 Local checks support this evidence but do not replace it.
 
-### Direct review and native blockers
+### Native blockers
 
-The implementer directly inspects the complete current-head diff against the
-approved Plan, repairs every defect, and reruns the applicable proof. Its
-semantic verdict is one canonical hidden record in the closing issue body's
-unmanaged evidence history immediately before `## Problem statement`:
+No review record exists: nothing reviews a draft as a workflow step, and
+landing requires no verdict. PR reviews, comments, and handoffs remain ordinary
+human prose and do not carry machine JSON/HTML review markers; landing never
+treats a pull-request machine marker or a hidden issue-body line as review
+authority.
 
-```text
-<!-- aether-direct-review:v2 {"head_sha":"<40 lowercase hex>","issue":123,"plan_sha256":"<64 lowercase hex>","pull_request":456,"verdict":"APPROVE"} -->
-```
-
-The wrapper, compact sorted key order, types, and verdict enum are strict. Trust
-comes from the effective issue-body editor being the repository owner, member,
-or collaborator. The last valid record matching the exact issue, pull request,
-head, and current Plan digest is authoritative; a push or managed-Plan change
-makes older records stale history. Writers preserve older approval and review
-records, use a file-backed full-body edit with a byte-for-byte concurrent-change
-guard, and re-read the body and provenance after mutation.
-
-PR reviews, comments, and handoffs remain ordinary human prose and do not carry
-machine JSON/HTML review markers. Landing never treats a legacy pull-request
-machine marker as semantic authority.
-
-Native decisions remain separate: each reviewer's latest active
-`CHANGES_REQUESTED` blocks until that reviewer approves or GitHub reports it
-dismissed. Every unresolved review thread blocks independently. Direct
-inspection does not waive either native signal.
+Two native signals block: each reviewer's latest active `CHANGES_REQUESTED`
+blocks until that reviewer approves or GitHub reports it dismissed, and every
+unresolved review thread blocks independently. Green checks waive neither.
 
 ## Repair and conflict handling
 
 Review findings are verified, fixed inside the approved surface or
 justified with evidence, committed and plain-pushed, replied to, and resolved
 only after their disposition is visible. Every push creates a new head that must
-repeat checks and direct inspection.
+repeat its checks.
 
 A needed path outside the Declared surface, broken Plan premise, or incompatible
 design returns to the matching managed scope artifact. It is not license to
@@ -187,15 +171,15 @@ expand the diff.
 
 Content-conflict resolution preserves both branch and current-main intent in
 three-way context. Claude Code's `/resolve <PR>` merges current `main` into the
-same draft branch, resolves only inside the approved surface, and drives the new
-head through the full evidence loop. It does not rebase, force-push, create a
+same draft branch, resolves only inside the approved surface, and pushes the new
+head, which must pass its checks again. It does not rebase, force-push, create a
 second PR, or land.
 
 ## Landing and cleanup
 
 Landing is separately authorized. Immediately before mutation it independently
 revalidates issue identity and digest, approval and ancestry, actual diff and
-surface, current-head checks, hidden semantic review, native reviews, threads,
+surface, current-head checks, native reviews, threads,
 branch ownership, and merge prediction.
 
 An eligible landing clears draft state, performs an ordinary squash merge, and

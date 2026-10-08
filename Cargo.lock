@@ -77,6 +77,7 @@ dependencies = [
  "aether-data",
  "aether-fs",
  "aether-harness-substrate",
+ "aether-kinds",
  "aether-substrate",
  "bytemuck",
  "clap",
@@ -328,38 +329,14 @@ dependencies = [
  "aether-lifecycle",
  "aether-render",
  "aether-substrate",
- "aether-text",
  "aether-window",
  "clap",
+ "confique",
  "crossbeam-channel",
  "ctrlc",
  "signal-hook",
  "tracing",
  "winit",
-]
-
-[[package]]
-name = "aether-chassis-harness"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-chassis",
- "aether-clipboard",
- "aether-component",
- "aether-fs",
- "aether-harness-substrate",
- "aether-kinds",
- "aether-lifecycle",
- "aether-render",
- "aether-substrate",
- "aether-substrate-harness-cap",
- "aether-tcp",
- "aether-text",
- "aether-window",
- "anyhow",
- "clap",
- "confique",
- "crossbeam-channel",
- "tracing",
 ]
 
 [[package]]
@@ -489,6 +466,8 @@ dependencies = [
  "aether-harness-substrate-capture",
  "aether-kinds",
  "aether-kit",
+ "aether-render",
+ "aether-window",
  "serde_json",
  "tracing",
 ]
@@ -608,6 +587,7 @@ dependencies = [
  "aether-component",
  "aether-data",
  "aether-fs",
+ "aether-inventory",
  "aether-kinds",
  "aether-lifecycle",
  "aether-substrate",
@@ -717,9 +697,9 @@ dependencies = [
  "aether-math",
  "aether-mesh",
  "aether-render",
+ "aether-substrate",
  "aether-window",
  "inventory",
- "serde",
  "tracing",
 ]
 
@@ -826,6 +806,7 @@ dependencies = [
  "bytemuck",
  "clap",
  "confique",
+ "fontdue",
  "inventory",
  "naga",
  "pollster",
@@ -962,7 +943,6 @@ dependencies = [
  "aether-render",
  "aether-tcp",
  "aether-test-fixtures-kinds",
- "aether-widget",
  "aether-window",
  "serde",
  "tracing",
@@ -1097,6 +1077,7 @@ dependencies = [
  "aether-clipboard",
  "aether-component",
  "aether-data",
+ "aether-fs",
  "aether-kinds",
  "aether-test-fixtures-kinds",
 ]
@@ -1141,25 +1122,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-text"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-data",
- "aether-fs",
- "aether-harness-substrate",
- "aether-harness-substrate-capture",
- "aether-kinds",
- "aether-math",
- "aether-render",
- "aether-substrate",
- "fontdue",
- "inventory",
- "serde",
- "tracing",
-]
-
-[[package]]
 name = "aether-trace"
 version = "0.3.0-alpha"
 dependencies = [
@@ -1168,31 +1130,6 @@ dependencies = [
  "aether-kinds",
  "aether-substrate",
  "inventory",
-]
-
-[[package]]
-name = "aether-widget"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-clipboard",
- "aether-component",
- "aether-data",
- "aether-fs",
- "aether-harness-substrate",
- "aether-harness-substrate-capture",
- "aether-kinds",
- "aether-lifecycle",
- "aether-math",
- "aether-render",
- "aether-substrate",
- "aether-test-fixtures-bundle",
- "aether-test-fixtures-kinds",
- "aether-text",
- "aether-window",
- "inventory",
- "serde",
- "tracing",
 ]
 
 [[package]]

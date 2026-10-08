@@ -8,11 +8,10 @@ APIs without a deprecation window.
 ### Highlights
 
 - Draw a HUD without a UI framework: `aether.render.draw_shapes` evaluates rounded boxes, circles, rings and drop shadows as a signed distance field on the GPU, beside textured quads and screen-space triangles on the same overlay pass.
-- Put text on screen: mail `aether.text.load_font` a TTF out of the `assets` namespace, then `aether.text.draw` a string in screen or world space — layout, glyph rasterization and atlas packing all happen inside the engine.
+- Put text on screen: mail `aether.render.create_font` the bytes of a TTF, then `aether.render.draw_text` strings in screen or world space — layout, glyph rasterization and atlas packing all happen inside the renderer, and text keeps its sender's order among that sender's shapes.
 - Serve HTTP from an actor: `aether.http.server` registers typed routes off an `#[http::router]` impl block, upgrades to websockets, streams request and response bodies under windowed flow control, and spreads one route across replicated handler mailboxes.
 - Open more than one window: `aether.window.create` gives each window its own addressable mailbox, with a real platform menu bar and cursor icons on macOS and Windows.
 - Hear more than a synth: load an SFZ instrument bank or play a WAV track through `aether.fs`, place each note in the stereo image with a per-note pan, and trim one sender's sounding voices live.
-- Build a screen out of widgets: `aether-widget` ships buttons, tabs, dropdowns, virtual lists, sliders, text fields, dialogs, tooltips, toasts and splitters as inline child actors that composite into one ordered draw.
 - Reload a component without restarting the engine: `cargo xtask dev-component` watches, cross-builds, uploads and swaps one wasm module in place, and `on_dehydrate` / `on_rehydrate` carry its state across the swap.
 
 ### Engine
@@ -26,10 +25,11 @@ APIs without a deprecation window.
 - `#[aether_data::kind(name = "…")]` declares a kind and its whole derive stack in one attribute.
 - `aether.inventory` answers manifest and resolve queries over mail, so tagged ids render as real names.
 - Chassis config is derived at compose time from the capabilities actually linked, resolved argv above env above default, and self-reported by the binary.
+- An actor measures elapsed time with `ctx.now()`, the same call on a guest ctx and a native one. It returns an `aether_actor::Instant` that stays in actor state, and a `SubstrateHarness` test steps the clock by hand through `SubstrateHarnessBuilder::clock`.
 
 ### Chassis and capabilities
 
-- Every native capability is its own crate — `aether-render`, `aether-audio`, `aether-fs`, `aether-window`, `aether-text`, `aether-clipboard`, `aether-http`, `aether-tcp`, `aether-process`, `aether-component`, `aether-lifecycle`, `aether-rpc`, `aether-fleet` — and a chassis composes only the ones it needs.
+- Every native capability is its own crate — `aether-render`, `aether-audio`, `aether-fs`, `aether-window`, `aether-clipboard`, `aether-http`, `aether-tcp`, `aether-process`, `aether-component`, `aether-lifecycle`, `aether-rpc`, `aether-fleet` — and a chassis composes only the ones it needs.
 - Render: 4× MSAA on the world and overlay passes, a world-space material pass, an authored render-program surface with a geometry registry, compute and indirect draws, per-pass GPU timings behind a boot knob, and device-loss recovery for offscreen targets and retained desktop windows.
 - Window: per-window mailboxes under a supervising manager, plus `set_menu`, `set_cursor`, `close`, `request_redraw` and `focus`; key repeat, typed character, IME preedit, modifier, mouse-button and wheel input kinds.
 - Audio: sampled SFZ banks with sustain loops, WAV track playback in its own mixer lane, timed note scheduling, per-note pan, per-sender gain, a master reverb send, and noise / pitch-sweep percussion built-ins.

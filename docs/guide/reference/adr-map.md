@@ -84,10 +84,10 @@ and topology while preserving earlier public concepts.
 | Topic | Records |
 |---|---|
 | Rendering/capture foundations | ADRs cited from [Rendering](../systems/rendering.md) |
-| Text capability | ADR-0105 |
+| Text | ADR-0105 (render surface, layout, atlas), ADR-0248 §10 (the renderer draws text) |
 | Mesh DSL and meshing | ADR-0026, ADR-0051–ADR-0053, ADR-0056–ADR-0057, ADR-0062 |
 | Audio baseline/scheduling/samples | ADR-0039, ADR-0103, ADR-0104, ADR-0126, ADR-0127 |
-| Widgets/composition/editor | ADR-0117, ADR-0140, ADR-0141 |
+| Widgets/composition/editor | ADR-0117, ADR-0140, ADR-0141 — the widget crate ADR-0117 and ADR-0141 cite is no longer in the tree; ADR-0117 §2 (draw order is structural) stands, and ADR-0141 is withdrawn |
 | Terrain marks and proposals | ADR-0142, ADR-0143 — Accepted, but the `aether-kit-terrain` crate they cite is no longer in the tree; read them as history |
 
 The old DAG and handle-store designs (ADRs 0045, 0047, 0049) are superseded.

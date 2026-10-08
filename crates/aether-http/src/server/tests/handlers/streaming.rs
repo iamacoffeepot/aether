@@ -51,8 +51,9 @@ impl NativeActor for StreamHttpHandler {
 
     /// Binds the catch-all; its `HttpStreamCredit` handler covers
     /// `StreamCreditRouter`, so the server seats its response stream.
-    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         bind_catch_all(ctx);
+        Ok(())
     }
 
     #[handler::request]
@@ -112,8 +113,9 @@ impl NativeActor for StreamIdEchoHandler {
         Ok(StreamIdEchoHandlerState { emitted: false })
     }
 
-    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         bind_catch_all(ctx);
+        Ok(())
     }
 
     #[handler::request]
@@ -167,8 +169,9 @@ impl NativeActor for FloodHttpHandler {
         Ok(FloodHttpHandlerState { flooded: false })
     }
 
-    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         bind_catch_all(ctx);
+        Ok(())
     }
 
     #[handler::request]
@@ -225,8 +228,9 @@ impl NativeActor for StreamingUploadHandler {
 
     /// Binds the catch-all; the server casts the binding to
     /// `RequestStreamRouter` to take the request-streaming path.
-    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         bind_catch_all(ctx);
+        Ok(())
     }
 
     /// A route holder covers `HttpRouter`, so this handler takes the

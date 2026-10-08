@@ -31,6 +31,24 @@ pub fn read_more(stream: &mut TcpStream, chunk: &mut [u8]) -> ReadStep {
     }
 }
 
+/// HTTP version driving the keep-alive default ([`request_keeps_alive`]):
+/// `Http11` keeps alive by default, `Http10` and `Unknown` close by
+/// default. Mapped once in `parse_head`, so `None` there selects the
+/// close-by-default behavior at the single mapping site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpVersion {
+    Http10,
+    Http11,
+    Unknown,
+}
+
+/// Phase-3 carry outcome: the pipelined bytes handed to exactly one
+/// consuming arm. Each arm moves the buffer exactly once.
+enum ReaderNext {
+    Resume(Vec<u8>),
+    Upgrade(Vec<u8>),
+}
+
 /// One parsed request head.
 struct RequestHead {
     head_len: usize,
@@ -43,9 +61,9 @@ struct RequestHead {
     /// buffered / streamed / `411` decision; the reader turns it into the body
     /// read (count down `content_length`, or decode chunked).
     framing: BodyFraming,
-    /// httparse minor version: `Some(0)` = HTTP/1.0, `Some(1)` = HTTP/1.1.
+    /// httparse minor version mapped to [`HttpVersion`].
     /// Drives the keep-alive default ([`request_keeps_alive`]).
-    version: Option<u8>,
+    version: HttpVersion,
 }
 
 /// Outcome of [`parse_head`].
@@ -94,7 +112,11 @@ fn parse_head(buf: &[u8], max_header_bytes: usize) -> HeadParse {
     match request.parse(buf) {
         Ok(httparse::Status::Complete(head_len)) => {
             let method = request.method.unwrap_or_default().to_string();
-            let version = request.version;
+            let version = match request.version {
+                Some(1) => HttpVersion::Http11,
+                Some(0) => HttpVersion::Http10,
+                _ => HttpVersion::Unknown,
+            };
             let raw_path = request.path.unwrap_or("/");
             let (path, query) = match raw_path.split_once('?') {
                 Some((before, after)) => (percent_decode_path(before), after.to_string()),
@@ -229,16 +251,16 @@ pub fn validate_ws_handshake(headers: &[HttpHeader]) -> Result<String, (u16, &'s
 
 /// Whether a request wants its connection kept alive after the response.
 /// An explicit `Connection` token wins either way; absent one, the HTTP
-/// version decides — HTTP/1.1 (`Some(1)`) keeps alive by default, HTTP/1.0
-/// (`Some(0)`, or an unknown/absent version) closes by default.
-pub fn request_keeps_alive(version: Option<u8>, headers: &[HttpHeader]) -> bool {
+/// version decides — HTTP/1.1 keeps alive by default, HTTP/1.0
+/// (or an unknown version) closes by default.
+pub fn request_keeps_alive(version: HttpVersion, headers: &[HttpHeader]) -> bool {
     if connection_has_token(headers, "close") {
         return false;
     }
     if connection_has_token(headers, "keep-alive") {
         return true;
     }
-    matches!(version, Some(1))
+    matches!(version, HttpVersion::Http11)
 }
 
 /// Cap on a chunked-transfer size line (hex size + optional `;ext`) and on a
@@ -482,7 +504,9 @@ pub fn run_reader_loop(connection: ReaderConnection<'_>) {
         // `RequestStreamRouter` (the ADR-0128 streaming exemption). Shared by
         // both the framing rejects and the body-size cap below so the two
         // checks read off one determinant.
-        let will_buffer = ws_key.is_some() || member.request_stream.is_none();
+        let upgrade = ws_key.is_some();
+        let streams = matches!(member.request_stream, RequestStreamSupport::Supported(_));
+        let will_buffer = upgrade || !streams;
         // Framing rejects, applied on every path — upgrade included
         // (ADR-0128 + ADR-0129): a websocket handshake carries no body
         // (RFC 6455), so a smuggling shape or a lone `chunked` body on an
@@ -530,7 +554,7 @@ pub fn run_reader_loop(connection: ReaderConnection<'_>) {
         // streaming handlers). Then Phase 3: wait for the response
         // deadline. Both paths leave the reader ready to loop with the
         // over-read (pipelined) bytes in `next_buf`, or return to close.
-        let next_buf = if let Some(handler) = member.request_stream
+        let next_buf = if let RequestStreamSupport::Supported(handler) = member.request_stream
             && ws_key.is_none()
         {
             let parsed_head = ParsedHead {
@@ -602,13 +626,11 @@ pub fn run_reader_loop(connection: ReaderConnection<'_>) {
         // write ourselves (ADR-0135 §3), the streamed-response resume,
         // the handler-response timeout (`504`), or the sender being
         // dropped (the dispatcher took the close path — the connection
-        // is torn down).
+        // is torn down). Each arm moves the pipelined carry exactly once
+        // through the break-value outcome.
         let response_deadline = Instant::now() + request_timeout;
-        // Wrapped so the loop can hand the pipelined carry-over to
-        // exactly one consuming arm (the borrow checker cannot see that
-        // every consumer exits the loop).
-        let mut next_buf = Some(next_buf);
-        loop {
+        let carry = next_buf;
+        let outcome = loop {
             let now = Instant::now();
             let Some(remaining) = response_deadline.checked_duration_since(now) else {
                 sink.post(InboundEvent::RequestTimedOut { conn_id });
@@ -627,29 +649,16 @@ pub fn run_reader_loop(connection: ReaderConnection<'_>) {
                         return;
                     }
                     if resume {
-                        buf = next_buf.take().unwrap_or_default();
-                        break;
+                        break ReaderNext::Resume(carry);
                     }
                     sink.post(InboundEvent::ReaderClosed { conn_id, reason: "response written".to_string() });
                     return;
                 }
                 Ok(ReaderControl::Resume) => {
-                    buf = next_buf.take().unwrap_or_default();
-                    break;
+                    break ReaderNext::Resume(carry);
                 }
                 Ok(ReaderControl::Upgrade) => {
-                    // ADR-0129: the handshake was accepted (`101` written) — leave
-                    // the HTTP request lifecycle for the RFC 6455 frame loop,
-                    // carrying any bytes over-read past the handshake head.
-                    run_ws_reader_loop(
-                        &mut stream,
-                        conn_id,
-                        shutdown,
-                        sink,
-                        next_buf.take().unwrap_or_default(),
-                        tuning,
-                    );
-                    return;
+                    break ReaderNext::Upgrade(carry);
                 }
                 // A late credit grant for the just-finished request stream
                 // (the handler's replenishment racing the RequestBodyEnd
@@ -665,6 +674,18 @@ pub fn run_reader_loop(connection: ReaderConnection<'_>) {
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return;
                 }
+            }
+        };
+        match outcome {
+            ReaderNext::Resume(next) => {
+                buf = next;
+            }
+            ReaderNext::Upgrade(next) => {
+                // ADR-0129: the handshake was accepted (`101` written) — leave
+                // the HTTP request lifecycle for the RFC 6455 frame loop,
+                // carrying any bytes over-read past the handshake head.
+                run_ws_reader_loop(&mut stream, conn_id, shutdown, sink, next, tuning);
+                return;
             }
         }
     }

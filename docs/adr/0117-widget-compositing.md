@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Amended (ADR-0118):** mentions of `postcard` below describe the superseded body format. The structured wire body is now `aether_data::wire`; postcard is no longer a dependency of any crate in the workspace. The decision this ADR records otherwise stands.
 - **Amended:** 2026-09-30 — `Collect` goes down through the `InlineChild` each spawn returned, held in the node's state; the draw list goes up through the typed `ctx.parent()`, which every declared parent handles. `ScrollWidget` relays its content's value-up events to its own parent, and the `aether.widget.children_changed` membership event, which nothing read, is removed (#7206).
+- **Amended:** 2026-10-06 — the `aether-widget` crate that implemented the `Collect` and `WidgetDrawList` protocol was removed in #7521; the code last lived at 13b87ff03216ed2776f331415f240d01e9a0f359. §2 (draw order is structural, with no absolute key) stands.
 - **Date:** 2026-06-15
 
 ## Context
@@ -76,6 +77,8 @@ and later restyles reach stock widgets nested inside one or more viewports.
 ### Ordering escape hatch (deferred)
 
 Structural order cannot express a node that must draw outside its tree slot — a tooltip or modal floating above everything regardless of where it lives, or order between top-level roots. That needs an explicit ordering key or edge the compositor evaluates (lift a flagged subtree later in the order, or to a higher root). It is **named here but not built**: the common case is pure structural order, and the escape hatch earns its keep only when a real overlay needs it. It is forward-compatible — the absence of a key is what tree order means, so an opt-in key added later promotes only the nodes that request it and changes nothing else; the compositor collects-then-emits, so the later reorder is a localized change; and the postcard draw kinds can grow an optional field without breaking the wire. Order between independent top-level roots, when it lands, is the substrate's concern, sequenced where top-level surfaces are tracked — structural order governs everything inside a root.
+
+Order between roots, and between an actor and a child that draws for itself, is decided by [ADR-0248](0248-lineage-is-an-ordered-tree.md): lineage is an ordered tree by creation order, and the renderer paints by it, with no key and no edge.
 
 ## Consequences
 

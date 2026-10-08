@@ -16,17 +16,21 @@
 //! delivery is covered by the `substrate_harness` frame-loop scenarios.
 
 use std::fs;
+use std::mem;
 use std::path::Path;
 
-use aether_actor::ActorRef;
+use aether_actor::{ActorPath, ActorRef, HeldReply, actor};
 use aether_component::ComponentHostCapability;
-use aether_data::{ErasedActorPath, Kind};
+use aether_data::{ErasedActorPath, Kind, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, TextInput};
-use aether_test_fixtures_bundle::Probe;
-use aether_test_fixtures_kinds::{KeyObserved, TextInputObserved, UnsubscribeKeys};
-use aether_window::{WindowCapability, window_path};
+use aether_kinds::{DropComponent, DropResult, LoadComponent, MonitorNotice};
+use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
+use aether_substrate::{BootError, MonitorHandle};
+use aether_test_fixtures_bundle::{KeyProbe, Probe};
+use aether_test_fixtures_kinds::{KeyFocusObserved, KeyObserved, TakeKeyFocusAt, TextInputObserved, UnsubscribeKeys};
+use aether_window::{Key, TextInput};
+use aether_window::{WindowCapability, WindowInstance};
 
 /// Arbitrary key code for the synthetic `Key` events these tests inject.
 const KEY_CODE: u32 = 65;
@@ -34,8 +38,13 @@ const KEY_CODE: u32 = 65;
 /// The window the injected events claim to come from. The synthetic runtime
 /// fans an injection out by selector without checking the window is live, so
 /// no window is created for it.
-fn test_window() -> ErasedActorPath {
-    window_path(&aether_data::LoadName::new("main").expect("a valid window name"))
+fn test_window() -> ActorPath<WindowInstance> {
+    WindowInstance::path(&test_window_name())
+}
+
+/// The name of [`test_window`], which a guest writes the typed path from.
+fn test_window_name() -> LoadName {
+    LoadName::new("main").expect("a valid window name")
 }
 
 fn boot_bench() -> SubstrateHarness {
@@ -54,15 +63,10 @@ fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> ActorRef<Prob
 /// Load the instanced root key subscriber `test.key_probe` under `key`: a
 /// singleton is one per engine, so this is how one harness hosts several
 /// independent subscribers.
-fn load_key_probe(harness: &mut SubstrateHarness, wasm_path: &Path, key: &str) {
+fn load_key_probe(harness: &mut SubstrateHarness, wasm_path: &Path, key: &str) -> ActorRef<KeyProbe> {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
-    let load = LoadComponent {
-        wasm,
-        name: Some(key.to_owned()),
-        config: Vec::new(),
-        export: Some("test.key_probe".to_owned()),
-    };
-    harness.load_any(&load).unwrap_or_else(|error| panic!("load_component(test.key_probe:{key}): {error}"));
+    let load = LoadComponent { wasm, name: Some(key.to_owned()), config: Vec::new(), export: None };
+    harness.load::<KeyProbe>(load).unwrap_or_else(|error| panic!("load_component(test.key_probe:{key}): {error}"))
 }
 
 /// Inject `count` synthetic `Key` presses from one window. The synthetic
@@ -251,4 +255,135 @@ fn drop_clears_subscriptions() {
         "key_observed climbed after drop; observed kinds: {:?}",
         harness.observed_kinds(),
     );
+}
+
+/// Monitor the component at `target`.
+#[aether_data::kind(name = "test.window.key_focus.watch", no_serde)]
+struct Watch {
+    target: ErasedActorPath,
+}
+
+/// Answered once the watched component's `MonitorNotice` has arrived.
+#[aether_data::kind(name = "test.window.key_focus.await_departure", copy, no_serde)]
+struct AwaitDeparture;
+
+#[aether_data::kind(name = "test.window.key_focus.departed", copy, partial_eq, no_serde)]
+struct Departed {
+    notified: bool,
+}
+
+impl HeldReply for Departed {
+    fn unanswered() -> Self {
+        Self { notified: false }
+    }
+}
+
+/// Watches one component as the window watches a key focus holder, and holds
+/// an `AwaitDeparture` until the component's notice arrives. A drop's reply
+/// precedes the departure it causes, which is posted to every watcher past
+/// the dropping chain's settlement, so this is the signal a scenario waits on
+/// before it reads what the departure changed.
+struct DepartureWatcher {
+    state: Departure,
+}
+
+/// Where a [`DepartureWatcher`] is in its one watch.
+enum Departure {
+    /// No `Watch` has arrived.
+    Unwatched,
+    /// The component is watched and nobody has asked after it.
+    Watching(MonitorHandle),
+    /// The component is watched and `held` is answered when it departs.
+    Awaited { _monitor: MonitorHandle, held: Held<Departed> },
+    /// The component's notice arrived.
+    Departed,
+}
+
+#[actor(singleton, root)]
+impl NativeActor for DepartureWatcher {
+    const NAMESPACE: &'static str = "test.window.key_focus.watcher";
+    type Config = ();
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { state: Departure::Unwatched })
+    }
+
+    #[handler::tell]
+    fn on_watch(&mut self, ctx: &mut NativeCtx<'_>, Watch { target }: Watch) {
+        let proven = ctx.resolve_path(&target).expect("the watched component is live");
+        self.state = Departure::Watching(ctx.monitor(proven));
+    }
+
+    #[handler::request]
+    fn on_await_departure(&mut self, ctx: &mut NativeCtx<'_>, _await: AwaitDeparture) -> Pending<Departed> {
+        let (pending, held) = ctx.hold::<Departed>();
+
+        self.state = match mem::replace(&mut self.state, Departure::Departed) {
+            Departure::Watching(monitor) => Departure::Awaited { _monitor: monitor, held },
+            Departure::Departed => {
+                held.answer(ctx, &Departed { notified: true });
+                Departure::Departed
+            }
+            Departure::Unwatched => panic!("AwaitDeparture arrived before any Watch"),
+            Departure::Awaited { .. } => panic!("a second AwaitDeparture arrived while one is held"),
+        };
+        pending
+    }
+
+    #[handler::event]
+    fn on_monitor_notice(&mut self, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
+        if let Departure::Awaited { held, .. } = mem::replace(&mut self.state, Departure::Departed) {
+            held.answer(ctx, &Departed { notified: true });
+        }
+    }
+}
+
+/// A guest takes key focus by the same plain mail a native actor sends: the
+/// taker alone is sent the window's keys, it is told it gained key focus, and
+/// its drop empties the slot. The plausible bugs: the take is not sendable
+/// from a marker-only guest, a guest's handlers do not satisfy the take's
+/// sender requirement so the engine refuses it, a notice does not reach a
+/// guest, or a dropped component's slot is kept and silences the survivors.
+#[test]
+fn a_guest_takes_key_focus_and_its_drop_empties_the_slot() {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
+        return;
+    };
+    let mut harness =
+        SubstrateHarness::builder().with_component_host().with_actor::<DepartureWatcher>(()).build().expect("boot");
+    let watcher = harness.actor_ref::<DepartureWatcher>();
+    let taker = load_key_probe(&mut harness, &wasm_path, "a");
+    load_key_probe(&mut harness, &wasm_path, "b");
+    load_key_probe(&mut harness, &wasm_path, "c");
+    let taker_path = harness.actor_path(&taker);
+
+    harness
+        .execute(vec![
+            ("watch", HarnessOp::send_and_settle(&watcher, &Watch { target: taker_path.clone() })),
+            ("take", HarnessOp::send_and_settle(&taker, &TakeKeyFocusAt { window: test_window_name() })),
+        ])
+        .expect("take sequence");
+    assert_eq!(
+        harness.count_observed(KeyFocusObserved::NAME),
+        1,
+        "the taker reports one gained notice; observed kinds: {:?}",
+        harness.observed_kinds(),
+    );
+
+    let held = harness.count_observed(KeyObserved::NAME);
+    send_keys(&mut harness, 1);
+    assert_eq!(harness.count_observed(KeyObserved::NAME) - held, 1, "the holder alone is sent the key");
+
+    drop_component(&mut harness, taker_path);
+    let departed = harness
+        .execute(vec![("departed", HarnessOp::send_and_await_reply(&watcher, &AwaitDeparture))])
+        .expect("await the departure");
+    assert_eq!(departed.reply::<Departed>("departed").expect("decode Departed"), Departed { notified: true });
+    let emptied = harness.count_observed(KeyObserved::NAME);
+    // A second code: the first is still down, and a key that is down keeps
+    // routing by the record its press made, which names the dropped holder.
+    let next = Key { window: test_window(), code: KEY_CODE + 1 };
+    let window = harness.actor_ref::<WindowCapability>();
+    harness.execute(vec![("next", HarnessOp::window_event(&window, test_window(), &next))]).expect("key send");
+    assert_eq!(harness.count_observed(KeyObserved::NAME) - emptied, 2, "both survivors are sent the next key");
 }

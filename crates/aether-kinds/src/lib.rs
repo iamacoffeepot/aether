@@ -1,8 +1,9 @@
 //! The substrate's own mail vocabulary: the kinds an actor sends to the
-//! substrate, receives from it (input events, lifecycle stages), or exchanges
+//! substrate, receives from it (lifecycle stages), or exchanges
 //! with a peer through it. Kinds owned by one capability live with that
 //! capability's crate instead; `aether.draw_triangle`, for instance, belongs
-//! to `aether-render`.
+//! to `aether-render`, and the input family (`aether.key`, `aether.mouse_move`)
+//! to `aether-window`.
 //!
 //! A kind id is `fnv1a_64(KIND_DOMAIN ++ canonical(name, schema))`, a
 //! compile-time constant on the `Kind` trait (ADR-0030). Substrate boot and
@@ -17,11 +18,8 @@ extern crate alloc;
 
 pub mod descriptors;
 pub mod diagnostics;
-pub mod input;
-pub mod keycode;
 pub mod lifecycle;
 pub mod math;
-pub mod mouse_button;
 pub mod text_metrics;
 pub mod trace;
 pub mod utility;
@@ -33,13 +31,10 @@ pub mod transforms;
 
 pub use text_metrics::{CachedFontMetrics, scale_units};
 
-pub use diagnostics::{DecodeRefused, MonitorNotice};
-pub use input::{
-    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
-    WindowSize,
-};
+pub use diagnostics::{DecodeRefused, MonitorNotice, NoContext};
 pub use lifecycle::{
-    InitCaps, InitComponents, LifecycleAdvance, LifecycleAdvanceComplete, Present, Quit, Render, Shutdown, Tick,
+    InitCaps, InitComponents, LifecycleAdvance, LifecycleAdvanceComplete, Present, Quit, Render, Shutdown, StepLength,
+    Steps, Tick,
 };
 pub use math::Mat4Apply;
 pub use utility::{Ping, Pong};
@@ -51,11 +46,9 @@ pub use utility::{Ping, Pong};
 // verification kinds stay below: `aether-mcp` and the substrate core
 // consume them, so moving them would close a dependency cycle.
 
-// `aether.kit.camera.*` control kinds (CameraCreate / CameraDestroy /
-// CameraSetActive / CameraSetMode / CameraOrbitSet / CameraTopdownSet)
-// live in `mod control_plane` below — they're structured because
-// every one carries a `String` name and `Option<...>` per-field
-// deltas, so they can't ride the cast-shaped path.
+// The `aether.kit.camera.*` kinds (`Pose`, `Frame`, `Glide`, `Where`,
+// `CameraRay` and the camera's config) live in `aether-kit::camera`, beside
+// the actor that handles them.
 // Reserved control-plane vocabulary (ADR-0010). The substrate handles
 // these kinds inline rather than dispatching to a component — the
 // namespace itself is the routing discriminator. ADR-0019 PR 5 turned
@@ -668,13 +661,13 @@ mod control_plane {
         /// retention static for the config kind on load, exactly as for
         /// handler kinds.
         pub config: Option<ConfigCapability>,
-        /// ADR-0163 §3: the component's asset catalog — one [`AssetInfo`]
-        /// per `aether.asset.<path>` custom section, indexed at load
+        /// ADR-0250: the component's asset catalog — one [`AssetInfo`]
+        /// per `aether.asset.<path>` custom section, indexed at publish
         /// without instantiating the bytes. Empty for a component that
         /// carries no assets. Surfaces through `describe_component` so
         /// tooling reads what a bundle carries without executing it;
-        /// payload bytes are reachable only through the load-window
-        /// `AssetWindow` ctx surface (`init` + `wire`), never this list.
+        /// payload bytes are reachable only through the `Assets` ctx trait,
+        /// never this list.
         #[serde(default)]
         pub assets: Vec<AssetInfo>,
     }
@@ -712,20 +705,18 @@ mod control_plane {
     }
 
     /// One asset a component carries in an `aether.asset.<path>` wasm
-    /// custom section (ADR-0163 §2/§3). The load-time indexer records
-    /// each asset's catalog entry — the path it was declared under
-    /// and its byte length — by walking the custom
-    /// sections host-side, without instantiating the component. The
-    /// catalog rides [`ComponentCapabilities::assets`] so
-    /// `describe_component` answers "what does this bundle carry" without
-    /// executing it; payload access is the separate load-window surface
-    /// (the `AssetWindow` ctx trait in `aether-actor`), never through this
+    /// custom section (ADR-0163 §2, ADR-0250). The publish-time indexer
+    /// records each asset's catalog entry — the path it was declared under
+    /// and its byte length — by walking the custom sections host-side,
+    /// without instantiating the component. The catalog rides
+    /// [`ComponentCapabilities::assets`] so `describe_component` answers
+    /// "what does this bundle carry" without executing it; payload access is
+    /// the separate `Assets` ctx trait in `aether-actor`, never through this
     /// metadata.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     pub struct AssetInfo {
         /// The asset path — the section name with the `aether.asset.`
-        /// prefix stripped, the key the load window's `asset(name)`
-        /// resolves against.
+        /// prefix stripped, the key the `Assets` verbs resolve against.
         pub name: String,
         /// The asset's byte length.
         pub len: u64,
@@ -812,21 +803,19 @@ mod control_plane {
     }
 
     /// `aether.component.spawn` — ask for an instance of a published type to
-    /// exist (ADR-0241 §9), addressed to the component host. `namespace` is
-    /// the published name a [`PublishResult`] reported. The name the instance
-    /// takes (`NS`, `NS:key`, or `parent/NS:key`, §5) decides the answer: a
-    /// live name answers with that instance, which is not re-initialised; an
-    /// absent name stands the instance up with `config`; a tombstoned name is
-    /// refused, because it is spent (§8). A singleton names no key; an
-    /// instanced type takes `key`, or a counter when it is `None`. A spawn of
-    /// a namespace whose module is republishing waits until the republish
-    /// answers (§7). A namespace native code implements is refused, since
-    /// native types are composed by their chassis or parent and are not
-    /// spawned by mail yet. A spawn that brings its module's bytes in `code`
-    /// opens the new instance's load window over them, so the instance reads
-    /// its assets in `init` and `wire` (ADR-0163 §4); one that brings other
-    /// bytes is refused; one that brings none opens a window that serves no
-    /// payload. Reply: [`SpawnResult`].
+    /// exist (ADR-0241 §9, ADR-0250), addressed to the component host.
+    /// `namespace` is the published name a [`PublishResult`] reported. The
+    /// name the instance takes (`NS`, `NS:key`, or `parent/NS:key`, §5)
+    /// decides the answer: a live name answers with that instance, which is
+    /// not re-initialised; an absent name stands the instance up with
+    /// `config`; a tombstoned name is refused, because it is spent (§8). A
+    /// singleton names no key; an instanced type takes `key`, or a counter
+    /// when it is `None`. A spawn of a namespace whose module is republishing
+    /// waits until the republish answers (§7). A namespace native code
+    /// implements is refused, since native types are composed by their
+    /// chassis or parent and are not spawned by mail yet. A spawn of a
+    /// published type always builds an instance that can read its assets, in
+    /// every hook, from its own module. Reply: [`SpawnResult`].
     #[aether_data::kind(name = "aether.component.spawn")]
     pub struct Spawn {
         pub namespace: String,
@@ -837,10 +826,6 @@ mod control_plane {
         /// The init config a new instance is built with (ADR-0090).
         #[serde(with = "aether_data::bytes")]
         pub config: Vec<u8>,
-        /// The bytes of the module that publishes `namespace`, for the new
-        /// instance's load window; `None` opens a window that serves no
-        /// payload.
-        pub code: Option<aether_data::Blob>,
     }
 
     /// Reply to [`Spawn`]. `Spawned` and `Live` are sent by the instance
@@ -853,6 +838,27 @@ mod control_plane {
     pub enum SpawnResult {
         Spawned { path: aether_data::ErasedActorPath, capabilities: ComponentCapabilities },
         Live { path: aether_data::ErasedActorPath, capabilities: ComponentCapabilities },
+        Err { error: String },
+    }
+
+    /// `aether.component.unpublish` — withdraw the publication of one
+    /// namespace (ADR-0250 §5), addressed to the component host. The
+    /// namespace must be one a module publishes, must name no native type,
+    /// and must have no live instance: a publish or load of it in flight, or
+    /// a live instance of it, refuses the unpublish. A withdrawal refused
+    /// while instances are live names them. Reply: [`UnpublishResult`].
+    #[aether_data::kind(name = "aether.component.unpublish")]
+    pub struct Unpublish {
+        pub namespace: String,
+    }
+
+    /// Reply to [`Unpublish`]. `Ok` once the namespace no longer points at
+    /// its module; `Err` if the namespace named no published module, named
+    /// a native type, had a publish or load in flight, or still had a live
+    /// instance.
+    #[aether_data::kind(name = "aether.component.unpublish_result")]
+    pub enum UnpublishResult {
+        Ok { namespace: String },
         Err { error: String },
     }
 
@@ -1137,10 +1143,9 @@ mod control_plane {
     // `TexturedQuad` / `DrawTexturedQuads`) moved to
     // `aether_render::kinds`
     // (ADR-0121). The `QuadScale` / `QuadSpace` projection types stay
-    // central: the `aether.text.draw` kind below consumes `QuadSpace`,
-    // and `aether-kinds` has no dependency on `aether-render`, so
-    // moving them would close a cycle — they're sibling-kind-consumed and
-    // therefore pinned here.
+    // central: `aether-kinds` has no dependency on `aether-render`, and
+    // consumers upstream of the renderer name them, so they are pinned
+    // here.
 
     /// Screen/framebuffer-pixel clip rectangle applied after projection.
     ///
@@ -1194,12 +1199,10 @@ mod control_plane {
         World { anchor: [f32; 3], scale: QuadScale },
     }
 
-    // ADR-0105 text surface. The `aether.text` capability composes the
-    // textured-quad surface above into glyphs: load a TTF off the hot
-    // path under a session-scoped `font_id`, then draw a string every
-    // frame in immediate mode. Structured-shaped; `space` reuses
-    // `QuadSpace` so a screen-space HUD string and a world-anchored
-    // label ride the same discriminant.
+    // ADR-0105 text surface. The renderer draws text itself (the
+    // `aether.render.create_font` / `font_metrics` / `draw_text` kinds live
+    // in `aether-render`); the metrics table a guest measures with stays
+    // here, beside the wasm-safe scaling in `text_metrics`.
 
     /// One glyph's horizontal advance, in font units (em-square
     /// subdivisions), keyed by the Unicode scalar value (`char as u32`)
@@ -1219,7 +1222,7 @@ mod control_plane {
     /// subdivisions — so a consumer caches this table once and scales any
     /// measure to a draw size locally with
     /// `value * size_pixels / units_per_em`, the exact linear scaling the
-    /// `aether.text` cap applies as it lays a string out. The
+    /// renderer applies as it lays a string out. The
     /// per-codepoint `advances` fold the cmap in; a codepoint the font
     /// has no glyph for advances by `default_advance` (the `.notdef`
     /// glyph's advance), matching the draw path. Carried in
@@ -1480,15 +1483,11 @@ mod control_plane {
         Err { error: String },
     }
 
-    // ADR-0066: camera control kinds (`aether.kit.camera.{create, destroy,
-    // set_active, set_mode, orbit.set, topdown.set}` + `OrbitParams` /
-    // `TopdownParams` / `ModeInit`) live in the `aether-kit::camera`
-    // trunk module. The `aether.view_projection` view_proj sink contract stays
-    // in `aether-render` — it's a chassis primitive consumed by the desktop chassis's
-    // `aether.render` mailbox (the camera mailbox folded into
-    // render per ADR-0074 §Decision 7).
-    // The migrated kinds are still wire-compatible (kind names +
-    // schemas unchanged); only the source-side home moved.
+    // ADR-0066: the camera kinds (`aether.kit.camera.{pose, frame, glide,
+    // where, ray}` and the camera's config) live in the `aether-kit::camera`
+    // trunk module. The `aether.view_projection` view a camera publishes stays
+    // in `aether-render` — it's the renderer's kind, taken by the
+    // `aether.render` mailbox and by any other subscriber of a view source.
 
     // ADR-0066: `aether.kit.mesh.load` moved to the `aether-mesh-viewer`
     // trunk crate; that crate was later folded into `aether-kit`

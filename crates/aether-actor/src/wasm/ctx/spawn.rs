@@ -5,12 +5,14 @@
 use aether_data::{ActorId, Kind, MailboxId};
 
 use super::{InlineChild, NO_INBOUND_SOURCE, WasmCtx, WasmInitCtx};
+use crate::model::Anyone;
 use crate::model::ctx::Erased;
 use crate::model::ctx::reply_mode::{ReplyMode, Unchecked};
 use crate::model::{Addressable, Instanced, NamespaceError, Subname, validate_namespace_segment};
 use crate::reference::ErasedActorRef;
 use crate::wasm::bridge::mail;
-use crate::wasm::inline::{ChildRecord, Registry};
+use crate::wasm::decode::decode_config;
+use crate::wasm::inline::{Child, ChildRecord, Registry, Reinserted, unwire_child, wire_seated};
 use crate::wasm::{__validate_inline_child_alias, ActorInitError, ErasedWasmActor, Spawns, WasmActor};
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -84,6 +86,11 @@ pub enum SpawnError {
     /// [`WasmCtx::spawn_inline_child`], so the boot failure comes back
     /// through this `Result`.
     InitFailed(ActorInitError),
+    /// An inline child's `wire` returned `Err` (ADR-0247 rule 3). The child
+    /// ran its `unwire`, its slot is gone and its alias is retired, as a
+    /// despawn leaves it, so its name is spent (ADR-0241 §8). The wrapped
+    /// [`ActorInitError`] carries the child's own failure message.
+    WireFailed(ActorInitError),
     /// Issue 2692: [`WasmCtx::spawn_inline_child_by_tag`] was handed an
     /// [`ActorTypeTag`] that matched none of the module's `export!`ed actor
     /// types (a stale spec, a script, a tag for a type dropped from the
@@ -94,7 +101,7 @@ pub enum SpawnError {
     UnknownActorTag(ActorTypeTag),
 }
 
-impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
+impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
     /// ADR-0114: spawn an **inline child** — a co-located child actor that
     /// shares this component's WASM instance, slot, and run-token, while
     /// being addressed and mailed like any actor. `C` is a
@@ -114,6 +121,14 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// [`SpawnError::SubnameInvalid`]; a `C` that declares a dependency with
     /// no `Live` route returns [`SpawnError::DependencyNotLive`] before `init`;
     /// a synchronous `init` `Err` returns [`SpawnError::InitFailed`].
+    ///
+    /// A [`Subname::Named`] at which a `C` already stands beneath this actor
+    /// answers that child (ADR-0249 §5): nothing is initialised again,
+    /// `config` is ignored, and no host call is made. A standing child that
+    /// never wired wires now, before the answer, and its failure comes back
+    /// as [`SpawnError::WireFailed`]. A `wire` that spawns a child is
+    /// therefore safe to run again. A name whose child was despawned is not
+    /// standing: it is spent, and the spawn is refused.
     ///
     /// The alias extends the executing actor's lineage, so the same subname
     /// can exist beneath distinct parents in one component cluster. The same
@@ -200,6 +215,9 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         // tag `init_typed_p32` selects on — and the key the host reads the
         // alias's contract rows by (ADR-0231 §4).
         let type_tag = ActorTypeTag::of::<C>().0;
+        if let Some(standing) = self.standing_child(ActorTypeTag(type_tag), is_counter, &full_subname) {
+            return self.wire_standing(standing).map(InlineChild::new);
+        }
         // A zero alias is the host's refusal, a spent name among them
         // (ADR-0241 §8), and an unmet dependency its own status (ADR-0230):
         // stop before a child is built at an address that never routes.
@@ -208,15 +226,42 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         // Re-decode an owned `C::Config` for the in-guest `init` from the
         // same bytes the detached path would have shipped — symmetric with
         // `spawn_child`'s encode-in-guest / decode-in-host round-trip, and
-        // it sidesteps a `Clone` bound the detached verb also lacks.
+        // it sidesteps a `Clone` bound the detached verb also lacks. The
+        // decode proves a `ProtocolPath` in the config against the engine's
+        // published routes, as the child's own load would (ADR-0231 §3).
         let bytes = config.encode_into_bytes();
-        let Some(owned) = <C::Config as Kind>::decode_from_bytes(&bytes) else {
-            return Err(SpawnError::InitFailed(ActorInitError::new("spawn_inline_child: Config round-trip failed")));
-        };
+        let owned = decode_config::<C::Config>(C::NAMESPACE, &bytes).map_err(SpawnError::InitFailed)?;
         // The executing actor is both the host fold seed and the logical
         // parent recorded for relative addressing and reconstruction.
         let record = ChildRecord { type_tag, full_subname, is_counter, parent: self.mailbox, config_bytes: bytes };
         install_inline_child::<C>(self.inline, alias, record, owned).map(InlineChild::new)
+    }
+
+    /// The child already standing where a spawn from this actor would put
+    /// one: beneath this actor, as `type_tag`, at the resolved `full_subname`
+    /// (ADR-0249 §5). Read from the guest registry, which is the authority on
+    /// the aliases this cluster stands at, so it costs no host call. `None`
+    /// when no such child stands, and always for a counter spawn, which is a
+    /// new name every time.
+    fn standing_child(&self, type_tag: ActorTypeTag, is_counter: bool, full_subname: &str) -> Option<MailboxId> {
+        if is_counter {
+            return None;
+        }
+        self.inline.resident(MailboxId(self.mailbox), type_tag, full_subname)
+    }
+
+    /// Wire the child standing at `standing` when it never wired, and answer
+    /// its alias (ADR-0249 §6). A standing child that already wired answers
+    /// at once; an unwired one, which a republish rebuilt through `init` and
+    /// `on_rehydrate` without `wire`, runs its `wire` now, through a ctx
+    /// addressed to its alias. Still no host call and `config` still ignored.
+    /// A `wire` that refuses runs its `unwire` and comes back as
+    /// [`SpawnError::WireFailed`].
+    fn wire_standing(&self, standing: MailboxId) -> Result<MailboxId, SpawnError> {
+        match wire_seated(self.inline, standing) {
+            Ok(()) => Ok(standing),
+            Err(error) => Err(SpawnError::WireFailed(error)),
+        }
     }
 
     /// The actor type this ctx is executing, per the registry — the logical
@@ -260,7 +305,12 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// children keeps proofs of them, not positions.
     ///
     /// A [`Subname::Named`] that fails validation returns
-    /// [`SpawnError::SubnameInvalid`] before any type lookup. The generated
+    /// [`SpawnError::SubnameInvalid`] before any type lookup. A valid one at
+    /// which a child of this `tag` already stands beneath this actor answers
+    /// that child before the resolver runs, as the typed verb does: nothing
+    /// is initialised again and `config_bytes` are ignored. A standing child
+    /// that never wired wires now, before the answer, and its failure comes
+    /// back as [`SpawnError::WireFailed`]. The generated
     /// resolver rejects an unknown tag, a non-instanced actor, an unavailable
     /// parent identity, or denied placement before allocating a host alias. A
     /// type that declares a dependency with no `Live` route returns
@@ -273,6 +323,9 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         config_bytes: &[u8],
     ) -> Result<ErasedActorRef, SpawnError> {
         let (is_counter, full_subname) = resolve_subname(subname)?;
+        if let Some(standing) = self.standing_child(tag, is_counter, &full_subname) {
+            return self.wire_standing(standing).map(ErasedActorRef::new);
+        }
         // The resolver is installed on the module's registry by every
         // `export!` init shim — it enumerates the exported type set the
         // lookup needs, which is knowable only inside the macro expansion,
@@ -305,8 +358,9 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// for a departing cluster.
     ///
     /// **The child's name is spent** (ADR-0241 §8): a despawned child closes
-    /// and its name tombstones, so a later monitor of it is refused and
-    /// spawning the same key beneath the same parent fails with
+    /// and its name tombstones, so a later monitor of it is answered with its
+    /// notice at once and spawning the same key beneath the same parent fails
+    /// with
     /// [`SpawnError::AliasAllocationFailed`].
     ///
     /// Later mail to a retired alias resolves as *dropped* rather than
@@ -322,21 +376,15 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// below, therefore still sends through a live alias.
     ///
     /// Callable from any depth: a parent on a child, a sibling on a
-    /// sibling, or a child on itself. A self-despawn mid-dispatch drops
-    /// correctly — the child is taken out of its slot while it runs, so
-    /// `remove` clears the empty slot and the matching `reinsert` on the
-    /// inline registry finds nothing and no-ops, dropping the live box at
-    /// end of dispatch.
+    /// sibling, or a child on itself.
     ///
-    /// The teardown mirror of the spawn-time `wire` (issue 2746): a resident
-    /// child runs its `unwire` before it is dropped. A self-despawn
-    /// mid-dispatch has already taken the box onto the stack, so `take`
-    /// finds an empty slot and no `unwire` runs here — the box drops at end
-    /// of dispatch via the `reinsert` no-op, and a child unwiring itself
-    /// synchronously mid-handler would be the wrong semantic anyway.
-    /// Whole-component teardown does not yet cascade `unwire` to resident
-    /// inline children (the entry `unwire` FFI runs only the top-level
-    /// instance); that is separate future work.
+    /// The teardown mirror of the spawn-time `wire` (issue 2746): a child
+    /// that wired runs its `unwire` before it is dropped, once. A seated
+    /// child runs it here. A child despawning itself is out of its slot
+    /// while its handler runs, so nothing is seated to unwire here and only
+    /// the slot is removed; the caller that holds the child runs its `unwire`
+    /// when the handler returns, and then drops it (ADR-0249 §4). A child
+    /// whose `unwire` has already run, at its parent's close, runs none.
     // Despawn is a command; its `bool` ("was a resident child removed")
     // is informational and may be ignored, the same contract as
     // `BTreeMap::remove` / `HashSet::remove` (neither is `#[must_use]`).
@@ -345,28 +393,28 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     #[allow(clippy::must_use_candidate)]
     pub fn despawn_inline_child(&self, child: ErasedActorRef) -> bool {
         let child = child.id();
-        // Take the resident box onto the stack, run its `unwire` through a
-        // ctx addressed to its alias, then drop it; `remove` clears the
-        // now-empty slot. A self-despawn (box already taken by dispatch)
-        // takes `None`, so `unwire` is skipped and the slot removal stays a
-        // clean no-op-then-`false`/`true` per the existing contract.
-        if let Some(mut taken) = self.inline.take(child) {
-            let mut unwire_ctx: WasmCtx<'_, Erased, Unchecked> =
-                WasmCtx::__new(child.0, self.inline, NO_INBOUND_SOURCE);
-            taken.erased_unwire(&mut unwire_ctx);
+        if let Some(seated) = self.inline.take(child) {
+            drop(unwire_child(self.inline, child, seated));
         }
-        let removed = self.inline.remove(child);
-        // Only a slot that was actually ours earns a retirement: the guest
-        // registry is the authority on which aliases this cluster resides at,
-        // so an idempotent re-despawn (or an alias that named no child) leaves
-        // the substrate untouched. wasm32-only — the host build carries no FFI
-        // surface, and its inline registry has no substrate route behind it.
-        #[cfg(target_family = "wasm")]
-        if removed {
-            mail::despawn_inline_child(child.0);
-        }
-        removed
+        remove_and_retire(self.inline, child)
     }
+}
+
+/// Remove the slot at `alias` and, when one stood there, retire the alias's
+/// substrate route. Answers whether a slot stood.
+///
+/// Only a slot that was actually ours earns a retirement: the guest registry
+/// is the authority on which aliases this cluster resides at, so an
+/// idempotent re-despawn (or an alias that named no child) leaves the
+/// substrate untouched. The retirement is wasm32-only: the host build carries
+/// no FFI surface, and its inline registry has no substrate route behind it.
+fn remove_and_retire(registry: &Registry, alias: MailboxId) -> bool {
+    let removed = registry.remove(alias);
+    #[cfg(target_family = "wasm")]
+    if removed {
+        mail::despawn_inline_child(alias.0);
+    }
+    removed
 }
 
 /// Resolve a [`Subname`] into the `(is_counter, discriminator)` pair the
@@ -386,8 +434,8 @@ fn resolve_subname(subname: Subname<'_>) -> Result<(bool, String), SpawnError> {
     }
 }
 
-/// Build an inline child's actor value and register it under its alias in
-/// `registry` (ADR-0114). Split out of [`WasmCtx::spawn_inline_child`] so
+/// Build an inline child's actor value, wire it, and seat it under its alias
+/// in `registry` (ADR-0114). Split out of [`WasmCtx::spawn_inline_child`] so
 /// the in-guest `init` + registry insert is exercisable on the host build
 /// (where the `spawn_inline_child` host fn is a panicking stub): the unit
 /// test calls this with a local registry, a synthetic alias, and an owned
@@ -405,15 +453,29 @@ fn resolve_subname(subname: Subname<'_>) -> Result<(bool, String), SpawnError> {
 /// this exact `init` + insert step with the typed verb rather than
 /// copying it.
 ///
-/// After the insert, the fresh child's `wire` runs (issue 2746): the child
-/// is taken back out of its slot onto the stack, `erased_wire` is driven
-/// through a [`WasmCtx`] addressed to its alias, and it is reinserted — the
-/// same take/reinsert discipline `membrane_dispatch` uses, so a `wire` that
-/// spawns a nested inline child re-enters the registry without aliasing its
-/// interior-mutable map. Only the two fresh-spawn paths funnel here; the
+/// The child's slot is reserved once `init` has returned, and the fresh
+/// child stays on this call's stack while its `wire` runs (issue 2746)
+/// through a [`WasmCtx`] addressed to its alias. Its slot is out for that
+/// time, as a dispatched child's is, so a `wire` that spawns a nested inline
+/// child re-enters the registry without aliasing its interior-mutable map
+/// and finds its spawner's slot. Once `wire` has returned `Ok` the child is
+/// seated wired. Only the two fresh-spawn paths funnel here; the
 /// `replace_component` reconstruct path (`reconstruct_one_child`) has its
-/// own insert and runs `init` + `on_rehydrate`, not `wire`, so a reload
-/// never fires `wire`.
+/// own insert and runs `init` + `on_rehydrate`, not `wire`: a rebuild
+/// itself never wires, and the `wire` export wires rebuilt children after
+/// the entry actor's `wire` (ADR-0249 §6).
+///
+/// A child that despawned itself inside its own `wire` has no slot to be
+/// seated in. Its `wire` returned `Ok`, so it runs its `unwire` and drops,
+/// as a child that despawns itself in a handler does (ADR-0249 §4); the
+/// spawn still answers the alias, which is now spent.
+///
+/// A `wire` that returns `Err` fails the spawn (ADR-0247 rule 3). The hook
+/// was entered, so the child runs its `unwire`; then its slot is removed and
+/// its alias retired, the three things [`WasmCtx::despawn_inline_child`]
+/// does, and the error comes back as [`SpawnError::WireFailed`]. The alias
+/// is retired only when the slot still stood: a child that despawned itself
+/// before its `wire` failed has retired it already.
 pub fn install_inline_child<A>(
     registry: &Registry,
     alias: MailboxId,
@@ -426,23 +488,24 @@ where
     // the erased child. For an un-split component `State = Self`.
     <A as WasmActor>::State: ErasedWasmActor,
 {
-    let mut ctx = WasmInitCtx::__new();
+    let mut ctx = WasmInitCtx::__new(registry);
     // ADR-0156 §2: inline children resolve `Params` to the compiled default
     // (empty params for now), mirroring the `()`-config round-trip.
     let params = <A::Params as Default>::default();
-    let child = A::init(config, params, &mut ctx).map_err(SpawnError::InitFailed)?;
-    registry.insert_child(alias, record, Box::new(child));
-    // Run the fresh child's `wire` (issue 2746). Take it back onto the stack
-    // so its slot is empty for the duration — a `wire` that spawns a nested
-    // inline child then re-enters the registry (a different slot) with no
-    // aliasing, and a `wire` that re-addresses its own alias finds the empty
-    // slot, exactly as `membrane_dispatch` handles a resident child. `take`
-    // yields `Some` here (the box was just inserted); the `if let` is a
-    // defensive no-op rather than an `expect`.
-    if let Some(mut fresh) = registry.take(alias) {
-        let mut wire_ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(alias.0, registry, NO_INBOUND_SOURCE);
-        fresh.erased_wire(&mut wire_ctx);
-        registry.reinsert(alias, fresh);
+    let mut fresh: Box<dyn ErasedWasmActor> =
+        Box::new(A::init(config, params, &mut ctx).map_err(SpawnError::InitFailed)?);
+    registry.reserve(alias, record);
+
+    let mut wire_ctx: WasmCtx<'_, Erased, Anyone, Unchecked> = WasmCtx::__new(alias.0, registry, NO_INBOUND_SOURCE);
+    if let Err(error) = fresh.erased_wire(&mut wire_ctx) {
+        fresh.erased_unwire(&mut wire_ctx);
+        drop(fresh);
+        remove_and_retire(registry, alias);
+        return Err(SpawnError::WireFailed(error));
+    }
+
+    if let Reinserted::Departed(departed) = registry.reinsert(alias, Child::Wired(fresh)) {
+        drop(unwire_child(registry, alias, departed));
     }
     Ok(alias)
 }

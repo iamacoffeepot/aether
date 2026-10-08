@@ -94,7 +94,7 @@ impl Host {
 
     /// Deliver the turn's inbound to the old guest, as the trampoline's
     /// fallback does.
-    fn deliver<A, M: ReplyMode>(&mut self, ctx: &NativeCtx<'_, A, M>) {
+    fn deliver<A, S, M: ReplyMode>(&mut self, ctx: &NativeCtx<'_, A, S, M>) {
         self.old.deliver(ctx.inbound().expect("a handler turn has its inbound")).expect("the old guest receives");
     }
 }
@@ -110,7 +110,7 @@ impl NativeActor for Host {
             &guests.engine,
             &guests.linker,
             guests.old.compiled(),
-            ctx.guest_ctx(Arc::clone(&guests.outbound)),
+            ctx.guest_ctx(Arc::clone(&guests.outbound), guests.old.clone()),
             &[],
             None,
         )
@@ -140,11 +140,11 @@ impl NativeActor for Host {
             return;
         }
 
-        let mut guest_ctx = ctx.guest_ctx(Arc::clone(&self.guests.outbound));
+        let mut guest_ctx = ctx.guest_ctx(Arc::clone(&self.guests.outbound), self.guests.candidate.clone());
         guest_ctx.hold_outbox();
         let mut candidate = self.instantiate(&self.guests.candidate, guest_ctx);
 
-        self.old.on_dehydrate();
+        self.old.on_dehydrate().expect("the old guest dehydrates");
         let bundle = self.old.take_saved_state().expect("the old guest saves its held handle");
         candidate.resume_correlations(self.old.correlation_cursor());
         candidate.resume_replies(self.old.take_pending_replies());

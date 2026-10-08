@@ -36,7 +36,7 @@ use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, CourierConfig, CourierQuery, CourierQueryResult, GateLabelledConfig, GateProbe,
     GateQuery, GateQueryResult, GuestLoad, HeldRequest, HeldRequestResult, PeerConfig, ReleaseCarried, TickObserved,
-    WireCountQuery, WireObserved,
+    UnwireObserved, WireCountQuery, WireObserved,
 };
 use aether_test_fixtures_republish::{Keeper, ProbeGate};
 
@@ -55,7 +55,7 @@ trait CourierRow {
     fn query(mail: CourierQuery) -> CourierQueryResult;
 }
 
-/// The group gate's row `an_abort_after_ready_reinstates_and_rewires_the_ready_member`
+/// The group gate's row `an_abort_after_ready_reinstates_the_ready_member_untouched`
 /// sends: `WireCountQuery -> CountReport`. This scenario's gate never leaves
 /// v1 (its republish aborts), and v1 ships only as a cdylib example.
 #[aether_actor::protocol]
@@ -272,7 +272,7 @@ fn mail_gated_during_prepare_reaches_the_winning_guest_in_order() {
 }
 
 #[test]
-fn an_abort_after_ready_reinstates_and_rewires_the_ready_member() {
+fn an_abort_after_ready_reinstates_the_ready_member_untouched() {
     // Catches: a member whose own prepare succeeded left prepared or unwired
     // when another member refuses, or the refusing member's candidate mail
     // leaving before the group aborted.
@@ -290,9 +290,48 @@ fn an_abort_after_ready_reinstates_and_rewires_the_ready_member() {
     assert!(expect_err(&replaced).contains("on_rehydrate failed"), "the peer's refusal is reported: {replaced:?}");
     assert!(!harness.accepts(gate, GateProbe::ID), "the ready gate is back on its old guest");
     let gate_wired: CountReport = call(&mut harness, &gate_wired_ref, &WireCountQuery);
-    assert_eq!(gate_wired.count, 2, "the ready gate's old guest is wired again after its abort");
-    assert_eq!(harness.count_observed(WireObserved::NAME), peer_wired + 1, "the refusing peer is wired again too");
+    assert_eq!(gate_wired.count, 1, "the ready gate's old guest is untouched after its abort");
+    assert_eq!(harness.count_observed(WireObserved::NAME), peer_wired, "the refusing peer runs no wire");
     assert_eq!(harness.count_observed(TickObserved::NAME), 0, "the failed candidate's mail never leaves");
+}
+
+#[test]
+fn a_commit_unwires_the_old_guest_before_flushing_the_successors_wire_mail() {
+    // Catches: `unwire` at prepare, and the successor's held `wire` mail
+    // leaking before commit. While prepared the old guest is still wired and
+    // the successor's `wire` mail is held; at commit the old guest's release
+    // reaches every recipient before the successor's held mail.
+    let Some(fixtures) = group() else {
+        return;
+    };
+    let mut harness = pumped();
+    let _ = load_gate(&mut harness, &fixtures.v1, "a");
+    let _ = load_peer(&mut harness, &fixtures.v1, false);
+    let birth_wires = harness.count_observed(WireObserved::NAME);
+
+    let host = harness.actor_ref::<ComponentHostCapability>();
+    let replacing = harness.send_deferred(host, &publish(&fixtures.v2));
+    harness.step_component_host_through::<Prepared>(2).expect("both members answer prepare");
+
+    assert_eq!(harness.count_observed(UnwireObserved::NAME), 0, "the old guest is not yet unwired while prepared");
+    assert_eq!(
+        harness.count_observed(WireObserved::NAME),
+        birth_wires,
+        "the successor's wire mail stays held while prepared"
+    );
+    let replaced = harness.await_deferred::<PublishResult>(replacing).expect("replace reply");
+
+    expect_ok(&replaced);
+    assert_eq!(harness.count_observed(UnwireObserved::NAME), 1, "the commit unwired the old guest");
+    assert_eq!(
+        harness.count_observed(WireObserved::NAME),
+        birth_wires + 1,
+        "the commit flushed the successor's wire mail"
+    );
+    let kinds = harness.observed_kinds();
+    let unwire = kinds.iter().rposition(|kind| kind == UnwireObserved::NAME).expect("an unwire was observed");
+    let wire = kinds.iter().rposition(|kind| kind == WireObserved::NAME).expect("a wire was observed");
+    assert_eq!(unwire + 1, wire, "the old unwire immediately precedes the new wire");
 }
 
 #[test]

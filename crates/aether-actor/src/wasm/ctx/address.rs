@@ -2,7 +2,8 @@
 //! the guest twin of the native `NativeCtx::resolve_path` (ADR-0230 §3), over
 //! an untyped [`ErasedActorPath`], and its refusal, [`ResolvePathError`]; and
 //! [`WasmCtx::resolve`], the guest's typed-path door (ADR-0230 §3, #7205),
-//! over an [`ActorPath<R>`], and its refusal, [`ResolveError`].
+//! over an `ActorPath<R>` or a `ProtocolPath<P>`, and its refusal,
+//! [`ResolveError`].
 
 use core::error::Error;
 use core::fmt;
@@ -12,9 +13,10 @@ use alloc::string::String;
 
 use super::WasmCtx;
 use crate::model::ctx::reply_mode::ReplyMode;
-use crate::reference::{ActorRef, ErasedActorRef};
+use crate::path::ConfirmedLive;
+use crate::reference::ErasedActorRef;
 use crate::wasm::bridge::address::{self, __ResolvedPath};
-use crate::{ActorPath, Addressable, ResolveError};
+use crate::{ResolveError, TypedPath};
 
 /// Why [`WasmCtx::resolve_path`] could not prove an [`ErasedActorPath`] (ADR-0230
 /// §3). Neither refusal names a position.
@@ -46,7 +48,7 @@ impl fmt::Display for ResolvePathError {
 
 impl Error for ResolvePathError {}
 
-impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
+impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
     /// Prove an [`ErasedActorPath`] that arrived in this component's config or in a
     /// payload, and hand back the proven reference (ADR-0230 §3). The guest
     /// twin of the native `NativeCtx::resolve_path`: the host expands and
@@ -65,8 +67,8 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// compile-time claim on what stands there — text that arrived over the
     /// wire, or a short path that only expands against the live registry. A
     /// holder that already knows the actor type resolves an
-    /// [`ActorPath<R>`] instead, through [`Self::resolve`], and gets a
-    /// kind-checked [`ActorRef<R>`]. After #6932, this verb serves identity
+    /// [`ActorPath<R>`](crate::ActorPath) instead, through [`Self::resolve`],
+    /// and gets a kind-checked [`ActorRef<R>`](crate::ActorRef). After #6932, this verb serves identity
     /// (naming what a path resolves to) and the guard cast
     /// ([`Self::cast`](super::WasmCtx::cast), over a reference this proves),
     /// not a checked send.
@@ -84,34 +86,48 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         }
     }
 
-    /// Prove an [`ActorPath<R>`] that arrived in this component's config or
-    /// in a payload, and hand back a proven, kind-checked [`ActorRef<R>`]
-    /// (ADR-0230 §3, #7205). The guest's typed-path door, beside
-    /// [`Self::resolve_path`]'s untyped one: both fold the path as written —
-    /// a typed path is canonical by construction, so no short-path expansion
-    /// runs — and find the `Live` route standing under exactly that
-    /// canonical name through `Registry::live_route`, the same read the
-    /// native `NativeCtx::resolve` (over a `ProtocolPath<P>`) takes, so the
-    /// two answers cannot drift apart. No actor-type tag is compared: the
-    /// path's leaf namespace is `R::NAMESPACE` by construction (ADR-0230
-    /// §2), so a route standing under it is an `R`.
+    /// Prove a typed path that arrived in this component's config or in a
+    /// payload, and hand back the proven, kind-checked reference its type
+    /// names (ADR-0230 §3, #7205, #7501): an [`ActorRef<R>`](crate::ActorRef)
+    /// for an [`ActorPath<R>`](crate::ActorPath), a
+    /// [`ProtocolRef<P>`](crate::ProtocolRef) for a
+    /// [`ProtocolPath<P>`](crate::ProtocolPath). The guest's typed-path door,
+    /// beside [`Self::resolve_path`]'s untyped one: it folds the path as
+    /// written — a typed path is canonical by construction, so no short-path
+    /// expansion runs — and finds the `Live` route standing under exactly
+    /// that canonical name through `Registry::live_route`, the read the
+    /// native `NativeCtx::resolve` takes, so the two answers cannot drift
+    /// apart.
+    ///
+    /// It proves liveness and nothing else. The path's type was proven where
+    /// the path was made: an `ActorPath<R>`'s leaf namespace is
+    /// `R::NAMESPACE` by construction (ADR-0230 §2), so a route standing
+    /// under it is an `R` and no actor-type tag is compared; a
+    /// `ProtocolPath<P>` proved at its decode that the route published every
+    /// row of `P`, so no rows are read or compared here. A name is never
+    /// reused and a route's rows only grow within one engine (ADR-0231 §5),
+    /// so the route found now is the one the decode read.
     ///
     /// It costs one host call reading the published route view. Run it
     /// once, at `wire` (a [`WireCtx`](super::WireCtx) derefs here) or at
-    /// receipt, and keep the reference; never re-derive it at a send.
+    /// receipt, keep the reference, and send through it with
+    /// [`Self::send_to`](super::WasmCtx::send_to); never re-derive it at a
+    /// send.
     ///
-    /// Its consumer is the environment bootstrap script
+    /// Its consumers are the environment bootstrap script
     /// (`aether-bloomery-bootstrap`), whose `wire` proves the journal owner
-    /// and the bundle driver from its config.
+    /// and the bundle driver from its config, and a guest whose config names
+    /// a peer by protocol, such as a scene naming whatever publishes a view.
     ///
     /// # Errors
     ///
     /// [`ResolveError::NotLive`] naming the path when no `Live` route stands
-    /// under its canonical name. It never names a position.
-    pub fn resolve<R: Addressable>(&self, path: &ActorPath<R>) -> Result<ActorRef<R>, ResolveError> {
-        address::live_route(path.as_erased())
+    /// under its canonical name: the actor closed, or is still starting. It
+    /// never names a position.
+    pub fn resolve<T: TypedPath>(&self, path: &T) -> Result<T::Proof, ResolveError> {
+        address::live_route(path.__erased())
             .position
-            .map(|position| ActorRef::new(MailboxId(position)))
-            .ok_or_else(|| ResolveError::NotLive { path: path.as_erased().clone() })
+            .map(|position| T::__mint(MailboxId(position), ConfirmedLive(())))
+            .ok_or_else(|| ResolveError::NotLive { path: path.__erased().clone() })
     }
 }

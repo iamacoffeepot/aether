@@ -24,7 +24,27 @@
 //! the host answers the position of the `Live` route standing under exactly
 //! that canonical name, or none, as one [`__LiveRoute`], delivered the same
 //! way. This is the transport under `WasmCtx::resolve`, which mints the
-//! `ActorRef<R>` itself from a `Some` answer.
+//! proof itself from a `Some` answer.
+//!
+//! A fourth sibling is the guest half of the `route_rows_p32` host fn
+//! (ADR-0231 §3, #7501): the guest hands the host a typed path's text, and
+//! the host answers the rows of the `Live` or `Dropped` route standing under
+//! exactly that canonical name, or none, as one [`__PublishedRows`],
+//! delivered the same way. This is the transport under a guest's decode of a
+//! `ProtocolPath<P>`, which checks the protocol's rows against the answer.
+//!
+//! A fifth sibling is the guest half of the `actor_path_p32` host fn
+//! (ADR-0231 §11), the guest half of the native `NativeCtx::actor_path` read:
+//! the guest hands the host the position of a reference it holds, and the
+//! host answers the canonical path of the route record there, or none for a
+//! position holding no record, as one [`__ActorPath`], delivered the same
+//! way. The host mints nothing. It closes the one direction the siblings
+//! leave open: `resolve_path_p32`, `live_route_p32`, and `route_rows_p32`
+//! take a path in, `published_rows_p32` takes a position in and answers
+//! rows, and this takes a position in and answers the path. Its one caller
+//! is a dispatch arm's refusal of a sender its handler's requirement does
+//! not admit, which names the sender in its log line and in the request's
+//! reply; no ctx verb exposes it.
 
 use aether_data::{ErasedActorPath, KindId, ReplyContract, wire};
 use alloc::string::String;
@@ -87,13 +107,19 @@ pub fn resolve_path(path: &ErasedActorPath) -> __ResolvedPath {
 /// defined once here beside [`__ResolvedPath`] so the two sides cannot
 /// disagree on its shape.
 ///
+/// The answer to a `route_rows_p32` call too, which reads a different set of
+/// routes.
+///
 /// Not part of the public API: a guest reaches it only as the `Option` of
-/// `WasmCtx::cast`, and the substrate names it only to encode the answer.
+/// `WasmCtx::cast` or inside a `ProtocolPath` decode, and the substrate
+/// names it only to encode the answer.
 #[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct __PublishedRows {
-    /// The rows the route published, or `None` when it is not `Live`:
-    /// `Starting`, `Dropped`, or never registered.
+    /// The rows the route published, or `None` when the read that produced
+    /// the answer finds no route. `published_rows_p32` finds a `Live` route
+    /// only; `route_rows_p32` finds a `Live` or `Dropped` one under exactly
+    /// the path's canonical name.
     pub rows: Option<Vec<(KindId, ReplyContract)>>,
 }
 
@@ -114,6 +140,50 @@ pub fn published_rows(position: u64) -> __PublishedRows {
     let bytes = unsafe { take_delivered(ptr, len) };
     wire::from_bytes(&bytes).unwrap_or_else(|error| {
         panic!("aether-actor: published_rows: the host's answer does not decode as __PublishedRows: {error}")
+    })
+}
+
+/// The host's answer to one `actor_path_p32` call, wire-encoded into the
+/// buffer it delivers. The ABI between the substrate's host fn and this SDK,
+/// defined once here beside [`__ResolvedPath`] so the two sides cannot
+/// disagree on its shape.
+///
+/// Not part of the public API: a guest reaches it only inside a dispatch
+/// arm's refusal of its sender (ADR-0231 §11), and the substrate names it
+/// only to encode the answer.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct __ActorPath {
+    /// The canonical path of the route record at the position, or `None`
+    /// when no record stands there.
+    pub path: Option<String>,
+}
+
+/// Ask the host for the canonical path of the route record at `position`,
+/// the position of a reference the guest holds, and decode its answer: the
+/// guest twin of the native `NativeCtx::actor_path`, both reading the route
+/// record's proven name. `None` when no record stands there.
+///
+/// # Panics
+///
+/// Panics when the delivered bytes do not decode as a [`__ActorPath`], or
+/// the path in them is outside the ADR-0166 grammar: the host and this SDK
+/// disagree on the ABI, which no guest can recover from (ADR-0063).
+pub fn actor_path(position: u64) -> Option<ErasedActorPath> {
+    // SAFETY: FFI import; the host always hands back a live `(ptr, len)`, or
+    // traps.
+    let packed = unsafe { raw::actor_path(position) };
+    let (ptr, len) = unpack(packed);
+    // SAFETY: the return is always a live host-delivered buffer.
+    let bytes = unsafe { take_delivered(ptr, len) };
+    let answer: __ActorPath = wire::from_bytes(&bytes).unwrap_or_else(|error| {
+        panic!("aether-actor: actor_path: the host's answer does not decode as __ActorPath: {error}")
+    });
+
+    answer.path.map(|text| {
+        ErasedActorPath::new(&text).unwrap_or_else(|error| {
+            panic!("aether-actor: actor_path: the host answered `{text}`, which is not an actor path: {error}")
+        })
     })
 }
 
@@ -156,5 +226,31 @@ pub fn live_route(path: &ErasedActorPath) -> __LiveRoute {
     let bytes = unsafe { take_delivered(ptr, len) };
     wire::from_bytes(&bytes).unwrap_or_else(|error| {
         panic!("aether-actor: live_route: the host's answer does not decode as __LiveRoute: {error}")
+    })
+}
+
+/// Ask the host for the rows of the `Live` or `Dropped` route standing under
+/// exactly `path`'s canonical name, and decode its answer.
+///
+/// This is the transport under a guest's decode of a `ProtocolPath<P>`
+/// (ADR-0231 §3): the guest twin of `impl PublishedRoutes for Registry`,
+/// both reading `Registry::route_rows`. wasm32-only: its one caller is.
+///
+/// # Panics
+///
+/// Panics when the delivered bytes do not decode as a [`__PublishedRows`]: the
+/// host and this SDK disagree on the ABI, which no guest can recover from
+/// (ADR-0063).
+#[cfg(target_arch = "wasm32")]
+pub fn route_rows(path: &ErasedActorPath) -> __PublishedRows {
+    let text = path.as_str();
+    // SAFETY: FFI import; the host copies the path out before returning and
+    // always hands back a live `(ptr, len)`, or traps.
+    let packed = unsafe { raw::route_rows(abi32(text.as_ptr().addr()), abi32(text.len())) };
+    let (ptr, len) = unpack(packed);
+    // SAFETY: the return is always a live host-delivered buffer.
+    let bytes = unsafe { take_delivered(ptr, len) };
+    wire::from_bytes(&bytes).unwrap_or_else(|error| {
+        panic!("aether-actor: route_rows: the host's answer does not decode as __PublishedRows: {error}")
     })
 }

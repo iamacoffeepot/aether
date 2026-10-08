@@ -152,9 +152,12 @@ pub enum TraceEvent {
 
 /// ADR-0086 Phase 3b: reply shape the guided walk (`trace_walk`)
 /// produces after stitching the per-actor ring slices for one root.
-/// `Ok` carries the root's current `in_flight` count and one
+/// `Ok` carries the root's current `in_flight` count, one
 /// [`MailNodeWire`] per mail in the tree (no ordering guarantee —
-/// consumers reconstruct via `parent` edges). `Err::not_found` is
+/// consumers reconstruct via `parent` edges), and `truncated`: each ring
+/// where the tree shows a hole because the ring dropped entries the tree
+/// needed (ADR-0086 §2). An empty `truncated` means the walk found no
+/// hole, not that no ring has dropped entries. `Err::not_found` is
 /// returned when no ring held the root's own `Sent` (never-seen or
 /// lapped past every ring's window).
 ///
@@ -163,8 +166,17 @@ pub enum TraceEvent {
 /// the MCP layer can name/decode it uniformly).
 #[aether_data::kind(name = "aether.trace.describe_tree_result", eq)]
 pub enum DescribeTreeResult {
-    Ok { root: MailId, in_flight: u32, mails: Vec<MailNodeWire> },
+    Ok { root: MailId, in_flight: u32, mails: Vec<MailNodeWire>, truncated: Vec<RingTruncation> },
     Err { not_found: MailId },
+}
+
+/// One actor's trace ring that cut a walked tree: `mailbox` names the
+/// actor and `truncated_before` is the lowest sequence its ring still
+/// holds (the ring's `aether.trace.tail` cursor).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Schema)]
+pub struct RingTruncation {
+    pub mailbox: MailboxId,
+    pub truncated_before: u64,
 }
 
 /// One node in a [`DescribeTreeResult`]: a single mail folded from its
@@ -279,12 +291,15 @@ pub enum TraceTailResult {
 /// (`subscribe_settlement_mail`) receive a `Settled { root }` mail at
 /// their target.
 ///
-/// **Settlement is a hint, not a guarantee.** Per ADR-0080 §6,
-/// consumers MUST be idempotent — a duplicate `Settled { root }` for
-/// the same root is a no-op for any waiter that already woke (the
-/// registry's `settled` set dedups). The gate-site contract is
-/// "settles eventually," not "settles only once every dependency is
-/// provably done."
+/// **Settlement is exact under the hold contract.** A chain settles the
+/// instant its in-flight and held-open counts are both zero. A handler that
+/// will send chain mail after it returns holds the chain until its last send
+/// (ADR-0080 §6 resolution, §12), so the counts never reach zero with work
+/// still coming, and `Settled { root }` fires once and never early. A
+/// subscriber that arrives after the fire is pre-fired from the registry's
+/// recent-settlement window. A second fire for one root means a handler sent
+/// chain mail after returning without a hold, which is a defect in that
+/// handler.
 ///
 /// Engine-only mail (ADR-0233): the settlement registry pushes it from host
 /// code through the mailer, and no actor may send it.

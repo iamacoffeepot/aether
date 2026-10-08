@@ -2,7 +2,8 @@
 //! surface (ADR-0041), caches filled render triangles plus canonical DSL
 //! outline loops, and submits them to the `"aether.render"` sink on the
 //! `Render` lifecycle stage. Filled geometry is view-independent; DSL
-//! outlines are rebuilt as eye-facing ribbons from the active camera eye.
+//! outlines are rebuilt as eye-facing ribbons from the eye of the camera the
+//! viewer's config names.
 //!
 //! Dispatches on the file extension stashed in the fs request context:
 //!
@@ -29,17 +30,24 @@
 //! 2. The component fires `aether.fs.read` and waits for the reply.
 //! 3. On reply, the filled-triangle and outline-loop cache is replaced
 //!    atomically. Any parse or mesh failure leaves the prior cache intact.
-//! 4. Every `aether.lifecycle.render` stage emits cached faces immediately.
-//!    When DSL outline loops exist, the viewer asks the default-loaded
-//!    `aether.kit.camera` component for its active eye and emits the solved
-//!    outline triangles when the source-bound reply settles. The viewer
-//!    declares that camera as a dependency, so it loads only beside it: a
-//!    viewer loaded without a live `aether.kit.camera` is refused at load.
+//! 4. Every `aether.lifecycle.render` stage emits the cached faces and, when
+//!    DSL outline loops exist, the outline triangles solved for the camera's
+//!    eye.
+//!
+//! # The camera
+//!
+//! [`MeshViewerConfig`] names one camera instance. At `wire` the viewer
+//! proves its path and subscribes to its view
+//! (`aether.render.view_subscribe`), and it keeps the eye of the last
+//! [`ViewProjection`] the camera sent. Until one arrives the filled mesh
+//! draws and the outlines are omitted. A path that does not prove fails the
+//! viewer's birth, so the camera must be live first. `unwire` unsubscribes.
 
 mod kinds;
 pub use kinds::*;
 
-use aether_actor::{ActorInitError, Erased, Held, Pending, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, ActorPath, ActorRef, Erased, Held, Pending, ResolveError, WasmActor};
+use aether_actor::{WasmCtx, WasmInitCtx, actor};
 use aether_data::{Blob, BlobReader};
 use aether_fs::{FsCapability, NamespaceAddr, Read, ReadResult};
 use aether_kinds::{MeshLoadResult, Render};
@@ -47,9 +55,9 @@ use aether_lifecycle::LifecycleCapability;
 use aether_math::{Rgb, Vec3};
 use aether_mesh::stroke::{self, StrokeParameters, StrokePoint};
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
-use aether_render::{DrawTriangle, RenderCapability, Vertex};
+use aether_render::{DrawTriangle, RenderCapability, Vertex, ViewProjection, ViewSubscribe, ViewUnsubscribe};
 
-use crate::camera::{CameraComponent, CameraEyeRequest, CameraEyeResult};
+use crate::camera::CameraComponent;
 
 use core::str;
 
@@ -90,11 +98,17 @@ struct OutlineLoop {
 
 pub struct MeshViewer {
     cache: MeshCache,
+    /// The camera the config names.
+    camera: ActorPath<CameraComponent>,
+    /// The camera once its path proved and the viewer subscribed to it.
+    followed: Option<ActorRef<CameraComponent>>,
+    /// The last view the camera sent; `None` until the first.
+    view: Option<ViewProjection>,
 }
 
 /// The state one load carries from `on_load` to `on_read_result`: the held
 /// `MeshLoadResult` reply it owes its requester, and the file it read.
-#[aether_data::kind(name = "aether.kit.mesh.load_context")]
+#[aether_data::kind(name = "aether.kit.mesh.load_context", no_serde)]
 struct MeshLoadContext {
     held: Held<MeshLoadResult>,
     namespace: String,
@@ -107,16 +121,20 @@ struct MeshLoadContext {
 /// Workflow: `load_component` this binary, then send
 /// `aether.kit.mesh.load { namespace, path }` pointing at a `.dsl` or
 /// `.obj` file. After the substrate's read reply comes back the mesh
-/// renders every frame; `capture_frame` verifies. Send another `load`
+/// renders every frame; `capture_frame` verifies. Load a kit camera first
+/// and name it in the viewer's config (`aether.kit.camera:main` when the
+/// config is absent): DSL outlines are drawn for that camera's eye. Send
+/// another `load`
 /// to swap the cached mesh. Iterate on a DSL by writing the new source
 /// via `aether.fs.write` and re-sending `aether.kit.mesh.load` against the
 /// same path.
-#[actor(root, depends(LifecycleCapability, RenderCapability, CameraComponent, FsCapability))]
+#[actor(root, depends(LifecycleCapability, RenderCapability, FsCapability))]
 impl WasmActor for MeshViewer {
+    type Config = MeshViewerConfig;
     const NAMESPACE: &'static str = "aether.kit.mesh";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(MeshViewer { cache: MeshCache::default() })
+    fn init(config: MeshViewerConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(MeshViewer { cache: MeshCache::default(), camera: config.camera, followed: None, view: None })
     }
 
     /// Issue 640 / 1378: subscribe to the `Render` lifecycle stage so the
@@ -131,12 +149,28 @@ impl WasmActor for MeshViewer {
     /// subscribe; the reply warn-drops and the viewer simply never
     /// receives `Render` and never submits — a no-op there, where the
     /// render cap discards anyway (ADR-0082 §7 / §11).
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    ///
+    /// Then subscribe to the camera's view.
+    ///
+    /// # Errors
+    ///
+    /// When the config's camera path does not prove: the viewer's birth
+    /// fails and the load that asked is told which path.
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.subscribe::<LifecycleCapability, Render>();
+
+        self.follow_camera(ctx).map_err(|error| ActorInitError::new(format!("the mesh viewer's camera: {error}")))
     }
 
-    /// Emit cached faces and request the active eye when this DSL cache has
-    /// outline loops. The reply stays in this settled Render cascade.
+    /// Stop taking the camera's view.
+    fn unwire(&mut self, ctx: &mut WasmCtx<'_>) {
+        if let Some(camera) = self.followed.take() {
+            ctx.send_to(camera, &ViewUnsubscribe);
+        }
+    }
+
+    /// Emit the cached faces, and the DSL outline loops solved for the eye
+    /// of the last view the camera sent. No view yet means no outline.
     ///
     /// # Agent
     /// Substrate-driven; do not send manually. If no triangles render
@@ -147,22 +181,23 @@ impl WasmActor for MeshViewer {
         if !self.cache.faces.is_empty() {
             ctx.send_many::<RenderCapability>(&self.cache.faces);
         }
-        if !self.cache.outlines.is_empty() {
-            ctx.send::<CameraComponent>(&CameraEyeRequest);
-        }
-    }
-
-    /// Rebuild and submit the cached DSL outline loops for the eye that
-    /// answered this Render's request. No active camera means no outline.
-    #[handler::response]
-    fn on_camera_eye_result(&mut self, ctx: &mut WasmCtx<'_>, result: CameraEyeResult) {
-        let Some(eye) = result.eye.map(Vec3::from_array) else {
+        let Some(view) = &self.view else {
             return;
         };
-        let triangles = outline_triangles(&self.cache.outlines, eye);
+        let triangles = outline_triangles(&self.cache.outlines, view.eye);
         if !triangles.is_empty() {
             ctx.send_many::<RenderCapability>(&triangles);
         }
+    }
+
+    /// Keep the view the camera sent; its eye is what the outlines face.
+    ///
+    /// # Agent
+    /// Sent by the camera this viewer subscribed to; not useful to send
+    /// manually.
+    #[handler::event]
+    fn on_view(&mut self, _ctx: &mut WasmCtx<'_>, view: ViewProjection) {
+        self.view = Some(view);
     }
 
     /// Triggers an asynchronous mesh load. Reply arrives as
@@ -276,6 +311,17 @@ impl LoadOutcome {
 }
 
 impl MeshViewer {
+    /// Prove the config's camera path and subscribe to its view. A path that
+    /// does not prove leaves the viewer following nothing.
+    fn follow_camera(&mut self, ctx: &mut WasmCtx<'_, Self>) -> Result<(), ResolveError> {
+        self.followed = None;
+        let camera = ctx.resolve(&self.camera)?;
+        ctx.send_to(camera, &ViewSubscribe);
+        self.followed = Some(camera);
+
+        Ok(())
+    }
+
     /// Parse `bytes` for `path`, replacing the split mesh cache on success
     /// and leaving it intact on any failure. Returns the
     /// structured outcome for the `MeshLoadResult` reply.

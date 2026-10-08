@@ -61,14 +61,16 @@
 //!   instance of the module and ends only on its own drop, which closes it
 //!   for good, or at engine stop.
 //! - **Republish** (ADR-0241 §7): `Prepare` builds a candidate `Component`
-//!   against the same binding beside the running guest, which runs `unwire`
-//!   and `on_dehydrate` and is kept. The candidate takes over the correlation
-//!   cursor and reply table and rehydrates, with its outbox held. While the
-//!   slot is prepared, mail for the guest waits at the inbox gate in arrival
-//!   order. `Commit` installs the candidate, sends its held mail on the
-//!   commit's chain, and delivers the gated mail to it; `Abort` discards the
-//!   candidate and its mail, reinstates the old guest with its cursor and
-//!   reply table, runs its `wire` again, and delivers the gated mail to it.
+//!   against the same binding beside the running guest, which runs
+//!   `on_dehydrate` and is kept. The candidate takes over the correlation
+//!   cursor and reply table, rehydrates, and wires with its outbox held.
+//!   While the slot is prepared, mail for the guest waits at the inbox gate
+//!   in arrival order. `Commit` unwires the old guest, installs the
+//!   candidate, sends its held mail on the commit's chain, and delivers the
+//!   gated mail to it; `Abort` unwires the candidate exactly when it wired,
+//!   discards it and its mail, reinstates the old guest, still wired, with
+//!   its cursor and reply table, hands it back the state it saved, and
+//!   delivers the gated mail to it, with no re-wire.
 //!   A drop while prepared aborts first. The component host drives every
 //!   member of a republish through these rows as one group, and a
 //!   candidate built without a config uses the stored spawn config.

@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 
 use aether_actor::actor;
 use aether_data::MailId;
-use aether_fs::{FsCapability, Load, Loaded, MAX_LOADS_IN_FLIGHT, NamespaceAddr, NamespaceRoots, Read, ReadResult};
+use aether_fs::{
+    FsCapability, Load, Loaded, MAX_LOADS_IN_FLIGHT, NamespaceAddr, NamespaceRoots, ObjectSource, Read, ReadResult,
+};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::testing::{PumpedDriver, boot_test_chassis_with, cleanup, fresh_substrate, scratch_dir};
@@ -96,8 +98,12 @@ struct Sandbox {
 impl Sandbox {
     fn new(tag: &str) -> Self {
         let root = scratch_dir("aether-fs-offload", tag);
-        let roots =
-            NamespaceRoots { save: root.join("save"), assets: root.join("assets"), config: root.join("config") };
+        let roots = NamespaceRoots {
+            save: root.join("save"),
+            assets: root.join("assets"),
+            config: root.join("config"),
+            objects: root.join("objects"),
+        };
         for dir in [&roots.save, &roots.assets, &roots.config] {
             fs::create_dir_all(dir).expect("test setup: namespace root creates");
         }
@@ -142,7 +148,8 @@ fn has_reader(fifo: &Path) -> bool {
 /// A pumped [`Requester`] on a chassis composing `aether.fs` on the pool.
 fn requester(sandbox: &Sandbox) -> PumpedDriver<Requester> {
     let (registry, mailer) = fresh_substrate();
-    let chassis = boot_test_chassis_with::<FsCapability>(&registry, &mailer, sandbox.roots.clone(), ());
+    let chassis =
+        boot_test_chassis_with::<FsCapability>(&registry, &mailer, sandbox.roots.clone(), ObjectSource::Directory);
     PumpedDriver::boot(chassis, (), ())
 }
 

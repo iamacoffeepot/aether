@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-23
 - **Accepted:** 2026-07-30
-- **Last amended:** 2026-09-23
+- **Last amended:** 2026-10-06
 
 ## Context
 
@@ -378,6 +378,8 @@ The deterministic mailbox id returned during the first step is a reservation, no
 Both authoritative success and authoritative failure complete on a later parent turn. Consumers must not install monitors, business indexes, resources, or success replies merely because the deterministic id was returned.
 
 A valid activation token cannot encounter an ordinary recoverable failure during promotion. Name conflicts, namespace conflicts, tombstones, storage capacity, cost installation, and other expected rejection conditions are resolved before `wire`.
+
+*Amended 2026-10-06 (#7547):* the births a handler stages in one turn are one batch, and the owner admits all of them or none, so they commit or fail together. On a refusal the refused birth completes with its own `SpawnError` and every other birth of the batch completes with `SpawnError::ActivationRejected`. Each is rolled back as the "authoritative rejection before wire" block above describes. The owner applies batches one at a time, so another actor's births, and this actor's births from another turn, are not affected.
 
 Fatal allocator failure, poisoning, or violated internal invariants retain Aether’s fatal posture rather than becoming a post-`wire` `SpawnError`.
 

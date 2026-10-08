@@ -1,0 +1,16 @@
+error[E0277]: the trait bound `Dialed: From<PathRefused>` is not satisfied
+  --> tests/ui/rejects_request_sender_without_refusal_reply.rs:35:91
+   |
+35 |     fn on_dial_self(&mut self, ctx: &mut WasmCtx<'_, Self, Consumer>, _mail: DialSelf) -> Dialed {
+   |                                                                                           ^^^^^^ unsatisfied trait bound
+   |
+help: the trait `From<PathRefused>` is not implemented for `Dialed`
+  --> tests/ui/rejects_request_sender_without_refusal_reply.rs:14:1
+   |
+14 | struct Dialed;
+   | ^^^^^^^^^^^^^
+note: required by a bound in `aether_actor::wasm::ctx::sender::<impl WasmCtx<'a, A, Anyone, aether_actor::Unchecked>>::__sender_or_answer`
+  --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/sender.rs
+   |
+   |     pub fn __sender_or_answer<P: CastTarget, K: Kind, O: ActorMail + From<PathRefused>>(
+   |                                                                      ^^^^^^^^^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::sender::<impl WasmCtx<'a, A, Anyone, Unchecked>>::__sender_or_answer`

@@ -71,7 +71,8 @@ pub struct Module {
     compiled: Arc<wasmtime::Module>,  // compiled once per code per engine, shared by every
                                       // module whose bytes differ only in asset sections
     manifest: Arc<ModuleManifest>,    // parsed once: exports, rows, depends, lineage, boot, kinds,
-                                      // and each asset's catalog entry and byte range
+                                      // and each asset's catalog entry and own blob
+    assets: Arc<AssetIndex>,          // each asset's name to its own `Blob` (held by the `Module`)
 }
 ```
 
@@ -85,19 +86,20 @@ section is its own code. Every other custom section stays in the code: the
 name section feeds trap symbolication, and the manifest sections differ only
 between modules that are different modules.
 
-The wasm bytes are used once, to compile and to parse, and are not retained,
-and neither is any asset's payload. Nothing re-parses a section per load or
-per replace: every reader today that re-reads the bytes (a replace's
-predecessor kinds and boot namespace, the inline contracts) reads the manifest
-instead. An asset's payload passes only through a load window (ADR-0163 §3),
-which reads the asset's recorded range from the code its opener brought (a
-load's, a spawn's, or a republish's bytes) and lets go of that code when the
-window closes. A spawn may bring the bytes of the module that publishes its
-namespace, and its window then reads that module's assets from them. A spawn
-that brings none answers the catalog and refuses a catalogued asset, naming
-the two doors that bring the bytes: a spawn with its code, and a load. An
-entry lives while anything holds it: a publication, a running
-instance, or a held `Module`. Compiled code lives while any entry over it does.
+The wasm bytes are used once, to compile and to parse, and the file bytes
+are then let go: a publish checks each asset in as its own deduplicated blob
+held by the `Module` (ADR-0250 §1), so each asset lives exactly as long as a
+`Module` holds it — while a publication, a running instance, or a held
+`Module` holds it. Nothing re-parses a section per load or per replace: every
+reader today that re-reads the bytes (a replace's predecessor kinds and boot
+namespace, the inline contracts) reads the manifest instead. A component reads
+its assets from its own module in every hook — `init`, `wire`, all handlers,
+`on_rehydrate`, and `unwire` — served from the instance's own module with no
+window and no trap for a call made at the wrong time. A spawn brings no bytes:
+a spawn of a published type always builds an instance that can read its
+assets, whoever asks for it. An entry lives while anything holds it: a
+publication, a running instance, or a held `Module`. Compiled code lives while
+any entry over it does.
 
 A `Module` never leaves its engine. Compiled code is tied to the engine's
 wasmtime version, configuration, and target, so the portable form of code is
@@ -144,7 +146,8 @@ one implementation is published per namespace per engine.
     `aether.bloomery.bundle.<hash>:<unit key>`. Two units on one bundle share
     its publication. A unit moving to a new bundle spawns the new root and
     closes its old one; it never republishes.
-  - Publications accumulate one per build (see Unpublish).
+  - Publications accumulate one per build, until an unpublish withdraws them
+    (§9).
   - A content-addressed type has no typed path, because its `NAMESPACE` is
     not its published name. It is reached through the reference its spawn or
     load reply stamps.
@@ -152,8 +155,8 @@ one implementation is published per namespace per engine.
   binary published is refused to every module.
 - **Republishing** points a module's namespaces at a new module. The set of
   exported namespaces may grow and never shrinks: a namespace, once
-  published, stays published for the engine's lifetime, and its successor
-  must export it. Otherwise a namespace with no live instance could drop out
+  published, stays published until `aether.component.unpublish` withdraws it,
+  and its successor must export it. Otherwise a namespace with no live instance could drop out
   and return with fewer rows, and the rows-only-grow rule (§4) would hold
   only while an instance happened to be live.
 
@@ -246,22 +249,24 @@ every member ends up on the new module, or none does.
   republished namespace. The first failing check refuses the whole replace
   before any instance prepares.
 - **Prepare.** Each member closes its own inbox gate, so new mail for it
-  waits instead of reaching either guest. It runs `unwire` and
-  `on_dehydrate` on the old guest, which is kept, not dropped. It
-  instantiates the candidate with its config (§4), moves the correlation
-  cursor, reply table, and request contexts to it, and runs `on_rehydrate`.
-  The candidate's outbox is held: nothing it sends leaves before commit.
+  waits instead of reaching either guest. It runs `on_dehydrate` on the old
+  guest, which is kept, not dropped. It instantiates the candidate with its
+  config (§4), moves the correlation cursor, reply table, and request
+  contexts to it, runs `on_rehydrate`, and then `wire` with its outbox still
+  held. The candidate's outbox is held: nothing it sends leaves before
+  commit.
 - **Commit.** Once every member is ready, the module is published (§3) and
-  every member commits together: its held outbox is flushed, and its inbox
-  gate releases the mail it queued, in order, to the candidate, which is now
-  the instance.
-- **Abort.** A pre-check refusal, an `init` or `on_rehydrate` failure in any
-  member, or a publish failure aborts every member. Each reinstates its old
-  guest with its cursor, reply table, contexts, and the state its
-  `on_dehydrate` saved, which the old guest gets back through its own
-  `on_rehydrate`, and runs `wire` again, so a member whose own prepare
-  succeeded is left neither unwired nor without what its dehydrate moved out
-  by another member's failure. The candidate's mail is discarded.
+  every member commits together: the old guest runs `unwire`, then drops,
+  its held outbox is flushed, and its inbox gate releases the mail it queued,
+  in order, to the candidate, which is now the instance. The old guest's
+  release mail precedes the successor's held mail at every recipient.
+- **Abort.** A pre-check refusal, an `init`, `on_rehydrate`, or `wire`
+  failure in any member, or a publish failure aborts every member. Each
+  unwires its candidate exactly when that candidate wired, discards it,
+  reinstates its old guest, still wired, with its cursor, reply table,
+  contexts, and the state its `on_dehydrate` saved, which the old guest gets
+  back through its own `on_rehydrate`, with no second `wire`. The
+  candidate's mail is discarded.
 - **The reply.** The replace answers `Ok` only after every member has
   committed and every chain its flush released has settled.
 - **Concurrent traffic.** A spawn or load of a republishing namespace waits
@@ -325,17 +330,16 @@ registry owner (§3), and the host reads it there.
   with `configs` as each listed instance's new config. Its reply names each
   namespace it bound, so a caller of a content-addressed module never
   recomputes the hash.
-- `Spawn { namespace, key, parent, config, code: Option<Blob> }` asks for an
-  instance to exist, and the name decides the answer. `code` brings the
-  module's bytes for the new instance's load window (§2); the host checks
-  them in and refuses the spawn when they are not the module the namespace
-  is bound to, because the asset ranges the window reads are that module's. A live name: the reply names it and
-  nothing is re-initialised. An absent name: the engine stands the instance
-  up. A tombstoned name: the spawn is refused, because the name is spent
-  (§8). The door spawns published guest types. A native namespace is
-  composed by its chassis or parent, and spawning one by mail is not
-  supported yet, so a `Spawn` naming one, a composed singleton's included,
-  is refused with an error saying so (see Alternatives considered).
+- `Spawn { namespace, key, parent, config }` asks for an instance to exist,
+  and the name decides the answer. A spawn brings no bytes: a spawn of a
+  published type always builds an instance that can read its assets, in every
+  hook, from its own module. A live name: the reply names it and nothing is
+  re-initialised. An absent name: the engine stands the instance up. A
+  tombstoned name: the spawn is refused, because the name is spent (§8). The
+  door spawns published guest types. A native namespace is composed by its
+  chassis or parent, and spawning one by mail is not supported yet, so a
+  `Spawn` naming one, a composed singleton's included, is refused with an
+  error saying so (see Alternatives considered).
 
 `LoadComponent` becomes a convenience that publishes and spawns in one call.
 `ReplaceComponent { wasm, configs: Vec<(ErasedActorPath, Vec<u8>)> }` becomes
@@ -344,6 +348,11 @@ module's namespaces as one group (§7): `configs` supplies a new-kind config
 for an instance whose type's config kind changed, and an unlisted instance
 reuses its stored spawn config (§4). `DropComponent` becomes the close
 request: it asks the named instance to close, and its name tombstones (§8).
+`Unpublish { namespace }` withdraws the one row the publication table holds
+for `namespace` (§3): it is refused while an instance of the namespace is
+live, with an error naming the instances, and frees the module once its last
+publication row and last instance are gone. Withdrawing a publication does not
+resurrect tombstoned instance names (§8).
 `LoadResult.path` is the spawned actor's own canonical path. Bloomery
 restart adoption (ADR-0226 D9) becomes a `Spawn` that finds its instance
 live.
@@ -368,7 +377,7 @@ links its code; the kind crates of ADR-0066 are where these markers live.
 | 0096 multi-actor modules | Accepted | §1, §3: a module publishes its export set; a replace takes no export selector |
 | 0097 sibling spawn | Accepted | §3, §4: a sibling is an ordinary spawn of a published or module-private type |
 | 0099 identity and addressing | Accepted | §5 the `Embedded` fold and §6 `aether.embedded` superseded; the 2026-08-05 runtime-parent amendment superseded |
-| 0101 / 0016 / 0113 hooks | Accepted | hooks run per member of a group republish; a dehydrate refusal or an `init`/rehydrate failure in any member aborts the whole group, and every member reinstates its old guest with its cursor, reply table, contexts, and the state its `on_dehydrate` saved, through `on_rehydrate`, and runs `wire` again |
+| 0101 / 0016 / 0113 hooks | Accepted | hooks run per member of a group republish; a dehydrate refusal or an `init`, rehydrate, or `wire` failure in any member aborts the whole group, and every member unwires its candidate exactly when it wired and reinstates its old guest, still wired, with its cursor, reply table, contexts, and the state its `on_dehydrate` saved, through `on_rehydrate`, with no second `wire` |
 | 0114 inline children | Accepted | D2 the child is `parent/<child NS>:key`; D5 rebuilt from the republished module; the 2026-07-08 `despawn_inline_child` becomes a close, and the name tombstones |
 | 0119 resolver strategies | Accepted | `Embedded` and `EmbeddedMany` retire |
 | 0138 opt-in default entry | Accepted | moot: every spawn names its namespace; `aether.no_default` retires |
@@ -408,8 +417,8 @@ links its code; the kind crates of ADR-0066 are where these markers live.
 - A closed name is spent. A caller that wants a fresh instance after a close
   picks a new key, and each tombstone costs one registry entry for the
   engine's lifetime (ADR-0079 §7).
-- A dead publication, one nothing will spawn again, stays resident, because
-  there is no unpublish (see Alternatives considered). Every built Bloomery
+- A dead publication, one nothing will spawn again, stays resident until
+  `aether.component.unpublish` withdraws it (§9). Every built Bloomery
   bundle adds one, because every bundle is content-addressed (§3).
 
 ### Neutral
@@ -466,11 +475,11 @@ step 3.
 - **One bundle namespace, exempt or per unit.** Rejected. Exempting bundle
   roots from the one-implementation rule breaks it, and a per-unit namespace
   refuses a rebuild that drops a program as a republish.
-- **Unpublish.** Deferred. Publications are content-addressed and a
+- **Unpublish.** Landed under #7613. Publications are content-addressed and a
   republish already points a namespace at new code, so the one thing an
-  unpublish would add is reclaiming the memory of a dead publication, one
-  nothing will spawn again. Revisit when memory held by dead publications
-  becomes a measured cost.
+  unpublish adds is reclaiming the memory of a dead publication, one
+  nothing will spawn again: `aether.component.unpublish` withdraws one
+  namespace's row once its instances are dropped (§9).
 - **Native spawn by mail.** Deferred. Every instanced native type today
   takes wiring from its composer or parent, as `Params` (`JournalActor`,
   `BundleDriver`, `Autoloader`) or as `Config` (`WasmTrampoline`,

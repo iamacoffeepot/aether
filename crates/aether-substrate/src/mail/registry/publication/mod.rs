@@ -12,8 +12,9 @@
 //! A module publishes as one set through the registry owner's `PublishModule`
 //! effect, which runs [`admission`] against the table as its batch has staged
 //! it and points every namespace the module exports at the module. A
-//! namespace, once published, stays published, and a published module stays
-//! resident for the engine's life.
+//! namespace stays published until `UnpublishNamespace` withdraws its row,
+//! and a published module stays resident while a row or a live instance holds
+//! it.
 //!
 //! The table lives on the registry owner's `Inner`, beside the route
 //! contracts it already applies. It is not an actor and has no address.
@@ -42,10 +43,7 @@ mod tests;
 #[cfg(feature = "wasm")]
 pub use admission::{AdmissionRefusal, Admitted};
 #[cfg(feature = "wasm")]
-pub(super) use admission::{ModuleSurface, admit};
-
-#[cfg(feature = "wasm")]
-use admission::Holder;
+pub(super) use admission::{Holder, ModuleSurface, admit};
 
 /// One native actor type: its `TypeId` and its name, for refusals.
 #[derive(Clone, Copy, Debug)]
@@ -190,6 +188,15 @@ impl PublicationTable {
         }
     }
 
+    /// Whether `born` already holds `namespace`, so its birth needs no write.
+    pub(super) fn held_by(&self, namespace: &str, born: NativeType) -> bool {
+        let Some(Published::Native(publication)) = self.namespaces.get(namespace) else {
+            return false;
+        };
+
+        publication.held.is_some_and(|holder| holder.id == born.id)
+    }
+
     /// Whether `namespace` is published by the module `module`, the one check
     /// a guest birth passes before the owner reserves it (ADR-0241 §3, §6):
     /// a native, unpublished, or other module's namespace binds no guest.
@@ -233,6 +240,15 @@ impl PublicationTable {
         for namespace in publication.surface.exported_namespaces() {
             self.namespaces.insert(Arc::clone(namespace), Published::Module(Arc::clone(&publication)));
         }
+    }
+
+    /// Withdraw the one row `namespace` points at. Called only by the
+    /// registry owner's unpublish arm, after it proved the namespace is
+    /// published by the module the batch names and no live instance needs
+    /// it. Sibling rows of a multi-export module are untouched.
+    #[cfg(feature = "wasm")]
+    pub(super) fn remove(&mut self, namespace: &str) {
+        self.namespaces.remove(namespace);
     }
 
     /// Every distinct published module, once each however many namespaces it

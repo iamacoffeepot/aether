@@ -1,54 +1,38 @@
-//! Cross-thread channel from the chassis-control handler and the pumped
-//! render slot's wake to the standalone binary's event loop (ADR-0067,
-//! ADR-0161). The `aether.substrate_harness.advance` handler runs on a
-//! scheduler worker; the loop runs on the main thread — this channel carries
-//! the wake.
+//! Cross-thread channel from the chassis-control handler to the in-process
+//! harness's pump (ADR-0067, ADR-0161). The `aether.substrate_harness.advance`
+//! handler runs on a scheduler worker; the pump runs on the caller's thread —
+//! this channel carries the request and the wake.
 //!
-//! `Advance` carries the request's retained inbound guard so the loop can
+//! `Advance` carries the request's retained inbound guard so the pump can
 //! reply through it once all ticks complete; the request's causal chain stays
 //! open until then, because the guard records its `Finished` on drop, after
-//! the reply's `Sent`. `RenderMail` is the pumped render slot's wake — "mail landed on
-//! the render slot, drain it" — installed on the slot's `MailboxWakeSlot`
-//! (mirroring desktop's `UserEvent::WindowMail`); the in-process harness never
-//! installs that wake, so the variant is the binary's alone.
+//! the reply's `Sent`.
 
 use std::sync::mpsc;
-use std::time::Duration;
 
 use aether_substrate::InboundMail;
 use aether_substrate::chassis::ctx::MailboxWakeFn;
 
-/// Events the event loop consumes. Single-consumer (the loop); the producers
-/// are the `aether.substrate_harness.advance` handler (`Advance`) and the
-/// pumped render slot's mailbox wake (`RenderMail`), so the underlying mpsc
-/// channel tolerates the two.
+/// Events the pump consumes. Single-consumer (the in-process harness's pump);
+/// the one producer is the `aether.substrate_harness.advance` handler.
 pub enum ChassisEvent {
-    /// `aether.substrate_harness.advance { ticks, delta_micros }`. The event
-    /// loop runs `ticks` full cycles (advance → frame mail → drain), each
+    /// `aether.substrate_harness.advance { ticks, delta_micros }`. The pump
+    /// runs `ticks` full cycles (advance → frame mail → drain), each
     /// representing `delta_micros` elapsed time, then replies with
     /// `AdvanceResult::Ok { ticks_completed }` through `reply`, the handler's
     /// retained inbound. The guard answers every sender kind (a wire `Call`
     /// names the rpc server's mailbox) and holds the request's chain open
     /// until it drops after the reply, so a caller awaiting settlement sees
-    /// the reply first. Boxed to keep the enum small beside `RenderMail`.
+    /// the reply first.
     Advance { reply: Box<InboundMail>, ticks: u32, delta_micros: u32 },
-    /// The pumped `aether.render` slot took mail — drain it (ADR-0161). A
-    /// wake-only signal, mirroring desktop's `UserEvent::WindowMail`: the
-    /// slot's wake sends it so a render mail landing while the loop is parked
-    /// (a `capture_frame` on an occluded chassis, a `pre_settled` notice) is
-    /// serviced. Sent only by the standalone binary's render wake — the
-    /// in-process harness drains the slot every pump iteration and installs
-    /// no wake.
-    RenderMail,
 }
 
-/// The producer half. `wake`, when present, fires after each send, so a
-/// consumer that blocks on a wake channel shared with other sources learns
-/// the event is queued.
+/// The producer half. `wake` fires after each send, so a consumer that blocks
+/// on a wake channel shared with other sources learns the event is queued.
 #[derive(Clone)]
 pub struct EventSender {
     tx: mpsc::Sender<ChassisEvent>,
-    wake: Option<MailboxWakeFn>,
+    wake: MailboxWakeFn,
 }
 
 impl EventSender {
@@ -58,9 +42,7 @@ impl EventSender {
     /// point the chassis is shutting down and the failure is informational.
     pub fn send(&self, event: ChassisEvent) -> Result<(), mpsc::SendError<ChassisEvent>> {
         self.tx.send(event)?;
-        if let Some(wake) = &self.wake {
-            wake();
-        }
+        (self.wake)();
         Ok(())
     }
 }
@@ -68,54 +50,20 @@ impl EventSender {
 pub struct EventReceiver(mpsc::Receiver<ChassisEvent>);
 
 impl EventReceiver {
-    /// Block until the next event arrives or the sender is dropped.
-    pub fn recv(&self) -> Result<ChassisEvent, mpsc::RecvError> {
-        self.0.recv()
-    }
-
-    /// Block until the next event arrives, the sender is dropped, or
-    /// `timeout` elapses. The standalone binary parks on this while a
-    /// capture deadline is pending (ADR-0161), so a wedged pre-mail chain on
-    /// an otherwise-idle chassis still reaches the actor's deadline check.
-    pub fn recv_timeout(&self, timeout: Duration) -> Result<ChassisEvent, mpsc::RecvTimeoutError> {
-        self.0.recv_timeout(timeout)
-    }
-
     /// Non-blocking peek. Returns `Empty` immediately when no event
     /// is queued and `Disconnected` when every sender is gone. The
     /// in-process `SubstrateHarness` driver uses this to drain events
     /// inline between queue settles.
-    ///
-    /// The binary's events loop uses `recv` (blocking), not this —
-    /// the dead-code lint sees this method as unused when compiling
-    /// just the binary, hence the allow.
-    #[allow(dead_code)]
     pub fn try_recv(&self) -> Result<ChassisEvent, mpsc::TryRecvError> {
         self.0.try_recv()
     }
 }
 
 /// Build the sender/receiver pair the chassis wires once at boot. `wake`
-/// fires after each send; the standalone binary blocks on the receiver itself
-/// and passes `None`, while the in-process harness passes the wake of the one
+/// fires after each send; the in-process harness passes the wake of the one
 /// channel its pump loop blocks on.
 #[must_use]
-pub fn channel(wake: Option<MailboxWakeFn>) -> (EventSender, EventReceiver) {
+pub fn channel(wake: MailboxWakeFn) -> (EventSender, EventReceiver) {
     let (tx, rx) = mpsc::channel();
     (EventSender { tx, wake }, EventReceiver(rx))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn recv_errors_after_all_senders_drop() {
-        let (tx, rx) = channel(None);
-        drop(tx);
-        // No clones outstanding — the receiver returns Err once the
-        // last sender goes away. The chassis loop interprets this
-        // as shutdown.
-        assert!(rx.recv().is_err());
-    }
 }

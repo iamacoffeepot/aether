@@ -35,9 +35,9 @@ impl BundleDriverState {
     ///
     /// Every ticketed send but the head watch opens its step's span first,
     /// which the reply handler that takes the ticket back closes.
-    pub(crate) fn perform<M: ReplyMode, A: DependsOn<ComponentHostCapability> + DependsOn<HttpCapability>>(
+    pub(crate) fn perform<M: ReplyMode, A: DependsOn<ComponentHostCapability> + DependsOn<HttpCapability>, S>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut NativeCtx<'_, A, S, M>,
         commands: Vec<Command>,
     ) {
         let mut queue: VecDeque<Command> = commands.into();
@@ -144,14 +144,13 @@ impl BundleDriverState {
     /// Spawn a published bundle's root at its bound `namespace` under the
     /// unit key, with the load's `ticket` as the request context: the second
     /// half of a [`Command::Load`], sent once its publish answers.
-    pub(crate) fn spawn_root<M: ReplyMode, A: DependsOn<ComponentHostCapability>>(
+    pub(crate) fn spawn_root<M: ReplyMode, A: DependsOn<ComponentHostCapability>, S>(
         &self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut NativeCtx<'_, A, S, M>,
         namespace: String,
         ticket: LoadTicket,
     ) {
-        let spawn =
-            Spawn { namespace, key: Some(self.unit.as_str().to_owned()), parent: None, config: Vec::new(), code: None };
+        let spawn = Spawn { namespace, key: Some(self.unit.as_str().to_owned()), parent: None, config: Vec::new() };
         let _ = ctx.send_with_context::<ComponentHostCapability>(&spawn, ticket);
     }
 
@@ -161,16 +160,16 @@ impl BundleDriverState {
     /// not publish a declared role fails, so a digest with no kept root, or a
     /// kept root without the addressed role, is a broken invariant and aborts
     /// (ADR-0063).
-    fn send_to_root<M: ReplyMode, A, P, K: ActorMail, I, C: Kind>(
+    fn send_to_root<M: ReplyMode, A, S, P, K: ActorMail, I, C: Kind>(
         &self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut NativeCtx<'_, A, S, M>,
         bundle: Digest,
         role: &str,
         as_role: impl FnOnce(&BundleRoot) -> Option<ProtocolRef<P>>,
         request: &K,
         ticket: C,
     ) where
-        ProtocolRef<P>: Target<K, I>,
+        ProtocolRef<P>: Target<K, I, Sender = aether_actor::Anyone>,
     {
         let Some(root) = self.roots.get(&bundle).and_then(as_role) else {
             ctx.fatal_abort(format!("the core addressed bundle {bundle} as a {role} root the driver never kept"));
@@ -194,6 +193,6 @@ fn draw_entropy(count: u8) -> EntropyResult {
 /// does not owe: the core addressed the wrong kind of caller, a broken
 /// invariant that aborts (ADR-0063). The removed ticket drops silently
 /// during the unwind.
-fn owed_other<M: ReplyMode, A>(ctx: &NativeCtx<'_, A, M>, caller: CallerId, reply: &str) -> ! {
+fn owed_other<M: ReplyMode, A, S>(ctx: &NativeCtx<'_, A, S, M>, caller: CallerId, reply: &str) -> ! {
     ctx.fatal_abort(format!("the core answered caller {caller:?} with a {reply} it does not owe"))
 }

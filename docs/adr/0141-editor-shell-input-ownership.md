@@ -1,6 +1,6 @@
 # ADR-0141: Editor-shell input ownership across region roots
 
-- **Status:** Accepted
+- **Status:** Withdrawn — removed in #7521; the code last lived at 13b87ff03216ed2776f331415f240d01e9a0f359. The widget crate that held the editor shell and its regions is retired until it is rebuilt, and the rebuild decides input ownership again.
 - **Date:** 2026-07-09
 - **Amended:** 2026-09-23 — the panel-side region announcement moved from `WidgetPanel` to a new `EditorRegion` actor, which declares `EditorShell` and relays the shell's input to its child panel (ADR-0232 §6: no optional peers). See _Amendment 2026-09-23_ below.
 - **Amended:** 2026-09-26 — the shell holds each routed region as a typed reference for its sends, and the erased reference stays only for identity: press ownership and focus compare it (#6895; the owner: "We ARE going to remove erased actor sending you do know that right").

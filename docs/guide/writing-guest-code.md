@@ -22,7 +22,10 @@ closes the child and spends its name
 ([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md) §8),
 so spawning a despawned child's key again fails with
 `SpawnError::AliasAllocationFailed`; spawn a fresh child under a new key instead
-([the actor model](foundations/actor-model.md) has the details).
+([the actor model](foundations/actor-model.md) has the details). A parent's
+close runs each child's `unwire` before its own, deepest first, and a child
+that despawns itself runs `unwire` when its handler returns. Spawning a name
+whose child is standing answers that child and initialises nothing again.
 
 ## Deferred replies
 
@@ -70,8 +73,11 @@ fails fast:
   state, or its mail had no reply target;
 - a reply whose stored context holds a `Held` must take that context, or the
   guest panics after the handler returns, naming the context kind;
-- `on_dehydrate` refuses the republish while a `Held` is still live and
-  unsaved, and the host keeps the old instance running.
+- `on_dehydrate` returns an error while a `Held` is still live and unsaved,
+  which refuses the republish, and the host keeps the old instance running;
+- an `on_dehydrate` that fails after moving values into its saved state
+  returns them to its fields before it returns the error, so the instance
+  that keeps running still holds them.
 
 `R` must implement `aether_actor::HeldReply`, whose `unanswered()` names the
 failure reply the caller receives if the guest never answers. `hold` encodes it,

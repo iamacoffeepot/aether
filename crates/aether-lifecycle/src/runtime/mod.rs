@@ -34,18 +34,20 @@ use crate::kinds::{
 use aether_actor::ErasedActorRef;
 use aether_actor::PathRefused;
 use aether_actor::runtime;
+use aether_data::Kind;
 use aether_kinds::trace::Settled;
-use aether_kinds::{LifecycleAdvance, MonitorNotice, Quit};
+use aether_kinds::{LifecycleAdvance, MonitorNotice, Quit, Tick};
 use aether_substrate::actor::monitor::MonitorHandle;
 
 pub use aether_actor::OutboundReply;
-pub use aether_actor::Unchecked;
+pub use aether_actor::{Anyone, Unchecked};
 pub use aether_data::KindId;
 pub use aether_kinds::LifecycleAdvanceComplete;
 use aether_substrate::Erased;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
 pub use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 pub use std::time::{Duration, Instant};
 
 /// `aether.lifecycle` runtime state (ADR-0082). Owns the lifecycle data
@@ -95,6 +97,12 @@ pub struct LifecycleCapabilityState {
     /// Last time a slow-settlement warn fired, for the
     /// `SLOW_SETTLE_WARN_COOLDOWN` rate limit.
     pub last_slow_warn: Option<Instant>,
+    /// Game time since boot in microseconds: the sum of the deltas of the
+    /// `Tick`s broadcast so far (ADR-0082, 2026-10-06 amendment). Each
+    /// `Tick` carries it, so a subscriber counts whole steps from the mail
+    /// alone. The cap adds exactly the delta its driver states and applies
+    /// no limit of its own.
+    pub elapsed_micros: u64,
     /// One monitor per subscriber (ADR-0079 §8 amended), registered on its
     /// first stage subscription and released when its `MonitorNotice`
     /// purges it. The handle's `Drop` deregisters, so the map is both the
@@ -108,18 +116,30 @@ pub struct LifecycleCapabilityState {
 /// broadcasts rather than peeking at these.
 impl LifecycleCapabilityState {
     /// Monitor `subscriber` on its first stage subscription so the cap
-    /// purges its rows itself when the subscriber closes (ADR-0079 §8
-    /// amended).
-    /// An `Err` (an actor outside the registry, or a spawner-less test
-    /// binding) means "not monitorable": the rows then live until
-    /// substrate teardown, exactly as they would for a mailbox that
-    /// never goes away.
-    pub fn watch<A, M: aether_actor::ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, A, M>, subscriber: ErasedActorRef) {
-        if !self.monitors.contains_key(&subscriber)
-            && let Ok(handle) = ctx.monitor(subscriber)
-        {
-            self.monitors.insert(subscriber, handle);
+    /// purges its rows itself when the subscriber closes (ADR-0079 §8).
+    /// The monitor never fails: a subscriber that closed before its
+    /// subscription was handled is noticed at once, and the notice, which
+    /// arrives after the subscribing handler returns, purges the rows that
+    /// handler wrote.
+    pub fn watch<A, S, M: aether_actor::ReplyMode>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A, S, M>,
+        subscriber: ErasedActorRef,
+    ) {
+        if let Entry::Vacant(slot) = self.monitors.entry(subscriber) {
+            slot.insert(ctx.monitor(subscriber));
         }
+    }
+
+    /// The [`Tick`] an advance broadcasting `stage` carries. The delta joins
+    /// the running total only when `stage` is the `Tick` stage: a driver
+    /// passes one frame's delta on every advance of that frame, and the
+    /// frame's time is counted once.
+    fn tick_for(&mut self, stage: KindId, delta_micros: u32) -> Tick {
+        if stage == <Tick as Kind>::ID {
+            self.elapsed_micros += u64::from(delta_micros);
+        }
+        Tick { delta_micros, elapsed_micros: self.elapsed_micros }
     }
 
     /// Whether this chassis's lifecycle graph declares `stage` as a state or
@@ -182,6 +202,7 @@ fn test_cap(advance_timeout: Duration) -> LifecycleCapabilityState {
         advance_timeout,
         settlement_latency_ewma: None,
         last_slow_warn: None,
+        elapsed_micros: 0,
         monitors: BTreeMap::new(),
     }
 }
@@ -223,6 +244,7 @@ impl NativeActor for LifecycleCapability {
             advance_timeout: Duration::from_millis(advance_timeout_millis),
             settlement_latency_ewma: None,
             last_slow_warn: None,
+            elapsed_micros: 0,
             monitors: BTreeMap::new(),
         })
     }
@@ -424,7 +446,11 @@ impl NativeActor for LifecycleCapability {
     /// frame. Reply: [`LifecycleAdvanceComplete`] once the broadcast
     /// root settles.
     #[handler::unchecked(reason = "a held reply would pin the root the advance waits to settle (#6967)")]
-    fn on_advance(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Unchecked>, payload: LifecycleAdvance) {
+    fn on_advance(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>,
+        payload: LifecycleAdvance,
+    ) {
         if state.terminal_reached {
             // Already done — reply immediately with zeros so the
             // chassis main loop unblocks and can break on `next == 0`.
@@ -490,9 +516,13 @@ impl NativeActor for LifecycleCapability {
 
         // Broadcast first — children inherit the inbound's chain root and
         // parent edge. ADR-0080 settlement counts each child as in-flight
-        // against the root. Tick carries the chassis cadence's elapsed time;
-        // every other stage remains an empty signal (issue 4470).
-        broadcast_to_subscribers(ctx, &state.subscribers, broadcast, payload.delta_micros);
+        // against the root. Tick carries the chassis cadence's elapsed time
+        // and the total it grew; every other stage remains an empty signal
+        // (issue 4470). The total is touched only here, past every return
+        // that drops the advance, so it is the sum of the deltas of the
+        // `Tick`s that were broadcast.
+        let tick = state.tick_for(broadcast, payload.delta_micros);
+        broadcast_to_subscribers(ctx, &state.subscribers, broadcast, tick);
 
         // Subscribe settlement on the inbound's chain root. The
         // broadcast subtree is part of that chain; settlement fires
@@ -539,7 +569,7 @@ impl NativeActor for LifecycleCapability {
     /// when the in-flight count for `root` reaches zero; not a public
     /// API for user code.
     #[handler::unchecked(reason = "a held reply would pin the root the advance waits to settle (#6967)")]
-    fn on_settled(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Unchecked>, payload: Settled) {
+    fn on_settled(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Anyone, Unchecked>, payload: Settled) {
         let Some(pending) = state.pending.as_ref() else {
             return;
         };
@@ -573,8 +603,8 @@ mod tests {
     use std::sync::{Arc, mpsc};
 
     use aether_actor::{ActorPath, ActorRef, HandlesKind, PathRefusal, Publisher};
-    use aether_data::{Kind, LoadName, MailId, SessionToken, Uuid};
-    use aether_kinds::{Present, Render, Shutdown, Tick};
+    use aether_data::{LoadName, MailId, SessionToken, Uuid};
+    use aether_kinds::{Present, Render, Shutdown};
     use aether_substrate::mail::outbound::EgressEvent;
     use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch};
     use aether_substrate::testing::{PumpedDriver, boot_bare_test_chassis, fresh_substrate_and_rx, registered_ref};
@@ -650,8 +680,9 @@ mod tests {
             Ok(Self)
         }
 
-        fn wire(_state: &mut Self, ctx: &mut NativeCtx<'_>) {
+        fn wire(_state: &mut Self, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
             ctx.send::<LifecycleCapability>(&<LifecycleCapability as Publisher>::subscribe_request::<Tick>());
+            Ok(())
         }
 
         #[handler::event]
@@ -827,6 +858,34 @@ mod tests {
         assert_eq!(booted.subscribers_of(Render::ID), [survivor.erase()], "the co-subscriber survives");
     }
 
+    /// A subscriber that closes while its subscription is being handled
+    /// leaves no rows behind. The subscribing handler writes the row while
+    /// the subscriber's route is live and then monitors it, and the
+    /// subscriber can close between the two: in a running engine the window
+    /// is from its close's tombstone to its route drop. The two host turns
+    /// here are that handler's two steps with the close forced between them.
+    /// Monitoring the closed subscriber posts its notice, which purges the
+    /// row. A monitor that failed instead, as it did before issue 7488,
+    /// kept the row, and every broadcast of the stage went to a closed
+    /// actor until the engine exited.
+    #[test]
+    fn a_subscriber_that_closed_before_it_was_watched_is_purged_by_its_notice() {
+        let mut booted = boot_lifecycle(render_present_graph());
+        let (heard, _) = mpsc::channel();
+        let subscriber = booted.spawn_listener("early", heard);
+        let key = subscriber.erase();
+
+        let held = booted.driver.host_turn(|state, ctx| state.subscribers.subscribe_sender(ctx, Render::ID, key));
+        booted.close(subscriber);
+        booted.driver.host_turn(|state, ctx| state.watch(ctx, key));
+        assert_eq!(held, Some(true), "the row was written while the subscriber was live");
+        assert_eq!(booted.subscribers_of(Render::ID), [key], "the notice is mail, handled after the watching turn");
+
+        booted.driver.pump_until("the closed subscriber's purge", |state| {
+            state.subscribers.subscribers_of(Render::ID).is_empty() && state.monitors.is_empty()
+        });
+    }
+
     /// The broadcast is a typed send of each stage: `Tick` carries the
     /// advance's elapsed time and every other stage its empty signal
     /// (issue 4470). A broadcast that dropped the elapsed time would leave
@@ -847,16 +906,69 @@ mod tests {
         // it once the root settles; the cap replies on its own `Settled`
         // notice for that root, which the pump then drains.
         for correlation in [3, 4] {
-            let root = booted.request(&LifecycleAdvance { delta_micros: 83_335 }, correlation);
-            booted.driver.settle(&[root]);
-            booted.driver.pump_until("the advance's settlement notice", |state| state.pending.is_none());
-            booted.reply::<LifecycleAdvanceComplete>(correlation);
+            advance(&mut booted, 83_335, correlation);
         }
 
         assert_eq!(
             motion.try_iter().collect::<Vec<_>>(),
-            [Heard::Tick(Tick { delta_micros: 83_335 }), Heard::Shutdown],
+            [Heard::Tick(Tick { delta_micros: 83_335, elapsed_micros: 83_335 }), Heard::Shutdown],
             "Tick carries its time and the terminal stage broadcasts its signal"
+        );
+    }
+
+    /// Advance the cap once with `delta_micros` as an external session
+    /// correlated by `correlation`, and return once its
+    /// `LifecycleAdvanceComplete` reply is sent. The wait is on the advance's
+    /// root and then the cap's own `Settled` notice, never a clock.
+    fn advance(booted: &mut Booted, delta_micros: u32, correlation: u64) {
+        let root = booted.request(&LifecycleAdvance { delta_micros }, correlation);
+        booted.driver.settle(&[root]);
+        booted.driver.pump_until("the advance's settlement notice", |state| state.pending.is_none());
+        booted.reply::<LifecycleAdvanceComplete>(correlation);
+    }
+
+    /// A frame's delta joins the total once, on the advance that broadcasts
+    /// `Tick`. The desktop driver and the substrate harness pass one frame's
+    /// delta on all three advances of the frame; a total that grew on each
+    /// would run game time three times too fast.
+    #[test]
+    fn a_frame_delta_joins_the_total_once_across_its_three_advances() {
+        let mut booted = boot_lifecycle(frame_lifecycle_params().graph);
+        let (heard, ticks) = mpsc::channel();
+        booted.spawn_listener("clock", heard);
+        let subscribed = booted.subscribe(LifecycleSubscription::Tick(listener("clock").narrow()), 1);
+        assert!(matches!(subscribed, LifecycleSubscribeResult::Ok));
+
+        for correlation in 2..8 {
+            advance(&mut booted, 16_667, correlation);
+        }
+
+        assert_eq!(
+            ticks.try_iter().collect::<Vec<_>>(),
+            [
+                Heard::Tick(Tick { delta_micros: 16_667, elapsed_micros: 16_667 }),
+                Heard::Tick(Tick { delta_micros: 16_667, elapsed_micros: 33_334 }),
+            ],
+            "two frames of three advances each add two deltas"
+        );
+    }
+
+    /// The cap adds a stated delta whole. Headless states its timer period
+    /// and a harness states a duration, so neither is a stall; a limit left
+    /// in the cap would shorten the second a test advanced without a word.
+    #[test]
+    fn a_stated_delta_of_one_second_is_added_whole() {
+        let mut booted = boot_lifecycle(tick_graph());
+        let (heard, ticks) = mpsc::channel();
+        booted.spawn_listener("clock", heard);
+        let subscribed = booted.subscribe(LifecycleSubscription::Tick(listener("clock").narrow()), 1);
+        assert!(matches!(subscribed, LifecycleSubscribeResult::Ok));
+
+        advance(&mut booted, 1_000_000, 2);
+
+        assert_eq!(
+            ticks.try_iter().collect::<Vec<_>>(),
+            [Heard::Tick(Tick { delta_micros: 1_000_000, elapsed_micros: 1_000_000 })],
         );
     }
 

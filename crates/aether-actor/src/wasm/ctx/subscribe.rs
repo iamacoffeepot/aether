@@ -5,9 +5,11 @@ use aether_data::Kind;
 
 use super::WasmCtx;
 use crate::model::ctx::reply_mode::ReplyMode;
-use crate::model::{CallerAddressable, Contract, DependencyResolver, DependsOn, Publishes, SilentRow, Singleton};
+use crate::model::{
+    CallerAddressable, Contract, DependencyResolver, DependsOn, Publishes, SentBy, SilentRow, Singleton,
+};
 
-impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
+impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
     /// Subscribe this actor to kind `K` from publisher `P` (ADR-0232 §3),
     /// inheriting the handler's causal chain like [`Self::send`]. A window
     /// subscribe covers every window.
@@ -17,7 +19,9 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// actor's handler for `K` is silent or unchecked (ADR-0231 §8): a published
     /// event has no one waiting for a reply. The erased ctx has no subscribe
     /// verb. The body is a flat send of the request `P` builds
-    /// ([`Publisher::subscribe_request`](crate::Publisher::subscribe_request)).
+    /// ([`Publisher::subscribe_request`](crate::Publisher::subscribe_request)),
+    /// so it carries the flat send's sender bound for that request kind
+    /// (ADR-0231 §11).
     ///
     /// Its consumers include the bundle probe fixture's `wire`.
     pub fn subscribe<P, K: Kind>(&mut self)
@@ -26,6 +30,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         P::Resolver: DependencyResolver,
         A: DependsOn<P> + Contract<K>,
         <A as Contract<K>>::Reply: SilentRow,
+        P::Subscribe: SentBy<A, P>,
     {
         self.send::<P>(&P::subscribe_request::<K>());
     }
@@ -40,6 +45,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         P: Publishes<K> + Singleton + CallerAddressable,
         P::Resolver: DependencyResolver,
         A: DependsOn<P>,
+        P::Unsubscribe: SentBy<A, P>,
     {
         self.send::<P>(&P::unsubscribe_request::<K>());
     }

@@ -1,12 +1,12 @@
-use aether_kinds::{keycode, mouse_button};
+use crate::{keycode, mouse_button};
 use winit::event::{ElementState, MouseButton as WinitMouseButton, MouseScrollDelta};
 use winit::keyboard::KeyCode;
 
 /// Translate a winit `KeyCode` into the engine's stable named-key u32
-/// space (`aether_kinds::keycode`). Returns `None` for any key the
+/// space (`aether_window::keycode`). Returns `None` for any key the
 /// engine doesn't name yet — the event then drops at the source rather
 /// than leaking winit's unstable discriminants onto the wire. Adding
-/// a new key is a paired change: a constant in `aether-kinds::keycode`
+/// a new key is a paired change: a constant in `aether-window::keycode`
 /// plus an arm here.
 pub(super) fn map_winit_keycode(k: KeyCode) -> Option<u32> {
     Some(match k {
@@ -299,7 +299,7 @@ mod tests {
     }
 
     // Tripwire: the five text-editing navigation keys must translate to
-    // their paired stable `aether_kinds::keycode` constant — the desktop
+    // their paired stable `aether_window::keycode` constant — the desktop
     // window actor's sole bridge from winit's unstable `KeyCode` discriminants
     // onto the wire.
     #[test]

@@ -5,9 +5,8 @@
 use super::*;
 
 use crate::server::shard::HttpDispatchShard;
-use aether_actor::{ErasedActorRef, HandlesKind, Single};
+use aether_actor::{Anyone, ErasedActorRef, HandlesKind, Single};
 use aether_substrate::Subname;
-use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 
 /// One socket retained by the supervisor while its dispatch shards are
@@ -57,7 +56,7 @@ pub enum ShardStartup {
     Idle,
     Starting {
         remaining: usize,
-        next_to_stage: Option<usize>,
+        next_to_stage: StageCursor,
         slots_by_index: Vec<ShardSlot>,
         pending_peers: VecDeque<PendingPeer>,
     },
@@ -66,6 +65,31 @@ pub enum ShardStartup {
         next_shard: usize,
     },
     Failed,
+}
+
+/// Staging cursor for lazy shard birth: the next index to stage, or
+/// `Exhausted` once every index has staged. Take-and-restore across
+/// handler turns is replaced by an in-place match that assigns the next
+/// case.
+pub enum StageCursor {
+    Next(usize),
+    Exhausted,
+}
+
+/// One shard attempt's outcome: `Ready` carries the staged sink its birth
+/// proved, `Failed` names the attempt that did not.
+pub enum ShardSpawnOutcome {
+    Ready(ShardSink),
+    Failed,
+}
+
+/// Supervisor accept-thread lifecycle: `Disabled` when no socket was
+/// bound, `Running` while the accept loop owns the socket, `Joined`
+/// after teardown joined it. A repeat teardown refuses itself.
+pub enum AcceptThread {
+    Disabled,
+    Running(JoinHandle<()>),
+    Joined,
 }
 
 /// State transition produced by one shard attempt. The final transition owns
@@ -107,7 +131,7 @@ pub struct HttpSupervisorState {
     pub live_connections: Arc<AtomicUsize>,
     pub listener_port: u16,
     pub accept_shutdown: Arc<AtomicBool>,
-    pub accept_thread: Option<JoinHandle<()>>,
+    pub accept_thread: AcceptThread,
     /// The supervisor's own sidecar channel: the accept thread posts
     /// [`InboundEvent::PeerAccepted`] here; nothing else feeds it.
     pub inbound_rx: mpsc::Receiver<InboundEvent>,
@@ -128,10 +152,6 @@ pub struct HttpSupervisorState {
     /// `Drop` deregisters, so the map is both the dedup guard and the
     /// RAII anchor.
     pub monitors: HashMap<ErasedActorRef, MonitorHandle>,
-    /// Mailboxes whose monitor attempt failed — remembered so the
-    /// `route holder is not monitorable` warn fires once per mailbox,
-    /// not once per route.
-    pub unmonitorable: HashSet<ErasedActorRef>,
 }
 
 /// Dispatch-shard state (ADR-0135): today's whole per-connection machine —
@@ -235,13 +255,12 @@ impl HttpSupervisorState {
             live_connections: Arc::new(AtomicUsize::new(0)),
             listener_port: 0,
             accept_shutdown: Arc::new(AtomicBool::new(false)),
-            accept_thread: None,
+            accept_thread: AcceptThread::Disabled,
             inbound_rx,
             wake_dirty: Arc::new(AtomicBool::new(false)),
             shard_startup: ShardStartup::Idle,
             next_stream_id: Arc::new(AtomicU64::new(0)),
             monitors: HashMap::new(),
-            unmonitorable: HashSet::new(),
         }
     }
 
@@ -262,7 +281,7 @@ impl HttpSupervisorState {
 
     /// Wake this supervisor for its next private `HttpInboundReady` turn,
     /// which stages one shard per transactional owner batch.
-    fn schedule_shard_wake<A>(ctx: &NativeCtx<'_, A, Single>) {
+    fn schedule_shard_wake<A>(ctx: &NativeCtx<'_, A, Anyone, Single>) {
         ctx.self_wake::<HttpInboundReady>().wake(&HttpInboundReady::default());
     }
 
@@ -275,13 +294,13 @@ impl HttpSupervisorState {
     /// caller then ends the handler so its birth flushes as an independent
     /// batch. A follow-up wake is always scheduled: it stages the next index,
     /// or resumes ordinary accepted-peer draining after the last index.
-    pub fn stage_next_shard(&mut self, ctx: &mut NativeCtx<'_, HttpServerCapability, Single>) -> bool {
-        let index = match &mut self.shard_startup {
-            ShardStartup::Starting { next_to_stage, .. } => next_to_stage.take(),
-            ShardStartup::Idle | ShardStartup::Ready { .. } | ShardStartup::Failed => None,
-        };
-        let Some(index) = index else {
-            return false;
+    pub fn stage_next_shard(&mut self, ctx: &mut NativeCtx<'_, HttpServerCapability, Anyone, Single>) -> bool {
+        let index = match &self.shard_startup {
+            ShardStartup::Starting { next_to_stage: StageCursor::Next(index), .. } => *index,
+            ShardStartup::Starting { next_to_stage: StageCursor::Exhausted, .. }
+            | ShardStartup::Idle
+            | ShardStartup::Ready { .. }
+            | ShardStartup::Failed => return false,
         };
 
         let (seed, channel) = self.shard_seed();
@@ -301,14 +320,18 @@ impl HttpSupervisorState {
                 error = ?error,
                 "http dispatch shard preparation failed",
             );
-            let settlement = self.finish_shard_spawn(index, None);
+            let settlement = self.finish_shard_spawn(index, ShardSpawnOutcome::Failed);
             self.apply_shard_settlement(ctx, settlement);
         }
 
-        if let ShardStartup::Starting { next_to_stage, slots_by_index, .. } = &mut self.shard_startup
-            && index + 1 < slots_by_index.len()
-        {
-            *next_to_stage = Some(index + 1);
+        if let ShardStartup::Starting { next_to_stage, slots_by_index, .. } = &mut self.shard_startup {
+            let has_next = index + 1 < slots_by_index.len();
+            let cursor = if has_next {
+                StageCursor::Next(index + 1)
+            } else {
+                StageCursor::Exhausted
+            };
+            *next_to_stage = cursor;
         }
         Self::schedule_shard_wake(ctx);
         true
@@ -320,7 +343,7 @@ impl HttpSupervisorState {
         let (inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
         let wake_dirty = Arc::new(AtomicBool::new(false));
         let seed = HttpShardSeed {
-            inbound_rx: Some(inbound_rx),
+            inbound_rx,
             inbound_tx: inbound_tx.clone(),
             wake_dirty: Arc::clone(&wake_dirty),
             routes: Arc::clone(&self.routes),
@@ -354,7 +377,7 @@ impl HttpSupervisorState {
     /// Record one synchronous or authoritative shard result. Completions may
     /// arrive out of index order; the final compaction always walks the slots
     /// in deterministic index order.
-    pub fn finish_shard_spawn(&mut self, index: usize, sink: Option<ShardSink>) -> ShardSettlement {
+    pub fn finish_shard_spawn(&mut self, index: usize, outcome: ShardSpawnOutcome) -> ShardSettlement {
         let finished = match &mut self.shard_startup {
             ShardStartup::Starting { remaining, slots_by_index, .. } => {
                 let Some(slot) = slots_by_index.get_mut(index) else {
@@ -363,7 +386,10 @@ impl HttpSupervisorState {
                 if !matches!(slot, ShardSlot::Pending | ShardSlot::Staged(_)) {
                     return ShardSettlement::Stale;
                 }
-                *slot = sink.map_or_else(|| ShardSlot::Failed, ShardSlot::Ready);
+                *slot = match outcome {
+                    ShardSpawnOutcome::Ready(sink) => ShardSlot::Ready(sink),
+                    ShardSpawnOutcome::Failed => ShardSlot::Failed,
+                };
                 *remaining -= 1;
                 *remaining == 0
             }
@@ -400,9 +426,9 @@ impl HttpSupervisorState {
     /// the lifecycle authoritative. Ready drains retained sockets FIFO;
     /// Failed returns one controlled `503` per retained socket. Pending and
     /// stale attempts perform no side effect.
-    pub fn apply_shard_settlement<A, M: ReplyMode>(
+    pub fn apply_shard_settlement<A, S, M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut NativeCtx<'_, A, S, M>,
         settlement: ShardSettlement,
     ) {
         match settlement {
@@ -442,9 +468,9 @@ impl HttpSupervisorState {
         }
     }
 
-    fn dispatch_ready_peer<A, M: ReplyMode>(
+    fn dispatch_ready_peer<A, S, M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut NativeCtx<'_, A, S, M>,
         stream: TcpStream,
         peer: SocketAddr,
     ) {
@@ -466,7 +492,7 @@ impl HttpSupervisorState {
     /// sockets and supervisor-owned pending sockets. The first peer starts
     /// lazy staging; later peers stay FIFO in `Starting`; only `Ready` may
     /// post into a child sink.
-    pub fn assign_peer<A>(&mut self, ctx: &mut NativeCtx<'_, A, Single>, stream: TcpStream, peer: SocketAddr) {
+    pub fn assign_peer<A>(&mut self, ctx: &mut NativeCtx<'_, A, Anyone, Single>, stream: TcpStream, peer: SocketAddr) {
         let live = self.live_connections.load(Ordering::Acquire);
         let pending = self.pending_peer_count();
         if live.saturating_add(pending) >= self.config.max_connections {
@@ -489,7 +515,7 @@ impl HttpSupervisorState {
                 pending_peers.push_back(PendingPeer { stream, peer });
                 self.shard_startup = ShardStartup::Starting {
                     remaining: count,
-                    next_to_stage: Some(0),
+                    next_to_stage: StageCursor::Next(0),
                     slots_by_index: (0..count).map(|_| ShardSlot::Pending).collect(),
                     pending_peers,
                 };
@@ -531,7 +557,7 @@ impl HttpSupervisorState {
     pub fn register_route(
         &mut self,
         prefix: &str,
-        method: Option<HttpMethod>,
+        method: MethodFilter,
         holder: RouteMember,
         shared: bool,
     ) -> RegisterRouteResult {
@@ -540,44 +566,16 @@ impl HttpSupervisorState {
 
     /// Monitor the proven route holder `subscriber` on its first route claim
     /// so the cap purges its routes itself when the holder closes (ADR-0079
-    /// §8 amended).
+    /// §8).
     ///
-    /// An `Err` (an actor outside the registry, or a spawner-less test
-    /// binding) means "not monitorable", and the claim still stands: the
-    /// route lives until substrate teardown. That is harmless for a mailbox
-    /// that never goes away, and *not* harmless for a wasm trampoline, which
-    /// closes on `DropComponent` — an unmonitored route then keeps
-    /// dispatching at a mailbox that drops every request, so the cap answers
-    /// `502` to that prefix for the rest of the process. Nothing recovers it, because the notice that would have
-    /// purged the route is the one that never arrives.
-    ///
-    /// So the failure is logged rather than discarded (issue 4195): the
-    /// symptom it produces is indistinguishable from a lost `MonitorNotice`,
-    /// and without this line neither branch leaves any trace to tell them
-    /// apart.
-    pub fn watch<A, M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, A, M>, subscriber: ErasedActorRef) {
-        // A monitor that already failed for this mailbox will fail again — the
-        // condition is a property of the target, not of the attempt — so the
-        // second route it registers must not re-report it.
-        if self.unmonitorable.contains(&subscriber) {
-            return;
-        }
-        let Entry::Vacant(slot) = self.monitors.entry(subscriber) else {
-            return;
-        };
-        match ctx.monitor(subscriber) {
-            Ok(handle) => {
-                slot.insert(handle);
-            }
-            Err(error) => {
-                self.unmonitorable.insert(subscriber);
-                tracing::warn!(
-                    target: "aether_http::server",
-                    holder = %ctx.actor_path(subscriber),
-                    ?error,
-                    "route holder is not monitorable; its routes cannot be purged when it departs",
-                );
-            }
+    /// The monitor never fails. A holder that closed before its claim was
+    /// handled is noticed at once: the notice arrives after the claiming
+    /// handler returns, by which time the route is in the table, and purges
+    /// it. Without that a closed holder's prefix would answer `502` for the
+    /// rest of the process.
+    pub fn watch<A, S, M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, A, S, M>, subscriber: ErasedActorRef) {
+        if let Entry::Vacant(slot) = self.monitors.entry(subscriber) {
+            slot.insert(ctx.monitor(subscriber));
         }
     }
 
@@ -593,7 +591,7 @@ impl HttpSupervisorState {
     pub fn unregister_route(
         &mut self,
         prefix: &str,
-        method: Option<HttpMethod>,
+        method: MethodFilter,
         holder: ErasedActorRef,
     ) -> RegisterRouteResult {
         unregister_route(&self.routes, prefix, method, holder)
@@ -706,16 +704,7 @@ impl HttpShardState {
 
         self.connections.insert(
             conn_id,
-            ConnState {
-                peer,
-                write_half,
-                shutdown,
-                control_tx,
-                active_stream: None,
-                reader_thread: Some(thread),
-                ws_pending_key: None,
-                websocket: None,
-            },
+            ConnState { peer, write_half, shutdown, control_tx, phase: ConnPhase::Idle, reader_thread: thread },
         );
         tracing::debug!(
             target: "aether_http::server",
@@ -734,10 +723,10 @@ impl HttpShardState {
     /// covers the dispatch-to-delivery gap.
     pub fn dispatch_prepared<A: HandlesKind<Settled>>(&mut self, ctx: &mut NativeCtx<'_, A>, request: PreparedRequest) {
         let PreparedRequest { conn_id, payload, handler, method, keep_alive, ws_key } = request;
-        if ws_key.is_some()
+        if let Some(key) = ws_key
             && let Some(conn) = self.connections.get_mut(&conn_id)
         {
-            conn.ws_pending_key = ws_key;
+            conn.phase = ConnPhase::UpgradePending(key);
         }
         let Some(mail_id) = ctx.send_encoded_detached_to(handler.router, &payload) else {
             return;
@@ -835,7 +824,7 @@ impl HttpShardState {
     }
 
     pub fn close_connection(&mut self, conn_id: ConnId, reason: &str) {
-        let Some(mut conn) = self.connections.remove(&conn_id) else {
+        let Some(conn) = self.connections.remove(&conn_id) else {
             return;
         };
         self.release_connection_slot();
@@ -844,7 +833,8 @@ impl HttpShardState {
         // Detach the reader without joining inline — the dispatcher must
         // not block on it. The thread sees the shutdown (or its own EOF)
         // and exits; the JoinHandle drop detaches.
-        drop(conn.reader_thread.take());
+        let peer = conn.peer;
+        drop(conn);
         // Tear down any response stream bound to this connection (ADR-0128).
         // The socket shutdown above unblocks a write-blocked writer; dropping
         // the sender (in `teardown_stream`) unblocks a recv-blocked one.
@@ -864,7 +854,7 @@ impl HttpShardState {
         tracing::debug!(
             target: "aether_http::server",
             conn = conn_id,
-            peer = %conn.peer,
+            peer = %peer,
             reason,
             "http conn closed",
         );

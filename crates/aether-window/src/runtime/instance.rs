@@ -8,8 +8,8 @@ use super::{BootError, NativeActor, NativeCtx, NativeInitCtx};
 use crate::{
     ApplyWindowCommand, ApplyWindowCommandResult, CloseWindow, CloseWindowResult, FocusWindow, FocusWindowResult,
     RequestWindowRedraw, RequestWindowRedrawResult, RetireWindow, SetWindowCursor, SetWindowCursorResult,
-    SetWindowMenu, SetWindowMenuResult, SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
-    WindowCapability, WindowCommand, WindowInstance,
+    SetWindowMenu, SetWindowMenuResult, SetWindowMode, SetWindowModeResult, SetWindowPresentation,
+    SetWindowPresentationResult, SetWindowTitle, SetWindowTitleResult, WindowCapability, WindowCommand, WindowInstance,
 };
 
 /// State of one forwarding endpoint. It keeps none: each public request's
@@ -26,6 +26,7 @@ pub struct WindowInstanceState;
 enum WindowForwardContext {
     Close(Held<CloseWindowResult>),
     SetMode(Held<SetWindowModeResult>),
+    SetPresentation(Held<SetWindowPresentationResult>),
     SetTitle(Held<SetWindowTitleResult>),
     SetMenu(Held<SetWindowMenuResult>),
     SetCursor(Held<SetWindowCursorResult>),
@@ -35,10 +36,11 @@ enum WindowForwardContext {
 
 impl WindowForwardContext {
     /// Answer the held request with its own command's `Err`, carrying `error`.
-    fn refuse<A, M: ReplyMode>(self, ctx: &mut NativeCtx<'_, A, M>, error: String) {
+    fn refuse<A, S, M: ReplyMode>(self, ctx: &mut NativeCtx<'_, A, S, M>, error: String) {
         match self {
             Self::Close(held) => held.answer(ctx, &CloseWindowResult::Err { error }),
             Self::SetMode(held) => held.answer(ctx, &SetWindowModeResult::Err { error }),
+            Self::SetPresentation(held) => held.answer(ctx, &SetWindowPresentationResult::Err { error }),
             Self::SetTitle(held) => held.answer(ctx, &SetWindowTitleResult::Err { error }),
             Self::SetMenu(held) => held.answer(ctx, &SetWindowMenuResult::Err { error }),
             Self::SetCursor(held) => held.answer(ctx, &SetWindowCursorResult::Err { error }),
@@ -68,7 +70,7 @@ fn forward<R: HeldReply>(
 /// `ApplyWindowCommandResult`, so a stray one must not stop it. A result whose
 /// variant does not match the stored context still answers the held request,
 /// with that request's own `Err` naming the mismatch, so the debt is paid.
-fn complete<A, M: ReplyMode>(ctx: &mut NativeCtx<'_, A, M>, result: ApplyWindowCommandResult) {
+fn complete<A, S, M: ReplyMode>(ctx: &mut NativeCtx<'_, A, S, M>, result: ApplyWindowCommandResult) {
     let Some(context) = ctx.take_context::<WindowForwardContext>() else {
         return;
     };
@@ -82,6 +84,9 @@ fn complete<A, M: ReplyMode>(ctx: &mut NativeCtx<'_, A, M>, result: ApplyWindowC
             }
         }
         (ApplyWindowCommandResult::SetMode(reply), WindowForwardContext::SetMode(held)) => held.answer(ctx, &reply),
+        (ApplyWindowCommandResult::SetPresentation(reply), WindowForwardContext::SetPresentation(held)) => {
+            held.answer(ctx, &reply);
+        }
         (ApplyWindowCommandResult::SetTitle(reply), WindowForwardContext::SetTitle(held)) => held.answer(ctx, &reply),
         (ApplyWindowCommandResult::SetMenu(reply), WindowForwardContext::SetMenu(held)) => held.answer(ctx, &reply),
         (ApplyWindowCommandResult::SetCursor(reply), WindowForwardContext::SetCursor(held)) => {
@@ -105,6 +110,7 @@ impl WindowForwardContext {
         match self {
             Self::Close(_) => <CloseWindow as aether_data::Kind>::NAME,
             Self::SetMode(_) => <SetWindowMode as aether_data::Kind>::NAME,
+            Self::SetPresentation(_) => <SetWindowPresentation as aether_data::Kind>::NAME,
             Self::SetTitle(_) => <SetWindowTitle as aether_data::Kind>::NAME,
             Self::SetMenu(_) => <SetWindowMenu as aether_data::Kind>::NAME,
             Self::SetCursor(_) => <SetWindowCursor as aether_data::Kind>::NAME,
@@ -142,6 +148,20 @@ impl NativeActor for WindowInstance {
             ctx,
             WindowCommand::SetMode { mode: mail.mode, width: mail.width, height: mail.height },
             WindowForwardContext::SetMode,
+        )
+    }
+
+    /// Ask the manager to change how this window presents its frames.
+    #[handler::request]
+    fn on_set_presentation(
+        _state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        mail: SetWindowPresentation,
+    ) -> Pending<SetWindowPresentationResult> {
+        forward(
+            ctx,
+            WindowCommand::SetPresentation { presentation: mail.presentation },
+            WindowForwardContext::SetPresentation,
         )
     }
 
@@ -210,8 +230,8 @@ mod tests {
 
     use crate::runtime::subscribers::fixture::Rig;
     use crate::{
-        ApplyWindowCommandResult, CreateWindow, CreateWindowResult, SetWindowTitle, SetWindowTitleResult,
-        WindowCapability, WindowInstance, WindowMode, WindowSpec,
+        ApplyWindowCommandResult, CreateWindow, CreateWindowResult, SetWindowPresentationResult, SetWindowTitle,
+        SetWindowTitleResult, WindowCapability, WindowInstance, WindowMode, WindowPresentation, WindowSpec,
     };
 
     /// Any actor may send a window endpoint an `ApplyWindowCommandResult`, so
@@ -222,8 +242,13 @@ mod tests {
     #[test]
     fn a_stray_manager_result_is_dropped_and_the_window_still_answers() {
         let mut rig = Rig::synthetic();
-        let spec =
-            WindowSpec { name: "main".to_owned(), title: "Main".to_owned(), mode: WindowMode::Windowed, size: None };
+        let spec = WindowSpec {
+            name: "main".to_owned(),
+            title: "Main".to_owned(),
+            mode: WindowMode::Windowed,
+            size: None,
+            presentation: WindowPresentation::Display,
+        };
         rig.send(&CreateWindow { spec });
         assert!(matches!(rig.reply::<CreateWindowResult>(), CreateWindowResult::Ok { .. }), "the window opens");
         let main = rig
@@ -231,8 +256,15 @@ mod tests {
             .child::<WindowCapability, WindowInstance>(rig.manager(), LoadName::new("main").expect("fixture name"))
             .expect("the window child is live");
 
-        let stray = ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Ok { title: "stray".to_owned() });
-        rig.send_to(main, &stray);
+        let strays = [
+            ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Ok { title: "stray".to_owned() }),
+            ApplyWindowCommandResult::SetPresentation(SetWindowPresentationResult::Ok {
+                presentation: WindowPresentation::Uncapped,
+            }),
+        ];
+        for stray in &strays {
+            rig.send_to(main, stray);
+        }
         rig.send_to(main, &SetWindowTitle { title: "after".to_owned() });
 
         assert_eq!(

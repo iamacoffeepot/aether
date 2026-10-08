@@ -90,8 +90,9 @@ enum Commands {
     Docs(DocsArgs),
     /// Emit the shippable depot layout (ADR-0163 §1): the chassis binary,
     /// the workspace license files, a persisted `pack/manifest`, and
-    /// content-addressed component objects under `pack/objects/<sha256>`.
-    /// The Steam depot is this directory uploaded verbatim.
+    /// content-addressed objects under `pack/objects/<sha256>`: the
+    /// components boot loads and the named objects a running engine reads
+    /// by path. The Steam depot is this directory uploaded verbatim.
     Package(PackageArgs),
     /// Run one typed mechanical-verify command (`verify.fmt`,
     /// `verify.clippy`, `verify.docs`, `verify.test`, `verify.dup`,

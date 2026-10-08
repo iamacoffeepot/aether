@@ -5,14 +5,14 @@
 // as any other architectural change.
 
 use core::str::from_utf8;
+use std::borrow::Cow;
 
-use aether_actor::{__LiveRoute, __PublishedRows, __ResolvedPath, AssetCatalog};
+use aether_actor::{__ActorPath, __LiveRoute, __PublishedRows, __ResolvedPath};
 use aether_codec::frame::max_frame_size;
 use aether_data::{BlobHash, ErasedActorPath, MAX_READ_BYTES, wire};
 use wasmtime::{Caller, Linker};
 
-use crate::actor::native::{BlobCheckIn, ResolvePathError};
-use crate::actor::wasm::asset_manifest::LoadWindow;
+use crate::actor::native::ResolvePathError;
 use crate::actor::wasm::component::GuestAnswer;
 use crate::actor::wasm::component::{ComponentCtx, StateBundle};
 use crate::actor::wasm::reply_table::{ReplyEntry, ReplyMail};
@@ -507,6 +507,16 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         caller.data().reply_correlation()
     })?;
 
+    // HOST_FN_OK: ADR-0002 / issue 7627. A guest's `ctx.now()` reads the
+    // engine's actor clock. It cannot be a mail capability: a handler needs
+    // the answer before it returns, to measure its own work, and a reply
+    // arrives only after it has. The read exposes no engine state beyond
+    // elapsed time since the clock's anchor, and it is the clock a native
+    // actor's `NativeCtx::now` reads.
+    linker.func_wrap("aether", "now_nanos_p32", |caller: Caller<'_, ComponentCtx>| -> u64 {
+        caller.data().now_nanos()
+    })?;
+
     // HOST_FN_OK: ADR-0002 / issue 531. The ActorInitError plumbing
     // can't ride a mail sink because mail is not dispatched until
     // the component finishes booting — the `init` FFI call itself
@@ -537,17 +547,18 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         caller.data_mut().init_failure = Some(msg);
     })?;
 
-    // ADR-0081 §7: `log_event_p32` re-fires a guest `tracing::*` event
+    // ADR-0081 §7: `log_event_p32` dispatches a guest `tracing::*` event
     // on the host side. `ForwardingSubscriber::event` calls this (via the
     // installed log sink) per event
     // (no buffer, no flush hop — the pre-ADR-0081 `LogBatch` route
-    // retired alongside `LogCapability`). The host re-emits via
-    // `emit_host_event` on the trampoline's dispatcher thread, where
-    // the `ActorAwareLayer` is already stamped against the
-    // trampoline's `ActorSlots` and lands the entry in the
-    // trampoline's `ActorLogRing`. Bytes are copied out of guest
-    // memory before the call returns; OOB or missing-memory drops
-    // silently.
+    // retired alongside `LogCapability`). The host checks the level
+    // before reading guest memory, then dispatches via
+    // `emit_host_event` on the trampoline's dispatcher thread: the
+    // filter and the stderr layer see the event, and the
+    // `ActorAwareLayer`, already stamped against the trampoline's
+    // `ActorSlots`, lands the entry in the trampoline's
+    // `ActorLogRing`. Text is borrowed from guest memory for the call;
+    // OOB or missing-memory drops silently.
     //
     // HOST_FN_OK: ADR-0081 §7 — log emission is intentionally a host
     // fn, not a mail sink. The mail surface is the *query* path
@@ -565,89 +576,48 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          target_len: u32,
          message_ptr: u32,
          message_len: u32| {
+            if !log_install::guest_level_enabled(level) {
+                return;
+            }
             let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
                 return;
             };
             let data = memory.data(&caller);
-            let copy = |ptr: u32, len: u32| -> Option<String> {
+            let text = |ptr: u32, len: u32| -> Option<Cow<'_, str>> {
                 let start = ptr as usize;
                 let end = start.checked_add(len as usize)?;
                 if end > data.len() {
                     return None;
                 }
-                Some(String::from_utf8_lossy(&data[start..end]).into_owned())
+                Some(String::from_utf8_lossy(&data[start..end]))
             };
-            let Some(target) = copy(target_ptr, target_len) else {
+            let Some(target) = text(target_ptr, target_len) else {
                 return;
             };
-            let Some(message) = copy(message_ptr, message_len) else {
+            let Some(message) = text(message_ptr, message_len) else {
                 return;
             };
             log_install::emit_host_event(level, &target, &message);
         },
     )?;
 
-    // HOST_FN_OK: ADR-0163 §3 asset load window (#3984). This cannot be a
-    // native capability addressed by mail: `asset` is a synchronous read
-    // inside the guest's own `init` / `wire`, and the bytes live host-side
-    // in the module file — the guest must pull them across the FFI at that
-    // instant and get them back into its own linear memory. That is the
-    // same host-mediated byte-transport shape as config delivery into
-    // `init` (ADR-0090) and mail delivery into `receive`, none of which a
-    // mail-round-trip capability can express. The surface is window-scoped
-    // (traps after `wire`), so it grows no persistent capability.
+    // HOST_FN_OK: ADR-0250 module-held assets. This cannot be a native
+    // capability addressed by mail: the read is synchronous inside the
+    // guest's own hook, and a mail round trip cannot answer inside it. It is
+    // the one name-to-blob lookup behind the guest's `Assets::asset` and
+    // `Assets::asset_blob`, and it moves no payload byte into guest memory:
+    // the guest gets a handle, and the bytes stay where the module's asset
+    // blob already sits in the store.
     //
-    // Pull one asset's bytes through the load window: the guest passes the
-    // asset name (a slice in guest memory), the host looks it up in the
-    // `LoadWindow` installed on the ctx, allocates a buffer in guest memory
-    // through the guest's own `realloc_p32`, writes the bytes, and returns
-    // the ADR-0163 packed `(ptr << 32) | len`. Encoding:
-    //   - `ASSET_NOT_FOUND` (`u64::MAX`) — the window is open but carries
-    //     no asset by that name; the guest maps it to `None`.
-    //   - any other value — `(ptr << 32) | len`, a live guest buffer the
-    //     SDK copies out and frees. An empty asset answers `0` (no buffer,
-    //     length 0), distinct from the not-found sentinel.
-    // A call after the window closed (post-`wire`) or with no window at all
-    // traps, so the type-fence (`asset` lives only on the init/wire ctx) is
-    // backed by a loud runtime failure for a hand-rolled guest, never a
-    // silent empty. Not-found vs closed is thus a returned sentinel vs a
-    // trap — two unambiguous outcomes. A catalogued asset fetched by an
-    // instance spawned without its module's bytes, whose window holds no
-    // code to read it from, also traps, naming the two doors that bring
-    // them: a spawn with its code, and a load (ADR-0163 §4).
-    linker.func_wrap(
-        "aether",
-        "asset_fetch_p32",
-        |mut caller: Caller<'_, ComponentCtx>, name_ptr: u32, name_len: u32| -> wasmtime::Result<u64> {
-            let name = read_guest_utf8(&mut caller, name_ptr, name_len)?;
-            let bytes = open_load_window(caller.data_mut(), "asset_fetch")?
-                .fetch(&name)
-                .map_err(|error| wasmtime::Error::msg(format!("asset_fetch: {error}")))?;
-            bytes.map_or_else(|| Ok(ASSET_NOT_FOUND), |bytes| deliver_bytes_to_guest(&mut caller, &bytes))
-        },
-    )?;
-
-    // HOST_FN_OK: ADR-0163 §3 asset load window — the blob sibling of
-    // `asset_fetch_p32` above, backing the guest's `AssetWindow::asset_blob`.
-    // It cannot be a native capability addressed by mail for the same
-    // reason: the read is synchronous inside the guest's own `init` / `wire`,
-    // and a mail round trip cannot answer inside `wire`. Unlike the fetch it
-    // moves no payload byte into guest memory: the guest gets a handle, and
-    // the bytes stay where the module's code already sits in the store.
-    //
-    // Take the asset named by `(name_ptr, name_len)` as a view of its range
-    // of the module's code (ADR-0238 decision 8), place the view in this
-    // instance's blob table with one hold, write its 32-byte hash at
-    // `hash_out_ptr`, and return its length. The SDK builds a `Blob` over
-    // that hash whose `GuestHold` owns the hold, exactly the value a tag-1
-    // decode produces, so `blob_read_p32` reads it, a send resolves it and
-    // `blob_drop_p32` gives it back. `ASSET_BLOB_NOT_FOUND` (`-1`), with
-    // nothing held or written, means the window is open but carries no asset
-    // by that name.
-    //
-    // The window rules are the fetch's: a call with no window, after the
-    // window closed, or for a catalogued asset on a window spawned without
-    // its module's bytes traps, as does a `hash_out_ptr` outside guest memory.
+    // Take the asset named by `(name_ptr, name_len)` as the module's own
+    // blob, place it in this instance's blob table with one hold (`hold_entry`
+    // rather than a pin, because only `receive` drops pins), write its 32-byte
+    // hash at `hash_out_ptr`, and return its length. The SDK builds a `Blob`
+    // over that hash whose `GuestHold` owns the hold, exactly the value a
+    // tag-1 decode produces, so `blob_read_p32` reads it, a send resolves it
+    // and `blob_drop_p32` gives it back. `ASSET_BLOB_NOT_FOUND` (`-1`), with
+    // nothing held or written, means the module carries no asset by that
+    // name. A `hash_out_ptr` outside guest memory traps.
     linker.func_wrap(
         "aether",
         "asset_blob_p32",
@@ -657,16 +627,12 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          hash_out_ptr: u32|
          -> wasmtime::Result<i64> {
             let name = read_guest_utf8(&mut caller, name_ptr, name_len)?;
-            let ctx = caller.data_mut();
-            let blobs = BlobCheckIn::new(ctx.binding.mailer().blob_store().clone());
-            let asset = open_load_window(ctx, "asset_blob")?
-                .fetch_blob(&blobs, &name)
-                .map_err(|error| wasmtime::Error::msg(format!("asset_blob: {error}")))?;
+            let asset = caller.data().module.manifest().assets().section(&name).map(|section| section.blob.clone());
             let Some(asset) = asset else {
                 return Ok(ASSET_BLOB_NOT_FOUND);
             };
             let entry = store_entry(&asset)
-                .ok_or_else(|| wasmtime::Error::msg("asset_blob: the load window served a blob outside the store"))?;
+                .ok_or_else(|| wasmtime::Error::msg("asset_blob: the module served a blob outside the store"))?;
 
             let memory = caller
                 .get_export("memory")
@@ -678,28 +644,18 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         },
     )?;
 
-    // HOST_FN_OK: ADR-0163 §3 (#3984) — the catalog companion of the
-    // asset_fetch pull above, backing the guest's `AssetCatalog::assets()`
-    // (the `AssetWindow: AssetCatalog` supertrait). Same host-mediated
-    // byte-transport rationale; a mail capability cannot serve a
-    // synchronous in-`wire` read into guest memory. Returns the window's
-    // catalog as a wire-encoded `Vec<AssetInfo>` delivered like
-    // `asset_fetch_p32`; an empty catalog encodes to a valid empty
-    // sequence (no sentinel). Unlike `asset_fetch`, this reads the catalog
-    // metadata retained past `close()`, so it answers for the instance's
-    // life; it traps only when no window was ever installed.
+    // HOST_FN_OK: ADR-0250 — the one listing of the module's assets, backing
+    // the guest's `Assets::assets()`. Same host-mediated byte-transport
+    // rationale; a mail capability cannot serve a synchronous read into guest
+    // memory. Returns the module's catalog as a wire-encoded `Vec<AssetInfo>`
+    // delivered into a guest buffer; an empty catalog encodes to a valid empty
+    // sequence (no sentinel). The guest asks once per instance.
     linker.func_wrap(
         "aether",
         "asset_catalog_p32",
         |mut caller: Caller<'_, ComponentCtx>| -> wasmtime::Result<u64> {
-            let bytes = {
-                let ctx = caller.data();
-                let Some(window) = ctx.load_window.as_ref() else {
-                    return Err(wasmtime::Error::msg("asset_catalog: this component has no asset load window"));
-                };
-                wire::to_vec(window.assets())
-                    .map_err(|e| wasmtime::Error::msg(format!("asset_catalog: encode failed: {e}")))?
-            };
+            let bytes = wire::to_vec(caller.data().module.manifest().asset_catalog())
+                .map_err(|e| wasmtime::Error::msg(format!("asset_catalog: encode failed: {e}")))?;
             deliver_bytes_to_guest(&mut caller, &bytes)
         },
     )?;
@@ -804,6 +760,78 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         },
     )?;
 
+    // HOST_FN_OK: ADR-0231 §11 — the guest half of the native
+    // `NativeCtx::actor_path` read: the position of a reference the guest
+    // holds goes in, and the canonical path of the route record there comes
+    // out. It closes the one direction the address reads left open:
+    // `resolve_path_p32`, `live_route_p32`, and `route_rows_p32` take a path,
+    // `published_rows_p32` takes a position and answers rows, and this takes
+    // a position and answers the path. The host reads it through
+    // `NativeBinding::actor_path_at`, the `Registry::actor_path_at` read the
+    // native `actor_path` makes, so the guest and native answers cannot drift
+    // apart.
+    //
+    // Its one caller is a guest dispatch arm that refuses a sender its
+    // handler's ctx sender requirement does not admit. The arm
+    // names that sender in the error it logs and in the `PathRefused` a
+    // request's reply is built from, inside the same dispatch, before the
+    // handler would have run, so no mail can serve the read. No guest ctx
+    // verb exposes it.
+    //
+    // The guest passes the position. The host encodes the answer as one
+    // `__ActorPath` — the canonical path of the route record there, and none
+    // for a position that holds no record — and delivers it as the packed
+    // `(ptr << 32) | len`, like `published_rows_p32`. The path is the name
+    // `describe_component` and every reply's sender already expose, and the
+    // host mints nothing, so a guest that passes an arbitrary position gets
+    // no reference from it.
+    linker.func_wrap(
+        "aether",
+        "actor_path_p32",
+        |mut caller: Caller<'_, ComponentCtx>, position: u64| -> wasmtime::Result<u64> {
+            let path = caller.data().binding.actor_path_at(MailboxId(position)).map(|path| path.to_string());
+            let bytes = wire::to_vec(&__ActorPath { path })
+                .map_err(|error| wasmtime::Error::msg(format!("actor_path: encode failed: {error}")))?;
+            deliver_bytes_to_guest(&mut caller, &bytes)
+        },
+    )?;
+
+    // HOST_FN_OK: ADR-0231 §3 (#7501) — a guest's decode proves a
+    // `ProtocolPath<P>` inside `init` (its config) or a handler (its mail),
+    // synchronously, before the decoded value exists, which no mail can
+    // serve. The host reads the rows of the route standing under exactly the
+    // path's canonical name through `NativeBinding::route_rows`, the
+    // `Registry::route_rows` read a native decode makes through
+    // `impl PublishedRoutes for Registry`, and the guest applies the one
+    // coverage rule, `DecodeCtx::prove_route_covers`, so the guest and native
+    // proofs cannot drift apart.
+    //
+    // The guest passes the path text (a slice in guest memory). The host
+    // encodes the answer as one `__PublishedRows` — the rows of a `Live` or
+    // `Dropped` route, and none for a `Starting` one, a never-registered
+    // path, or a fold collision — and delivers it as the packed
+    // `(ptr << 32) | len`, like `published_rows_p32`. A `Dropped` route
+    // answers, where `published_rows_p32` and `live_route_p32` do not: names
+    // are never reused, so a closed actor's path still proves its type, and
+    // the receiver's `resolve` answers "not live". The rows are what
+    // `describe_component` already exposes and the host mints nothing. An
+    // out-of-bounds pointer, text that is not UTF-8, or text outside the
+    // ADR-0166 grammar traps: the SDK passes only a typed path's text.
+    linker.func_wrap(
+        "aether",
+        "route_rows_p32",
+        |mut caller: Caller<'_, ComponentCtx>, path_ptr: u32, path_len: u32| -> wasmtime::Result<u64> {
+            let text = read_guest_utf8(&mut caller, path_ptr, path_len)?;
+            let path = ErasedActorPath::new(&text).map_err(|error| {
+                wasmtime::Error::msg(format!("route_rows: the text is not an ADR-0166 actor path: {error}"))
+            })?;
+            let answer = __PublishedRows { rows: caller.data().binding.route_rows(&path).map(|rows| rows.to_vec()) };
+            let bytes = wire::to_vec(&answer)
+                .map_err(|error| wasmtime::Error::msg(format!("route_rows: encode failed: {error}")))?;
+            deliver_bytes_to_guest(&mut caller, &bytes)
+        },
+    )?;
+
     // HOST_FN_OK: ADR-0238 decisions 2 and 9 — a guest's decode builds a
     // `Blob` over a tag-1 hash inside its handler, synchronously, and the
     // value's `GuestHold` must own a hold before the decode returns, which no
@@ -894,6 +922,105 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         }
     })?;
 
+    // HOST_FN_OK: ADR-0079 §8 — a guest watches an actor it holds a typed
+    // reference to inside a handler or `wire`, synchronously: the SDK stores
+    // the watch's context under the id this call returns, so the registration
+    // and its id have to exist before that handler returns. Mail to an engine
+    // actor would start the watch at an unknown time after the handler that
+    // needs it, and no actor owns the lifecycle table to receive it.
+    //
+    // The guest passes the target's position, its own dispatch identity as
+    // `from`, and `tag`, the tag of the type it watched the target through. The host
+    // returns the watch's id: the standing one when that watcher, target, and
+    // watched type are already watched, with nothing else changed, and
+    // otherwise a new id from the mailbox's send-correlation sequence. A
+    // pair's first watch registers through `MonitorHandle::register`, the
+    // registration `NativeCtx::monitor` makes, so a target that had already
+    // closed is noticed by the same mail; a later watch of the pair through
+    // another type adds a row and registers nothing.
+    //
+    // `from` is resolved the way a send's is (`resolve_dispatch_identity`): a
+    // claim outside this cluster watches as the component itself, so a guest
+    // cannot watch in another actor's name. A watcher that is a staged
+    // inline-child alias has no route yet, and its watch waits for one
+    // (ADR-0247 rule 6); so does every watch a held candidate makes
+    // (ADR-0241 §7).
+    //
+    // The call never fails for a reference the SDK can hold. `target` must be
+    // a position that holds a route record, the read `ctx.sender()` mints
+    // through, or one of this instance's own aliases, staged or published.
+    // Any other position is one no SDK reference names, so it traps, as
+    // `resolve_path_p32` does for input the SDK never passes.
+    linker.func_wrap(
+        "aether",
+        "watch_p32",
+        |mut caller: Caller<'_, ComponentCtx>, target: u64, from: u64, tag: u64| -> wasmtime::Result<u64> {
+            let ctx = caller.data_mut();
+            let target = MailboxId(target);
+            let routed = ctx.binding.stamped_sender(target).is_some();
+            let nameable = routed || is_own_cluster_alias(ctx, target);
+            if !nameable {
+                return Err(wasmtime::Error::msg(format!(
+                    "watch: {target} holds no route record and is no alias of this component"
+                )));
+            }
+
+            let watcher = resolve_dispatch_identity(ctx, MailboxId(from));
+            Ok(ctx.watch(watcher, target, tag))
+        },
+    )?;
+
+    // HOST_FN_OK: ADR-0079 §8 — the release half of `watch_p32` above, with
+    // the same reason: the SDK discards the watch's stored context on this
+    // call's answer, inside the handler that asked, so the answer has to be
+    // synchronous.
+    //
+    // Ends the watch `watch` names and answers `1`, dropping its pair's
+    // registration with the pair's last watch. A number that names no watch
+    // of this mailbox, a request id among them, changes nothing and answers
+    // `0`, so the SDK leaves the shared context table alone. A held
+    // candidate's release of a watch it carried is recorded and applied when
+    // it commits (ADR-0241 §7).
+    linker.func_wrap("aether", "unwatch_p32", |mut caller: Caller<'_, ComponentCtx>, watch: u64| -> u32 {
+        let ended = caller.data_mut().unwatch(watch);
+        if !ended {
+            tracing::debug!(
+                target: "aether_substrate::component",
+                watch,
+                component = %caller.data().actor_name(),
+                "unwatch: no such watch; nothing released",
+            );
+        }
+        u32::from(ended)
+    })?;
+
+    // HOST_FN_OK: ADR-0079 §8 — a guest's departure-notice arm has to learn
+    // which of its watches the notice ends inside the dispatch that delivers
+    // it, before it takes that watch's context and calls the handler. The
+    // notice carries no id (it is the mail a native watcher handles), and the
+    // host's table is the only place that has watcher, target, and watched
+    // type together, so no mail can answer this.
+    //
+    // The arm calls it once per watched type the actor has a handler for,
+    // with the notice's sender as `target` and its own dispatch identity as
+    // `watcher`. It ends the watch `watcher` holds on `target` through the
+    // watched type `tag` names and returns its id, or `0` when no such watch stands: the
+    // watch was released, a later notice already ended it, or the claimed
+    // watcher is not this component or one of its aliases.
+    linker.func_wrap(
+        "aether",
+        "watch_ended_p32",
+        |mut caller: Caller<'_, ComponentCtx>, target: u64, watcher: u64, tag: u64| -> u64 {
+            let ctx = caller.data_mut();
+            let watcher = MailboxId(watcher);
+            let own = watcher == ctx.sender || is_own_cluster_alias(ctx, watcher);
+            if !own {
+                return 0;
+            }
+            ctx.end_watch(watcher, MailboxId(target), tag).unwrap_or(0)
+        },
+    )?;
+
     Ok(())
 }
 
@@ -906,33 +1033,10 @@ fn read_guest_hash(caller: &mut Caller<'_, ComponentCtx>, hash_ptr: u32) -> Resu
     Ok(BlobHash::from_bytes(bytes))
 }
 
-/// The open load window `host_fn` reads an asset's payload through, or the
-/// trap it answers with when this component has no window or the window has
-/// closed. `asset_fetch_p32` and `asset_blob_p32` share it, so the two verbs
-/// cannot disagree about when the window serves.
-fn open_load_window<'a>(ctx: &'a mut ComponentCtx, host_fn: &str) -> wasmtime::Result<&'a mut LoadWindow> {
-    let Some(window) = ctx.load_window.as_mut() else {
-        return Err(wasmtime::Error::msg(format!("{host_fn}: this component has no asset load window")));
-    };
-    if !window.is_open() {
-        return Err(wasmtime::Error::msg(format!(
-            "{host_fn}: called outside the load window — asset payload access ends when `wire` returns \
-             (ADR-0163 §3)"
-        )));
-    }
-    Ok(window)
-}
-
-/// `asset_blob_p32`'s return for "the load window is open but carries no
-/// asset by the requested name": negative, so it is no length. The guest
-/// maps it to `None`.
+/// `asset_blob_p32`'s return for "the module carries no asset by the
+/// requested name": negative, so it is no length. The guest maps it to
+/// `None`.
 pub const ASSET_BLOB_NOT_FOUND: i64 = -1;
-
-/// ADR-0163 packed-return marker for "the load window is open but carries
-/// no asset by the requested name" — distinct from a real `(ptr << 32) |
-/// len` (a 4 GiB asset at pointer `0xFFFF_FFFF` is impossible under the
-/// frame and address bounds). The guest maps it to `None`.
-const ASSET_NOT_FOUND: u64 = u64::MAX;
 
 /// Alignment the asset delivery buffer is allocated with. Byte payloads
 /// need no alignment, so `1` keeps the guest's free (`realloc_bytes(ptr,

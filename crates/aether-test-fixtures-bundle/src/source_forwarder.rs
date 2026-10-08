@@ -10,7 +10,8 @@
 //! The forward makes this actor the component origin, so the observer's
 //! `ctx.sender()` proves the forwarder, and the observer's reply, routed to
 //! that same stamped origin, lands back here, where it is logged with the
-//! report's `had_sender` verdict — the property `aether-component`'s
+//! report's `had_sender` verdict and whether the response handler read the
+//! observer as its sender — the property `aether-component`'s
 //! source-attribution scenario asserts.
 //!
 //! A second actor rather than a self-dependency: the observer is loaded twice
@@ -42,12 +43,20 @@ impl WasmActor for SourceForwarder {
         ctx.send_to(observer, &SourceQuery);
     }
 
-    /// Log the observer's reply with its `had_sender` verdict. The reply goes
-    /// to the origin the host stamped on the query, the one the observer's
-    /// `ctx.sender()` read, so the arrival here shows that origin was this
-    /// forwarder.
+    /// Log the observer's reply with its `had_sender` verdict and whether this
+    /// handler's own `ctx.sender()` is the observer that replied. The reply
+    /// goes to the origin the host stamped on the query, the one the
+    /// observer's `ctx.sender()` read, so the arrival here shows that origin
+    /// was this forwarder.
     #[handler::response]
-    fn on_source_report(&mut self, _ctx: &mut WasmCtx<'_>, report: SourceReport) {
-        tracing::info!(target: "test.source_forwarder", "source_report_received had_sender={}", report.had_sender);
+    fn on_source_report(&mut self, ctx: &mut WasmCtx<'_, SourceForwarder>, report: SourceReport) {
+        let observer = ctx.actor_ref::<SourceObserver>().erase();
+        let replier_is_observer = ctx.sender() == Some(observer);
+
+        tracing::info!(
+            target: "test.source_forwarder",
+            "source_report_received had_sender={} replier_is_observer={replier_is_observer}",
+            report.had_sender,
+        );
     }
 }

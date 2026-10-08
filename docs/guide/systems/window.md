@@ -29,6 +29,7 @@ aether-chassis-desktop
               ├── monitored pooled WindowInstance children
               └── DesktopWindowIntegration // semantic chassis seam
                     ├── attach/detach render target
+                    ├── set a target's presentation
                     ├── mark windows dirty
                     └── request process shutdown
 ```
@@ -59,14 +60,14 @@ window (see below). A window whose proof the caller holds takes them directly:
 lookup in actor code.
 
 ```rust
-use aether_kinds::{Key, WindowMode};
+use aether_kinds::WindowMode;
 use aether_window::{
-    CreateWindow, ListWindows, RequestWindowRedraw, SetWindowTitle, WindowCapability, WindowSizeRequest,
-    WindowSpec,
+    CreateWindow, Key, ListWindows, RequestWindowRedraw, SetWindowTitle, WindowCapability, WindowPresentation,
+    WindowSizeRequest, WindowSpec,
 };
 
 // In an `#[actor(depends(WindowCapability))]` block.
-fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
     ctx.send::<WindowCapability>(&ListWindows);
     ctx.send::<WindowCapability>(&CreateWindow {
         spec: WindowSpec {
@@ -74,12 +75,14 @@ fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
             title: "Inspector".to_owned(),
             mode: WindowMode::Windowed,
             size: Some(WindowSizeRequest { width: 960, height: 540 }),
+            presentation: WindowPresentation::Display,
         },
     });
     ctx.subscribe::<WindowCapability, Key>();
 
     ctx.send::<WindowCapability>(&SetWindowTitle { title: "Aether".to_owned() });
     ctx.send::<WindowCapability>(&RequestWindowRedraw);
+    Ok(())
 }
 ```
 
@@ -102,6 +105,7 @@ The request/reply families are:
 | subscribe/unsubscribe | manager; selector and subscription (event kind and subscriber path), or selector and kind for the `_self` forms | acknowledgement |
 | `close` | named child; no input | acknowledgement |
 | `set_mode` | named child; mode and optional windowed size | resolved mode and size |
+| `set_presentation` | named child; `WindowPresentation` | the presentation now in force, or `Err` naming the modes the surface offers |
 | `set_title` | named child; title | applied title |
 | `set_menu` | named child; `Vec<WindowMenu>` | acknowledgement, or `Err` where the platform has no bar |
 | `set_cursor` | named child; `CursorIcon` | acknowledgement |
@@ -111,6 +115,20 @@ The request/reply families are:
 A window endpoint that closes while one of its commands is still in flight
 answers that command's `Err`. The manager answers a pending create's `Err` the
 same way.
+
+Two commands to the manager have no reply. `aether.window.take_key_focus`
+(`TakeKeyFocus { window, scope }`) makes the sending actor the key focus holder
+of the window it names, and `aether.window.release_key_focus`
+(`ReleaseKeyFocus { window }`) gives that up. The manager answers with two
+notices sent to the holder alone, never published to subscribers:
+`aether.window.key_focus_gained` and `aether.window.key_focus_lost`, each
+naming the window. While a window's slot is held, its key and text events go
+only to the key subscribers inside the holder's scope. A slot goes with its
+window: closing the window removes it and tells the holder. Key focus is
+distinct from `aether.window.focus`, which asks the operating system to bring
+a window forward; taking key focus neither raises nor focuses a window. The
+rules, the routing table, and who may take are in
+[Input streams](input.md#key-focus).
 
 `WindowSpec::name` is an immutable actor instance segment: it cannot be empty,
 contain whitespace or `:`, or duplicate a pending or live window name. The
@@ -123,7 +141,7 @@ apply it asynchronously, so the reply does not prove observed focus.
 There is no implicit focused or current target. The boot window is named
 `main` and is simply the first `WindowSpec` realized after winit resumes.
 
-The seven child operations may also be addressed to the manager, which
+The eight child operations may also be addressed to the manager, which
 re-dispatches them at the sole window when exactly one is live and answers with
 that window's own reply. It is a convenience for the single-window engine, not a
 current target: with no window, or with several, the manager replies the
@@ -140,25 +158,29 @@ sit beside it:
 ```
 
 A window is named by the canonical actor path of its child,
-`aether.window/aether.window.instance:<name>`, an `ErasedActorPath` that
-`aether_window::window_path` writes from the actor types. That same path keys
-manager state, render targets, input events, and `WindowSelector::One`; no
-field carries the child's mailbox position (ADR-0230). `capture_frame` also
-accepts the short form `aether.window/:<name>`, which the render capability
-proves and canonicalizes when the request arrives.
+`aether.window/aether.window.instance:<name>`, an `ActorPath<WindowInstance>`
+that `WindowInstance::path` writes from the actor types. That same typed path
+keys manager state and render targets, and every window kind carries it: input
+events, `WindowSelector::One`, and `InjectWindowEvent`. A `One` selector and an
+injected event refuse the short form and any path that is not a window's at
+decode. No field carries the child's mailbox position (ADR-0230).
+`capture_frame` still accepts the short form `aether.window/:<name>`, which the
+render capability proves and canonicalizes when the request arrives.
 
 `WindowInfo` reports:
 
 ```rust
 pub struct WindowInfo {
-    pub path: ErasedActorPath,
+    pub path: ActorPath<WindowInstance>,
     pub name: String,
     pub title: String,
     pub mode: WindowMode,
     pub width: u32,
     pub height: u32,
+    pub scale_factor: f32,
     pub focused: bool,
     pub occluded: bool,
+    pub presentation: WindowPresentation,
 }
 ```
 
@@ -166,6 +188,71 @@ pub struct WindowInfo {
 `FullscreenBorderless` follows the current monitor.
 `FullscreenExclusive { width, height, refresh_mhz }` must match a supported
 video mode exactly and fails instead of silently choosing another one.
+
+## Presentation
+
+A window chooses how its frames reach the screen. `WindowSpec::presentation`
+sets it at creation, `aether.window.set_presentation` changes it on a live
+window, and `aether.window.list` reports the value in force:
+
+```rust
+pub enum WindowPresentation {
+    Display,                                 // in step with the display
+    Uncapped,                                // as fast as frames are produced
+    Capped { frames_per_second: FrameRate }, // paced by the window event loop
+}
+```
+
+`Display` is what the boot window has: each frame's present waits for the
+display's refresh, so the window draws once per refresh. `Uncapped` presents
+without waiting, which is how a frame's real cost is seen. `Capped` also
+presents without waiting and is held to its rate by the event loop.
+`FrameRate` is 1 to 1000 inclusive, checked at construction and at decode, so
+there is no zero rate and no number that means uncapped. Over MCP:
+
+```json
+{"presentation": "Uncapped"}
+{"presentation": {"Capped": {"frames_per_second": 120}}}
+```
+
+**A refusal is an answer, never a fallback.** The surface is render's, and a
+surface offers only some present modes
+([Rendering](rendering.md) has the table). `Uncapped` and `Capped` both need
+a mode that does not wait for the display; a surface that offers none answers
+`set_presentation` with `Err` naming the modes it does offer, and the window
+keeps the presentation and the surface configuration it had. A cap is refused
+there for the same reason: above the refresh rate it could not be honoured. A
+`create` whose spec asks for a presentation the surface cannot serve is
+answered `Err` and leaves no window behind, as any failed attachment does.
+
+Because the surface belongs to render, the manager cannot answer
+`set_presentation` on its own turn. Like `close`, it queues a
+`WindowHostAction`, the application asks the integration, and the reply goes
+out once render has taken or refused the change.
+
+**`Capped` is paced by the event loop's own wait.** No thread sleeps. The
+application keeps, for each capped window, the instant its next frame is due.
+A capped window is asked to redraw, and joins a frame's window set, only once
+that instant has passed. While no visible window is due, the loop waits with
+winit's `ControlFlow::WaitUntil` on the earliest due instant, the same wait it
+uses for a capture deadline. The next due instant is one period after the
+previous one, which keeps the cadence when a frame starts a little late; when
+the loop stalled for more than a period it is one period after now, so the
+missed frames are not drawn in a burst.
+
+**Several windows share one engine frame.** One lifecycle cycle (`Tick`, then
+`Render`) serves every window in a frame. A frame runs when any visible window
+is due, and each window is drawn only in the frames it is due for. A frame
+that includes a `Display` window waits on that window's present, so an
+uncapped window beside it runs free only in the frames the `Display` window
+does not join. The time between ticks is therefore the time between engine
+frames, whichever window caused them.
+
+A chassis without a display composes no window capability, so there is no
+mailbox to send the verb to. The synthetic manager has no surface and no
+clock: it stores the presentation and reports it in `aether.window.list`,
+accepts every value for a live window, and refuses an unknown one. Frames in a
+harness stay driven by explicit advances.
 
 ## Window-originated streams
 
@@ -178,13 +265,14 @@ component holding keys or buttons releases them when it reports `false`:
 
 ```rust
 // In an `#[actor(depends(WindowCapability))]` block.
-fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
     ctx.subscribe::<WindowCapability, WindowOpened>();
     ctx.subscribe::<WindowCapability, WindowSize>();
     ctx.send::<WindowCapability>(&SubscribeWindowSelf {
         selector: WindowSelector::One(self.viewport),
         kind: MouseMove::ID,
     });
+    Ok(())
 }
 ```
 
@@ -226,7 +314,8 @@ starts fresh external-event roots for outbound mail. Native operations that
 need winit's `ActiveEventLoop`, such as window creation, are returned as host
 actions and applied after the actor turn.
 
-Render receives only semantic attachment and dirty-window calls. It owns one
+Render receives only semantic attachment, presentation, and dirty-window
+calls. It owns one
 surface/configuration bundle per window path; the window manager owns native
 window lifecycle and asks the integration to attach or detach the
 corresponding render target. The native `Arc<Window>` remains same-thread host
@@ -425,8 +514,9 @@ Synthetic injection is not a production API: `aether.window.inject_event`
 exists only in a build that compiles the `synthetic` feature in, which no
 production chassis enables.
 
-To add a window-originated event, define the kind with a `window:
-ErasedActorPath` field, add it to the `published_window_kinds!` list in
+To add a window-originated event, define the kind in
+`crates/aether-window/src/kinds/input.rs` with a `window:
+ActorPath<WindowInstance>` field, add it to the `published_window_kinds!` list in
 `crates/aether-window/src/lib.rs`, which writes its `Publishes` impl,
 `WindowSubscription` variant, typed subscriber set, and dispatch arms, and emit
 it from window state. Do not add a chassis kind cache or a generic input

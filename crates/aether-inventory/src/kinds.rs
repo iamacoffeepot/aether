@@ -5,7 +5,7 @@
 //! The `aether.inventory` mailbox serves the per-build reverse-lookup
 //! inventory over mail so an out-of-process observer (the MCP harness)
 //! reads the running substrate's *own* state instead of a drift-prone
-//! compiled-in copy. Five request kinds:
+//! compiled-in copy. Six request kinds:
 //!
 //! - [`Manifest`] → the compile-time manifest: every declared
 //!   `NameEntry` + every instanced-family `TemplateEntry`. Templates keep
@@ -18,6 +18,7 @@
 //!   canonical or ADR-0166 short actor address.
 //! - [`ListKinds`] → the engine's live kind vocabulary (ADR-0091).
 //! - [`ListHandlers`] → the native handler manifest (ADR-0109 §5).
+//! - [`ListMemory`] → what the engine holds, by owner.
 //!
 //! The link-time `aether_data::name_inventory::{NameEntry, TemplateEntry,
 //! ParamKind}` are `&'static` (not wire types), so the shapes here are
@@ -252,4 +253,60 @@ pub struct ListHandlers {}
 #[aether_data::kind(name = "aether.inventory.handlers_result")]
 pub struct HandlersResult {
     pub handlers: Vec<HandlerEntryWire>,
+}
+
+/// `aether.inventory.memory` — request what the running engine holds, by
+/// owner. Empty payload; the request *is* the signal. Mailed to the
+/// `"aether.inventory"` mailbox; reply: [`ListMemoryResult`].
+///
+/// A debug overlay asks about once a second and draws the rows. Building
+/// the reply takes the engine's memory ledger lock once and reads the
+/// process's size from the platform, so it is not a per-frame question.
+#[aether_data::kind(name = "aether.inventory.memory")]
+pub struct ListMemory {}
+
+/// The blob store's three byte counts. `slab_bytes` is part of
+/// `resident_bytes`, and `slab_member_bytes` is the live part of
+/// `slab_bytes`, so the three are never summed: `slab_bytes -
+/// slab_member_bytes` is what slabs retain for entries already dropped.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlobStoreBytes {
+    /// Every owned entry's bytes plus every live slab, each counted once.
+    pub resident_bytes: u64,
+    /// Every live slab's bytes.
+    pub slab_bytes: u64,
+    /// Every live slab entry's bytes.
+    pub slab_member_bytes: u64,
+}
+
+/// One owner's bytes under one label.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct OwnerBytes {
+    /// The owner's actor path (`aether.render`, `aether.kit.camera:main`),
+    /// or its ADR-0064 tagged id text when the registry holds no name for
+    /// it.
+    pub owner: String,
+    /// What the bytes are: `linear memory` for a wasm component, `textures`
+    /// and `geometry` for the render capability.
+    pub label: String,
+    pub bytes: u64,
+}
+
+/// Reply to [`ListMemory`]: what the engine held when it was asked.
+///
+/// `process_bytes` is the whole process's resident set size, `None` on a
+/// platform with no reader. `owners` is one row per owner and label, sorted
+/// by owner then label: each live wasm component's linear memory (a
+/// component and its inline children share one memory and one row), and the
+/// render capability's staged textures and geometry. The rows do not sum to
+/// `process_bytes`: what no owner counts (the engine's own heap, render
+/// targets, pipelines, per-frame and instance buffers, audio) is in the
+/// process number only, and device memory may sit outside it.
+///
+/// No `Err` arm: the reply reads counters, so there is no failure to report.
+#[aether_data::kind(name = "aether.inventory.memory_result")]
+pub struct ListMemoryResult {
+    pub process_bytes: Option<u64>,
+    pub blob_store: BlobStoreBytes,
+    pub owners: Vec<OwnerBytes>,
 }

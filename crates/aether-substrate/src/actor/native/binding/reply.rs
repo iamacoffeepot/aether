@@ -9,6 +9,9 @@ use crate::mail::attachments::EncodedMail;
 use crate::mail::{MailId, Source};
 use aether_data::wire::{self, HeldClaim, HeldLedger};
 use aether_data::{ActorMail, Kind, KindId, RequestId};
+use aether_kinds::DecodeRefused;
+
+use crate::mail::{MailboxId, SourceAddr};
 
 impl NativeBinding {
     /// Reply path for native actors (ADR-0080 §5 / #1695). Mints the
@@ -61,6 +64,33 @@ impl NativeBinding {
         let correlation = self.reply_lineage.mint();
         let reply_id = MailId::new(self.self_mailbox(), correlation);
         self.mailer.send_reply_envelope(sender, kind, payload, Some(reply_id), root, parent);
+    }
+
+    /// The actor a refusal made before a handler ran is answered to
+    /// (ADR-0231 §3, §11), or `None` when the refused mail's reply target
+    /// `sender` does not opt in. It opts in when it is an actor that asked
+    /// under a correlation and its published contract carries a
+    /// [`DecodeRefused`] row.
+    ///
+    /// The opt-in is the target's own declared handler, which only the RPC
+    /// server declares: a wire payload is untrusted and its caller cannot
+    /// read actor logs. Every other sender is typed code, so a refusal it
+    /// causes is a bug the refuser's log records, and it hears nothing.
+    ///
+    /// Its callers are the native ctx's decode and sender refusals and the
+    /// wasm guest ctx's, for a guest arm that refused its sender.
+    pub(crate) fn refusal_listener(&self, sender: Source) -> Option<MailboxId> {
+        let SourceAddr::Component(target) = sender.addr else {
+            return None;
+        };
+        if sender.correlation_id == Source::NO_CORRELATION {
+            return None;
+        }
+        self.mailer
+            .registry()
+            .published_contract(target)
+            .is_some_and(|contract| contract.handles(DecodeRefused::ID))
+            .then_some(target)
     }
 
     /// Store request context for a just-minted outbound request, warning
@@ -153,7 +183,7 @@ impl HeldLedger for NativeParkLedger<'_> {
 mod tests {
     use std::sync::mpsc;
 
-    use aether_actor::{ErasedActorRef, MailSender, OutboundReply, Unchecked};
+    use aether_actor::{Anyone, ErasedActorRef, MailSender, OutboundReply, Unchecked};
     use aether_kinds::Tick;
 
     use super::*;
@@ -188,7 +218,7 @@ mod tests {
         }
 
         #[handler::unchecked(reason = "test: replies more than once")]
-        fn on_ask(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, ask: Ask) {
+        fn on_ask(&mut self, ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, ask: Ask) {
             for _ in 0..ask.replies {
                 ctx.reply(&Tick::default());
                 self.replied += 1;

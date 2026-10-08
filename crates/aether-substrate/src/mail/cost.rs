@@ -7,14 +7,16 @@
 // handler runs, and the dispatch fold writes the cell through that
 // actor's lock-free per-actor `CostCells` cache — on whichever worker is
 // dispatching it, exclusively) but *consumed* cross-thread — by the
-// `cost.tail` dump here, and by a future iamacoffeepot/aether#1178
-// producer-side `total_work` / `max_group_work` read at flush. Both reach the *same*
-// `Arc<CostCell>` through this global table.
+// `cost.tail` dump here, and by the iamacoffeepot/aether#1178
+// producer-side read at flush, which resolves each staged mail's cost
+// through `CostTable::lookup` to build `total_work` / `max_group_work`.
+// Both reach the *same* `Arc<CostCell>` through this global table.
 //
 // Mirrors the routing-sibling [`CapabilityRegistry`] (`capability.rs`):
 // `RwLock<HashMap<_, _>>` hung off the [`Mailer`](super::mailer::Mailer),
 // seeded/torn-down when an actor is constructed / replaced / dropped
-// (rare) and read on the cold dump — never on the per-dispatch fold
+// (rare) and read on the cold dump and once per producer flush (one
+// read-lock acquire for the whole flush) — never on the per-dispatch fold
 // (that runs lock-free through the per-actor cache). Keyed by
 // `(MailboxId, KindId)` so one mailbox's handler set is
 // contiguous-by-filter and the recruiter can sum a recipient group.
@@ -46,7 +48,7 @@ pub const EWMA_SHIFT: u32 = 4;
 /// (iamacoffeepot/aether#1128). The fold is single-writer-serialized by the
 /// actor lock (an actor dispatches on one thread at a time), so the RMW is a
 /// plain `load → compute → store` rather than a CAS loop; cross-thread
-/// readers (the `cost.tail` dump, the future #1178 recruiter) see an
+/// readers (the `cost.tail` dump, the #1178 recruiter's read at flush) see an
 /// eventually-consistent estimate. `Relaxed` throughout — no ordering is
 /// needed between the three cells, and it is zero-cost over a hypothetical
 /// plain `u64` on the target ISAs.
@@ -189,8 +191,8 @@ pub struct CostSample {
 /// (mirroring how the routing [`Registry`](super::registry::Registry)
 /// and [`CapabilityRegistry`](super::capability::CapabilityRegistry) are
 /// shared). The load / replace / drop hooks `seed` / `drop_mailbox`; the
-/// cold `cost.tail` dump and a future producer-side recruiter read `tail`
-/// / `cells_for`.
+/// cold `cost.tail` dump reads `tail`, and the producer-side recruiter reads
+/// `lookup` at each flush.
 #[derive(Debug, Default)]
 pub struct CostTable {
     cells: RwLock<HashMap<(MailboxId, KindId), CostEntry>>,
@@ -319,11 +321,9 @@ impl CostTable {
     }
 
     /// The shared `Arc<CostCell>`s for one `mailbox`, as `(kind, cell)`
-    /// pairs — the cross-actor read the global index exists for. A future
-    /// iamacoffeepot/aether#1178 recruiter sums these per recipient group
-    /// at the producer's flush (the per-actor caches are private to each
-    /// recipient's dispatch; this table is how a producer reads them).
-    /// Cold path — read lock.
+    /// pairs — the cross-actor read the global index exists for. The
+    /// flush-time read goes through [`Self::lookup`]; this slice is read by
+    /// tests that check which rows a mailbox holds. Read lock.
     ///
     /// # Panics
     /// Panics if the internal lock is poisoned (see [`Self::seed`]).
@@ -409,7 +409,7 @@ impl CostLookup<'_> {
     /// handler is absent — distinct from a *seeded-but-unrun* cell, which
     /// resolves to `Some` with `samples == 0`). The caller treats `None`
     /// and `samples == 0` alike — both are "unknown cost" — but the
-    /// distinction is preserved for the dump / future callers.
+    /// distinction is preserved for the dump.
     #[must_use]
     pub fn get(&self, mailbox: MailboxId, kind: KindId) -> Option<CostSample> {
         self.cells.get(&(mailbox, kind)).map(|entry| CostSample {

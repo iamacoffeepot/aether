@@ -46,7 +46,7 @@ Price every changed path outside the approved surface:
 1. Recompute the overflow at the approval base with `git diff --name-only --no-renames origin/main...<head>` and the resolver's changed mode.
 2. Verify the resolver's reported blobs against the frozen `Pricing policy:` and `Pricing matcher:` lines in the draft's `## Approval` section. When the lines are missing, state the derived blobs; when they differ, everything prices `human`. Apply the ADR override and the error → `human` rule.
 3. Settle each path by tier:
-   - **auto** — listed; settled by direct review.
+   - **auto** — listed; needs no further verdict.
    - **judge** — read the path's current-head diff against the Plan and record `ACCEPT` or `REJECT: <reason>`. Every one must be `ACCEPT`; a `REJECT` makes the draft ineligible unless the owner accepts it.
    - **human** — print the paths and stop for the owner's explicit confirmation naming this pull request. In a sweep, the first-turn plan lists the overflow so that confirmation covers it.
 4. Write the "Surface overflow" pull-request comment naming the head SHA and frozen blobs, with one `<path> — <tier> — <settlement>` line per overflow path, or "None." when there is no overflow. Edit the existing comment in place when present. The settlement is `listed` for auto, `ACCEPT` or `REJECT: <reason>` for judge, and `awaiting owner` or `confirmed by owner` for human.
@@ -59,9 +59,9 @@ Require every repository-required check for the current head to be completed suc
 
 ### Review and threads
 
-Read the closing issue body and effective editor and validate its canonical hidden direct-review records under the shared workflow contract. Require the last trusted record matching the issue number, current pull-request number, head SHA, and freshly recomputed Plan digest to say `APPROVE`. A native self-approval is impossible and is never this gate; a payload from an untrusted effective body editor is not authority, and an earlier-head or earlier-digest record is stale. Never accept a machine-formatted pull-request review or comment as semantic review authority.
+No review record is required: a green current head with no native change request and no unresolved thread passes this gate.
 
-Read paginated pull-request reviews only to evaluate native blockers separately. For each reviewer, take their newest non-dismissed native decision review (`APPROVED` or `CHANGES_REQUESTED`) across the pull request and require none to be `CHANGES_REQUESTED`; the request remains active across later commits until that reviewer approves or GitHub reports it dismissed, and a hidden semantic record cannot clear it. Enumerate threads through GraphQL and require every review thread resolved. A failed or truncated body-provenance/review/thread read is ineligible, never an empty set.
+Read paginated pull-request reviews to evaluate native blockers. For each reviewer, take their newest non-dismissed native decision review (`APPROVED` or `CHANGES_REQUESTED`) across the pull request and require none to be `CHANGES_REQUESTED`; the request remains active across later commits until that reviewer approves or GitHub reports it dismissed, and no issue-body record or comment can clear it. Enumerate threads through GraphQL and require every review thread resolved. A failed or truncated review or thread read is ineligible, never an empty set.
 
 ## Predict merge state
 
@@ -74,7 +74,7 @@ Use the pull request's REST mergeability fields as hints and compute locally fro
 
 On content conflict, stop and route the named draft to `$resolve <PR>`. Do not rewrite implementation, choose a resolution, or edit the branch from this skill.
 
-If the branch is behind but the platform can merge it cleanly, prefer direct squash merge after all gates. Only when branch protection or the merge API requires an up-to-date branch, require a clean owned worktree and unchanged remote head, then merge `origin/main` into the branch without rebasing, run `cargo fmt -- --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings`, commit the merge, and plain-push. Wait for the new head's CI, directly inspect and repair it, then append and re-read its hidden direct-review record through the shared file-backed, concurrent-edit-safe procedure. Re-price overflow and apply every landing gate again. If that merge produces content conflicts, run `git merge --abort` and route the pull request to `$resolve <PR>`.
+If the branch is behind but the platform can merge it cleanly, prefer direct squash merge after all gates. Only when branch protection or the merge API requires an up-to-date branch, require a clean owned worktree and unchanged remote head, then merge `origin/main` into the branch without rebasing, run `cargo fmt -- --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings`, commit the merge, and plain-push. Wait for the new head's CI and repair a red result. Re-price overflow and apply every landing gate again. If that merge produces content conflicts, run `git merge --abort` and route the pull request to `$resolve <PR>`.
 
 Never rebase or force-push from this skill.
 

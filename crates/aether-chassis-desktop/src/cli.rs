@@ -1,6 +1,7 @@
 //! The desktop chassis CLI root (ADR-0090 unit d, issue 1258). [`DesktopCli`]
 //! composes the shared [`CommonOverlay`] full-stack cap bundle with the
-//! desktop-only extras — audio, render tuning, window mode/title — and the
+//! desktop-only extras — audio, render tuning, window mode/title, the driver's
+//! frame delta limit — and the
 //! source-selecting [`ChassisMeta`] flags. The shared staging / flag-naming /
 //! help-forwarding machinery lives in `aether_chassis::cli`.
 
@@ -11,6 +12,8 @@ use aether_chassis::cli::{ChassisMeta, CommonOverlay};
 use aether_chassis::window::WindowOverlay;
 use aether_render::RenderTuningOverlay;
 use clap::Parser;
+
+use crate::driver::DesktopDriverOverlay;
 
 /// Desktop chassis CLI root.
 #[derive(Parser, Debug, Default, Clone, aether_substrate::StageArgv)]
@@ -37,6 +40,10 @@ pub struct DesktopCli {
     /// Desktop window knobs: `--window-mode`, `--window-title`.
     #[command(flatten)]
     pub window: WindowOverlay,
+    /// The desktop driver's own knob: `--desktop-max-frame-delta-micros`,
+    /// shadowing `AETHER_DESKTOP_MAX_FRAME_DELTA_MICROS`.
+    #[command(flatten)]
+    pub driver: DesktopDriverOverlay,
 
     /// The source-selecting meta flags (`--config` / `--print-config` /
     /// `--describe`); see [`ChassisMeta`].
@@ -47,4 +54,4 @@ pub struct DesktopCli {
 
 // Desktop composes the wgpu render cap, so its `RenderTuningConfig` overlay is
 // flattened only here, not into the shared `CommonOverlay` (issue 3882).
-chassis_cli!(DesktopCli { CommonOverlay, AudioOverlay, RenderTuningOverlay, WindowOverlay });
+chassis_cli!(DesktopCli { CommonOverlay, AudioOverlay, RenderTuningOverlay, WindowOverlay, DesktopDriverOverlay });

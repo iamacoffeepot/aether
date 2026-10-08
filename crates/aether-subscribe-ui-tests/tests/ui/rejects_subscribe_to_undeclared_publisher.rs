@@ -1,5 +1,5 @@
 use aether_actor::__macro_internals::{KindId, ReplyContract};
-use aether_actor::{Addressable, Contract, Contracts, Here, One, Row, Silent, WasmCtx};
+use aether_actor::{Addressable, Anyone, Contract, Contracts, HandlesKind, Here, One, Row, Silent, WasmCtx};
 use aether_kinds::Tick;
 use aether_lifecycle::LifecycleCapability;
 
@@ -15,8 +15,13 @@ impl Contracts for Subscriber {
     const CONTRACTS: &'static [(KindId, ReplyContract)] = &[];
 }
 
+impl HandlesKind<Tick> for Subscriber {
+    type Sender = Anyone;
+}
+
 impl Contract<Tick> for Subscriber {
     type Reply = Silent;
+    type Sender = Anyone;
     type Index = Here;
 }
 

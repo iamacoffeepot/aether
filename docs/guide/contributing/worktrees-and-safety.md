@@ -207,6 +207,23 @@ check source-level guardrails such as the divider-comment and PR-body rules.
 Because hook definitions are trust-recorded, new or changed hooks may need
 review in the active surface before they run.
 
+Four Claude Code hooks enforce the rule that
+[an agent ends at a wait](agent-workflow.md#an-agent-ends-at-a-wait). Each acts
+only on a subagent, which the harness marks with an `agent_id` on the hook
+input, and each refusal names the valid move:
+
+| Script | Event | Behavior |
+|---|---|---|
+| `check-agent-wait.sh` | before a Bash call | refuses a gate wait (`wave-status.sh --wait`, `gh run watch`, `gh pr checks --watch`, `agent-job.sh wait --until-done`), a loop that sleeps, a single sleep of four minutes or more, and a foreground timeout above 240000 milliseconds, for every agent type |
+| `check-agent-stop.sh` | when a subagent stops | refuses the stop while a background shell task that the agent itself started is still running |
+| `check-agent-resume.sh` | before a message to a subagent | refuses the message when the target has been idle past its cache lifetime of 300 seconds |
+| `record-agent-wait.sh` | after a Bash call | appends one line for a subagent call that ran five minutes or longer |
+
+Every refusal also appends a line to the same ledger,
+`.agents/ledger/agent-waits.jsonl` in the primary checkout, which is
+gitignored. The ledger measures the rule; a failed write never changes a
+verdict.
+
 Hooks are fallible local guardrails:
 
 - a hook subprocess cannot change the parent process's working directory;

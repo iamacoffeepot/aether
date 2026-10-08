@@ -13,8 +13,8 @@
 //! stream, so it is not part of this demo.
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_kinds::{Key, MouseButton, MouseMove};
 use aether_window::WindowCapability;
+use aether_window::{Key, MouseButton, MouseMove};
 
 pub struct InputLogger;
 
@@ -26,10 +26,11 @@ impl WasmActor for InputLogger {
         Ok(InputLogger)
     }
 
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.subscribe::<WindowCapability, Key>();
         ctx.subscribe::<WindowCapability, MouseMove>();
         ctx.subscribe::<WindowCapability, MouseButton>();
+        Ok(())
     }
 
     #[handler::event]

@@ -229,9 +229,10 @@ impl NativeActor for BundleDriver {
         })
     }
 
-    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         let startup = mem::take(&mut state.startup);
         state.perform(ctx, startup);
+        Ok(())
     }
 
     /// The held ticket is stored before the commands run, because the core
@@ -488,7 +489,7 @@ impl BundleDriverState {
     /// The wait holds no settlement chain: an armed timer waits on time, not
     /// on the work of whichever chain armed it, so a chain that sets a
     /// timer settles without waiting it out.
-    pub(crate) fn arm_tick<M: ReplyMode, A>(&self, ctx: &mut NativeCtx<'_, A, M>) {
+    pub(crate) fn arm_tick<M: ReplyMode, A, S>(&self, ctx: &mut NativeCtx<'_, A, S, M>) {
         let period = self.tick;
         let reply_to = ctx.reply_target();
         let _ = ctx.dispatch_blocking_resumed_with(None, reply_to, (), move || {

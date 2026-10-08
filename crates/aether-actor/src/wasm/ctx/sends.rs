@@ -2,7 +2,7 @@
 //! marker dropped, so a helper that only sends mail needs no `M: ReplyMode`
 //! parameter.
 //!
-//! [`WasmCtx<'_, A, M>`](WasmCtx) is generic over its reply class (ADR-0112,
+//! [`WasmCtx<'_, A, S, M>`](WasmCtx) is generic over its reply class (ADR-0112,
 //! ADR-0134) because the marker selects which reply surface the handler is
 //! allowed to reach: `reply` / `reply_to` exist only on `Unchecked`, not on
 //! `Single`. That is load-bearing at the handler
@@ -43,6 +43,7 @@ use crate::blob::guest::{EncodedGuestMail, encode_guest};
 use crate::model::ctx::Erased;
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::reply_mode::ReplyMode;
+use crate::model::{Anyone, CoveredBy};
 use crate::reference::Target;
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::{ChainMode, Registry};
@@ -68,7 +69,7 @@ pub struct Sends<'a, A = Erased> {
     _actor: PhantomData<fn() -> A>,
 }
 
-impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
+impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
     /// The reply-class-free view of this ctx's outbound surface (see
     /// [`Sends`]). Hand it to a helper that only sends mail, so the helper
     /// stays callable from a `single` and a `unchecked` handler alike
@@ -84,7 +85,10 @@ impl<A> Sends<'_, A> {
     /// causal chain. Identical to [`WasmCtx::send_to`]: an [`ActorRef<R>`](crate::ActorRef) is
     /// kind-checked against `K` and a [`ProtocolRef<P>`](crate::ProtocolRef) against the kinds
     /// `P` lists. An [`ErasedActorRef`](crate::ErasedActorRef) is not a target.
-    pub fn send_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K) {
+    pub fn send_to<K: ActorMail, I, T: Target<K, I>>(&mut self, target: T, payload: &K)
+    where
+        T::Sender: CoveredBy<A>,
+    {
         self.route::<K>(target.erased().id().0, encode_guest(payload), 1, ChainMode::Inherit);
     }
 
@@ -97,7 +101,7 @@ impl<A> Sends<'_, A> {
     }
 }
 
-// The same routing contract `MailSender for WasmCtx<'_, A, M>` implements — the
+// The same routing contract `MailSender for WasmCtx<'_, A, S, M>` implements — the
 // view routes through the same registry, so a helper handed a `Sends` sends
 // exactly what its caller would have sent.
 impl<A> MailSender for Sends<'_, A> {
@@ -105,7 +109,7 @@ impl<A> MailSender for Sends<'_, A> {
         mail::prev_correlation()
     }
 
-    fn send_detached_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K) {
+    fn send_detached_to<K: ActorMail, I>(&mut self, target: impl Target<K, I, Sender = Anyone>, payload: &K) {
         self.route::<K>(target.erased().id().0, encode_guest(payload), 1, ChainMode::Detached);
     }
 }

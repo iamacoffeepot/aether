@@ -11,8 +11,7 @@ fallback or omits the runtime.
 |---|---|---|---|
 | `aether.component` | publish, spawn, load, drop, list, describe wasm actor instances | `aether-component/src/component` | [Components](../systems/components.md) |
 | `aether.lifecycle` | frame stages, subscriptions, advance, shutdown | `aether-lifecycle/src` | [Frame lifecycle](../systems/lifecycle.md) |
-| `aether.render` | draw queues, textures/materials, view/projection, capture | `aether-render/src` | [Rendering](../systems/rendering.md) |
-| `aether.text` | font load, layout, batched text drawing, metrics | `aether-text/src` | [Text](../systems/text.md) |
+| `aether.render` | draw queues, textures/materials, fonts and text drawing, view/projection, capture | `aether-render/src` | [Rendering](../systems/rendering.md), [Text](../systems/text.md) |
 | `aether.audio` | instruments, notes, tracks, scheduling, gain/reverb | `aether-audio/src` | [Audio](../systems/audio.md) |
 | `aether.window` | multi-window lifecycle/control plus selector-aware keyboard, mouse, resize, text, and IME publication | `aether-window/src` | [Window](../systems/window.md), [Input](../systems/input.md) |
 | `aether.clipboard` | text get/set through system or in-memory backend | `aether-clipboard/src` | [Clipboard](../systems/clipboard.md) |
@@ -55,7 +54,7 @@ capability crate boundary or are genuinely cross-cutting:
 |---|---|
 | engine/component control | MCP and hub control need the same selectors/results |
 | inventory queries | `aether-mcp` must query without depending on native capability implementation |
-| lifecycle/window control and window-originated events | substrate/chassis-wide stage, identity, or compatibility vocabulary |
+| lifecycle/window control | substrate/chassis-wide stage, identity, or compatibility vocabulary |
 | trace/log/cost tails | common evidence projected across processes |
 | utility/diagnostics | ping/pong, unresolved-mail and monitor notices |
 
@@ -69,7 +68,6 @@ ownership before adding to the shared crate.
 |---|---|---|
 | `aether.kit.camera*` | camera/controller actors | [Rendering and camera](../systems/rendering.md) |
 | `aether.kit.mesh*` | DSL/OBJ loading and display | [Mesh authoring](../systems/mesh-authoring.md) |
-| `aether.widget*` | widgets, focus, scrolling, panel/editor composition | [Widgets](../systems/widgets.md) |
 
 These are hosted actor APIs. Their presence depends on which component export
 is built and loaded, not merely the native chassis.

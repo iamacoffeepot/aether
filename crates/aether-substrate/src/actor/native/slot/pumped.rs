@@ -32,8 +32,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::thread;
 
-use aether_actor::Single;
 use aether_actor::local::ActorSlots;
+use aether_actor::{Anyone, Single};
 
 use super::close::close;
 use super::dispatcher::dispatch_envelope;
@@ -162,12 +162,15 @@ where
     /// Always answers `Some`: a slot holds its actor until it drops.
     // Issue 4158: the ctx is typed by `A`, so a host turn can stage a child
     // under the pumped actor — the desktop window cap's create path does.
-    pub fn host_turn<R>(&mut self, turn: impl FnOnce(&mut A::State, &mut NativeCtx<'_, A, Single>) -> R) -> Option<R> {
+    pub fn host_turn<R>(
+        &mut self,
+        turn: impl FnOnce(&mut A::State, &mut NativeCtx<'_, A, Anyone, Single>) -> R,
+    ) -> Option<R> {
         let actor = self.actor.as_deref_mut()?;
         let binding = &self.binding;
         let slots = &self.slots;
         Some(local::with_stamped(slots, || {
-            let mut ctx = NativeCtx::<'_, A, Single>::new_for_actor(binding, Source::NONE, None, None);
+            let mut ctx = NativeCtx::<'_, A, Anyone, Single>::new_for_actor(binding, Source::NONE, None, None);
             turn(actor, &mut ctx)
         }))
     }
@@ -325,7 +328,9 @@ mod tests {
         const NAMESPACE: &'static str = "test.pumped.peer";
         type Resolver = One;
     }
-    impl HandlesKind<Poke> for Peer {}
+    impl HandlesKind<Poke> for Peer {
+        type Sender = Anyone;
+    }
 
     /// The toy actor the tests pump by hand. Its handlers exercise every
     /// dispatch path a pumped slot runs: a `-> R` reply, the framework
@@ -367,7 +372,7 @@ mod tests {
         }
 
         #[handler::unchecked(reason = "test: replies from a worker thread")]
-        fn on_defer(&mut self, ctx: &mut NativeCtx<'_, Erased, Unchecked>, _d: Defer) {
+        fn on_defer(&mut self, ctx: &mut NativeCtx<'_, Erased, Anyone, Unchecked>, _d: Defer) {
             if let Some(tx) = &self.deferred_tx {
                 // Retain the inbound past this handler's return; the reply is
                 // sent from a worker thread and the guard settles the chain
@@ -435,11 +440,10 @@ mod tests {
         mailer.trace_handle().install_settlement_registry(Arc::clone(&settlement));
 
         let aborter: Arc<dyn FatalAborter> = Arc::new(PanicAborter);
-        let actor_registry = Arc::new(ActorRegistry::new());
+        let actor_registry = Arc::clone(registry.actor_registry());
         let pool = Pool::start(PoolConfig::default(), Arc::clone(&aborter));
         let spawner = Arc::new(crate::Spawner::new(
             Arc::clone(&registry),
-            Arc::clone(&actor_registry),
             Arc::clone(&mailer),
             Arc::clone(&aborter),
             pool.wake_sink(),

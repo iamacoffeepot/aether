@@ -48,9 +48,9 @@ impl ComponentHostCapabilityState {
     /// Run every pre-check of a publish of `module`, with the instance
     /// configs a successor's publish supplied, and decide what it does.
     /// `Err` is the refusal the caller answers with.
-    pub(super) fn plan_republish<A, M: ReplyMode>(
+    pub(super) fn plan_republish<A, S, M: ReplyMode>(
         &self,
-        ctx: &NativeCtx<'_, A, M>,
+        ctx: &NativeCtx<'_, A, S, M>,
         module: &Module,
         configs: Vec<InstanceConfig>,
     ) -> Result<Plan, String> {
@@ -136,9 +136,9 @@ impl ComponentHostCapabilityState {
 
     /// Every live guest whose namespace is one of `namespaces`, by path, in
     /// path order so refusals read the same on every run.
-    fn members<A, M: ReplyMode>(
+    fn members<A, S, M: ReplyMode>(
         &self,
-        ctx: &NativeCtx<'_, A, M>,
+        ctx: &NativeCtx<'_, A, S, M>,
         namespaces: &[String],
     ) -> Vec<(ErasedActorPath, GuestView<'_>)> {
         let mut members: Vec<(ErasedActorPath, GuestView<'_>)> = self
@@ -161,8 +161,8 @@ impl ComponentHostCapabilityState {
 
     /// The publish's configs by the member each names. A path that names no
     /// live member, or names one twice, refuses the publish.
-    fn supplied_configs<A, M: ReplyMode>(
-        ctx: &NativeCtx<'_, A, M>,
+    fn supplied_configs<A, S, M: ReplyMode>(
+        ctx: &NativeCtx<'_, A, S, M>,
         members: &[(ErasedActorPath, GuestView<'_>)],
         configs: Vec<InstanceConfig>,
     ) -> Result<HashMap<ErasedActorRef, Vec<u8>>, String> {

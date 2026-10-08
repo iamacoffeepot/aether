@@ -17,14 +17,15 @@ use crate::actor::native::envelope::Envelope;
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::module::Module;
 use crate::mail::attachments::plain_payload;
-use crate::mail::registry::AddressResolutionError;
 use crate::mail::registry::effect::{RegistryBatch, RegistryBatchResult};
+use crate::mail::registry::{AddressResolutionError, LineageOrder};
 #[cfg(feature = "wasm")]
 use crate::mail::registry::{AdmissionRefusal, Admitted};
+use crate::memory::MemoryReport;
 
 use super::NativeCtx;
 
-impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
+impl<M: ReplyMode, A, S> NativeCtx<'_, A, S, M> {
     /// A kind's display label for log and diagnostic text: its registered
     /// name, or the tagged `knd-…` id's text when the kind is not registered
     /// (a component-defined kind the registry has not seen).
@@ -46,6 +47,20 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     #[must_use]
     pub fn kind_descriptors(&self) -> Vec<KindDescriptor> {
         self.binding.kind_descriptors()
+    }
+
+    /// What the engine holds right now: the process's resident set size, the
+    /// blob store's three byte counts, and one row per owner and label. Each
+    /// owner is named by its actor path text, so no mailbox position crosses
+    /// this verb. Building it takes the memory ledger's lock once and reads
+    /// the process's size from the platform, so it is for a diagnostic asked
+    /// about once a second, not for a per-frame read.
+    ///
+    /// Consumer: the `aether.inventory` cap's `ListMemory` handler, which
+    /// projects the report onto the wire.
+    #[must_use]
+    pub fn memory_report(&self) -> MemoryReport {
+        self.binding.memory_report()
     }
 
     /// The origin name of one ADR-0064 tagged id, looked up in the one table
@@ -100,14 +115,47 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// `Dropped` instead. So this is a broken invariant, not an answer
     /// (ADR-0063).
     ///
-    /// Consumers: the http server's unmonitorable route-holder warning, the
-    /// component host's replacement-boot warnings and its parented-spawn parent,
+    /// Consumers: the component host's replacement-boot warnings and its parented-spawn parent,
     /// whose proven path names the child's lineage, the lifecycle cap's
     /// stuck-advance warning, which names each subscriber still owed, and the
     /// RPC server's decode refusal, which names the refusing actor.
     #[must_use]
     pub fn actor_path(&self, reference: ErasedActorRef) -> ErasedActorPath {
         self.binding.actor_path(reference)
+    }
+
+    /// Where the actor `reference` proves stands in the actor tree by
+    /// creation order (ADR-0248 §5): an opaque value to compare with others
+    /// read the same way. A parent sorts before its children, a child between
+    /// its parent and its parent's next sibling, and siblings and root actors
+    /// in the order they were created. The answer names no mailbox position
+    /// and is never mailed. A typed holder passes `reference.erase()`.
+    ///
+    /// It reads one loaded snapshot of the published route table, one probe
+    /// per path segment and at most `MAX_SCOPE_PATH_DEPTH`, and sends no
+    /// mail. It still answers, unchanged, after the actor departs, because a
+    /// route keeps its record and its birth serial through `Dropped`, and it
+    /// cannot fail for a reference the registry minted: an actor's place is
+    /// fixed when its route is first reserved, and it never moves.
+    ///
+    /// # Panics
+    ///
+    /// When the route table holds no record for `reference` or for one of
+    /// its ancestors. The registry mints a reference only for a route that
+    /// holds a record, and refuses a birth whose parent holds none
+    /// (`SpawnError::ParentUnknown`), so every ancestor of a route held one
+    /// when the route was born. A route leaves the table only when a
+    /// `Starting` reservation is cancelled, or a claim is withdrawn before
+    /// any actor could have observed it; neither follows a mint that
+    /// survives, and whatever a starting actor staged beneath itself is
+    /// discarded with it. Every other unwind retires its route to `Dropped`
+    /// instead. So this is a broken invariant, not an answer (ADR-0063).
+    ///
+    /// Consumer: the render capability's overlay commit, which lays one
+    /// actor's screen-space draws over another's by the sender's order.
+    #[must_use]
+    pub fn lineage_order(&self, reference: ErasedActorRef) -> LineageOrder {
+        self.binding.lineage_order(reference)
     }
 
     /// The receive surface — handler kinds, docs, fallback, and config kind —

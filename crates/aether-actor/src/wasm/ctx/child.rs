@@ -11,7 +11,7 @@ use aether_data::{ActorMail, MailboxId};
 
 use super::{ActorTypeTag, WasmCtx};
 use crate::model::ctx::reply_mode::ReplyMode;
-use crate::model::{Addressable, CoveredBy, HandlesKind};
+use crate::model::{Addressable, CoveredBy, HandlesKind, SentBy};
 use crate::reference::{ErasedActorRef, ProtocolRef};
 use crate::wasm::inline::ChainMode;
 
@@ -74,12 +74,14 @@ impl<C: Addressable> InlineChild<C> {
         Self { id, child: PhantomData }
     }
 
-    /// Send `payload` to this child, checked against `C`'s handler set.
+    /// Send `payload` to this child, checked against `C`'s handler set and
+    /// against what `C`'s handler for the kind requires of its sender, which
+    /// the ctx's actor `A` must cover (ADR-0231 §11).
     ///
     /// Routes as [`WasmCtx::send_to`] does — through the inline
     /// registry's cluster router, in place through the membrane for a resident
     /// child, inheriting the handler's causal chain (ADR-0080 §7).
-    pub fn send<K: ActorMail, A, M: ReplyMode>(&self, ctx: &mut WasmCtx<'_, A, M>, payload: &K)
+    pub fn send<K: ActorMail + SentBy<A, C>, A, S, M: ReplyMode>(&self, ctx: &mut WasmCtx<'_, A, S, M>, payload: &K)
     where
         C: HandlesKind<K>,
     {
@@ -94,9 +96,8 @@ impl<C: Addressable> InlineChild<C> {
     /// target: a parent that sends to the child sends through [`Self::send`]
     /// or a reference [`Self::narrow`] yields.
     ///
-    /// Consumed by `aether-widget`'s lane keys and by its composite node's
-    /// spawn. The *reference* erasure: unrelated to
-    /// the ctx reply-mode `erase()` the native `#[actor]` expansion emits.
+    /// The *reference* erasure: unrelated to the ctx reply-mode `erase()` the
+    /// native `#[actor]` expansion emits.
     #[must_use]
     pub const fn erase(self) -> ErasedActorRef {
         ErasedActorRef::new(self.id)
@@ -131,7 +132,7 @@ impl<C: Addressable> InlineChild<C> {
     }
 }
 
-impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
+impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
     /// This actor's inline child whose subname is `name`, as an [`InlineChild<C>`], or `None` when no such
     /// child resides **or** the resident one is not a `C`.
     ///

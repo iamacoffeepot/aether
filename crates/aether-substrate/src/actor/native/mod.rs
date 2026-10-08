@@ -54,7 +54,7 @@
 //! Caps that fan-out every kind they're addressed at — broadcast
 //! today, hub-as-actor in the future — author with a `#[fallback]`
 //! method instead of `#[handler]`s. The macro emits a blanket
-//! `impl<K: Kind> HandlesKind<K> for X {}` so a typed send like
+//! `impl<K: Kind> HandlesKind<K> for X { type Sender = aether_actor::Anyone; }` so a typed send like
 //! `ctx.send::<BroadcastCapability>(&payload)`, from an actor that declares
 //! `#[actor(depends(BroadcastCapability))]`, compiles for every K, and
 //! overrides [`Dispatch::dispatch_fallback`] to
@@ -135,7 +135,7 @@ pub trait Dispatch<S> {
     /// `Some(())` on a handled kind + decode success, `None` otherwise.
     fn dispatch(
         state: &mut S,
-        ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+        ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
         kind: KindId,
         payload: &[u8],
     ) -> Option<()>
@@ -145,7 +145,11 @@ pub trait Dispatch<S> {
     /// Catch-all for envelopes no `#[handler]` matched (issue 576). Default
     /// returns `false` so the trampoline warn-logs the miss; the macro
     /// overrides it when a `#[fallback]` is present.
-    fn dispatch_fallback(_state: &mut S, _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>, _envelope: &Envelope) -> bool
+    fn dispatch_fallback(
+        _state: &mut S,
+        _ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
+        _envelope: &Envelope,
+    ) -> bool
     where
         Self: Sized,
     {

@@ -55,7 +55,6 @@ fn reply_source(reply: ReplyTarget) -> Source {
 /// `NativeCtx::spawn_child` can reach it without explicit plumbing.
 pub struct Spawner {
     registry: Arc<Registry>,
-    actor_registry: Arc<ActorRegistry>,
     mailer: Arc<Mailer>,
     aborter: Arc<dyn FatalAborter>,
     /// Monotonic counter for [`Subname::Counter`](super::Subname::Counter). Per-Spawner so each
@@ -136,7 +135,6 @@ pub(in crate::actor::native::spawn) struct InstancedSlotEntry {
 impl Spawner {
     pub fn new(
         registry: Arc<Registry>,
-        actor_registry: Arc<ActorRegistry>,
         mailer: Arc<Mailer>,
         aborter: Arc<dyn FatalAborter>,
         wake_sink: WakeSink,
@@ -144,7 +142,6 @@ impl Spawner {
     ) -> Self {
         Self {
             registry,
-            actor_registry,
             mailer,
             aborter,
             counter: AtomicU64::new(0),
@@ -278,7 +275,8 @@ impl Spawner {
         self.counter.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Borrow the actor registry. Crate-private — substrate-internal
+    /// Borrow the actor registry, which the route registry owns
+    /// ([`Registry::actor_registry`]). Crate-private — substrate-internal
     /// dispatcher trampolines (instanced spawn close path, singleton
     /// boot path) use this to call `close_actor` / `mark_dead` /
     /// `is_tombstoned` etc. Cap handlers reaching for the
@@ -287,7 +285,7 @@ impl Spawner {
     /// child map; caps that just send mail use the flat `ctx.send::<R>`
     /// / `ctx.send_to` verbs. ADR-0079 supervisor-as-cap pattern.
     pub(crate) fn actor_registry(&self) -> &Arc<ActorRegistry> {
-        &self.actor_registry
+        self.registry.actor_registry()
     }
 
     /// The chassis mailer, cloned into each booted [`NativeBinding`](crate::actor::native::binding::NativeBinding).

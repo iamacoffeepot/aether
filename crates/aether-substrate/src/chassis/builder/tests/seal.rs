@@ -92,7 +92,7 @@ impl NativeActor for Spawned {
 impl Dispatch<Self> for Spawned {
     fn dispatch(
         _state: &mut Self,
-        _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+        _ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
         _kind: KindId,
         _payload: &[u8],
     ) -> Option<()> {
@@ -179,7 +179,9 @@ fn post_seal_pumped_boot_publishes_the_endpoint_the_caller_wired() {
         type Resolver = aether_actor::One;
     }
     impl aether_actor::Root for Pumped {}
-    impl HandlesKind<Poke> for Pumped {}
+    impl HandlesKind<Poke> for Pumped {
+        type Sender = aether_actor::Anyone;
+    }
     impl aether_actor::Lifecycle<Self> for Pumped {
         type Config = ();
         type Params = Arc<AtomicU32>;
@@ -201,7 +203,7 @@ fn post_seal_pumped_boot_publishes_the_endpoint_the_caller_wired() {
     impl Dispatch<Self> for Pumped {
         fn dispatch(
             state: &mut Self,
-            _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -250,7 +252,9 @@ impl Addressable for Witness {
     type Resolver = aether_actor::One;
 }
 
-impl HandlesKind<Announce> for Witness {}
+impl HandlesKind<Announce> for Witness {
+    type Sender = aether_actor::Anyone;
+}
 
 /// A pumped actor that mails the [`Witness`] from `wire`, as an actor
 /// subscribing from `wire` mails its publisher.
@@ -265,8 +269,9 @@ impl NativeActor for Announcer {
         Ok(Self)
     }
 
-    fn wire(_state: &mut Self, ctx: &mut NativeCtx<'_>) {
+    fn wire(_state: &mut Self, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         ctx.send::<Witness>(&Announce { seq: 1 });
+        Ok(())
     }
 
     #[handler::tell]

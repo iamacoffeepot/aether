@@ -87,7 +87,7 @@ impl FsDemux {
 
     /// Match one `aether.fs.read` reply to the request it answers, and report
     /// once both pending reads have matched.
-    fn read_result<A: DependsOn<SubstrateHarnessObserver>, M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, A, M>) {
+    fn read_result<A: DependsOn<SubstrateHarnessObserver>, S, M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, A, S, M>) {
         if self.handle_typed_context(ctx) {
             return;
         }
@@ -122,9 +122,9 @@ impl FsDemux {
     /// context type in turn, A first: a wrong-kind take leaves the context
     /// stored, so the reply carrying context B still recovers it. Returns
     /// whether this reply carried either context.
-    fn handle_typed_context<A: DependsOn<SubstrateHarnessObserver>, M: ReplyMode>(
+    fn handle_typed_context<A: DependsOn<SubstrateHarnessObserver>, S, M: ReplyMode>(
         &mut self,
-        ctx: &mut WasmCtx<'_, A, M>,
+        ctx: &mut WasmCtx<'_, A, S, M>,
     ) -> bool {
         if let Some(context) = ctx.take_context::<FsDemuxContextA>() {
             if context.payload != CONTEXT_A_PAYLOAD {
@@ -177,8 +177,9 @@ impl WasmActor for InlineFsDemuxParent {
 
     /// Co-locate the demux child under the `Named` subname `demux`; the test
     /// reaches it by that key.
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         let _ = ctx.spawn_inline_child::<InlineFsDemuxParent, InlineFsDemuxChild>(Subname::Named("demux"), &());
+        Ok(())
     }
 
     /// The parent carries no demux state; a `#[fallback]` keeps it a valid

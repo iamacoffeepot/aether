@@ -2,18 +2,19 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use aether_actor::{ActorRef, ErasedActorRef, ProtocolRef};
-use aether_data::ErasedActorPath;
+use aether_actor::{ActorPath, ActorRef, ErasedActorRef, ProtocolRef};
 use aether_substrate::actor::native::{Held, NativeCtx, SpawnOutcome};
 use aether_substrate::{MonitorHandle, Subname};
 
 use super::WindowSpawnKey;
 use super::manager::{RoutableWindow, WindowCommands};
-use super::subscribers::{Published, WindowSubscribers};
+use super::routing::Routed;
+use super::subscribers::WindowSubscribers;
 use crate::{
     ApplyWindowCommandResult, CloseWindowResult, CreateWindowResult, FocusWindowResult, RequestWindowRedrawResult,
-    RetireWindow, SetWindowCursorResult, SetWindowMenuResult, SetWindowModeResult, SetWindowTitleResult,
-    WindowCapability, WindowClosed, WindowCommand, WindowInfo, WindowInstance, WindowMode, WindowOpened, WindowSpec,
+    RetireWindow, SetWindowCursorResult, SetWindowMenuResult, SetWindowModeResult, SetWindowPresentationResult,
+    SetWindowTitleResult, WindowCapability, WindowClosed, WindowCommand, WindowInfo, WindowInstance, WindowMode,
+    WindowOpened, WindowSpec,
 };
 
 const DEFAULT_WIDTH: u32 = 800;
@@ -43,14 +44,14 @@ struct SyntheticWindow {
 /// The synthetic backend's state: every window, staged create, and child it
 /// supervises, and the subscription table its events fan out through.
 pub struct SyntheticWindows {
-    windows: BTreeMap<ErasedActorPath, SyntheticWindow>,
+    windows: BTreeMap<ActorPath<WindowInstance>, SyntheticWindow>,
     /// Staged creates keyed by window path, the key each birth carries back
     /// as its completion context.
-    pending_creates: HashMap<ErasedActorPath, PendingWindowCreate>,
+    pending_creates: HashMap<ActorPath<WindowInstance>, PendingWindowCreate>,
     /// Each live child's window and retained monitor, keyed by the child's
     /// reference. The same reverse index identifies a command sender and a
     /// departing child's `MonitorNotice` (ADR-0230).
-    child_monitors: HashMap<ErasedActorRef, (ErasedActorPath, MonitorHandle)>,
+    child_monitors: HashMap<ErasedActorRef, (ActorPath<WindowInstance>, MonitorHandle)>,
     pub(super) subscribers: WindowSubscribers,
 }
 
@@ -64,14 +65,14 @@ impl SyntheticWindows {
         }
     }
 
-    fn window_mut(&mut self, window: &ErasedActorPath) -> Result<&mut WindowInfo, String> {
+    fn window_mut(&mut self, window: &ActorPath<WindowInstance>) -> Result<&mut WindowInfo, String> {
         self.windows.get_mut(window).map(|window| &mut window.info).ok_or_else(|| format!("unknown window {window}"))
     }
 
     /// Validate one create request against the live windows and the reserved
     /// names no `ListWindows` reply can see yet, answering the window's path.
-    fn check_create(&self, spec: &WindowSpec) -> Result<ErasedActorPath, String> {
-        let path = crate::window_path(&crate::window_name(&spec.name)?);
+    fn check_create(&self, spec: &WindowSpec) -> Result<ActorPath<WindowInstance>, String> {
+        let path = WindowInstance::path(&crate::window_name(&spec.name)?);
         if self.windows.values().any(|window| window.info.name == spec.name) || self.pending_creates.contains_key(&path)
         {
             return Err(format!("window name `{}` is already in use", spec.name));
@@ -79,7 +80,7 @@ impl SyntheticWindows {
         Ok(path)
     }
 
-    fn describe(spec: WindowSpec, path: ErasedActorPath) -> WindowInfo {
+    fn describe(spec: WindowSpec, path: ActorPath<WindowInstance>) -> WindowInfo {
         let (width, height) = spec.size.map_or((DEFAULT_WIDTH, DEFAULT_HEIGHT), |size| (size.width, size.height));
         WindowInfo {
             path,
@@ -88,43 +89,34 @@ impl SyntheticWindows {
             mode: spec.mode,
             width,
             height,
+            scale_factor: 1.0,
             focused: false,
             occluded: width == 0 || height == 0,
+            presentation: spec.presentation,
         }
     }
 
-    fn publish<K: Published, A>(&self, ctx: &mut NativeCtx<'_, A>, window: &ErasedActorPath, event: &K) {
-        ctx.fanout(self.subscribers.recipients::<K>(window), event);
+    fn publish<K: Routed, A>(&mut self, ctx: &mut NativeCtx<'_, A>, window: &ActorPath<WindowInstance>, event: &K) {
+        self.subscribers.publish(ctx, window, event);
     }
 
-    /// Promote an authoritatively applied child into the live window set, or
-    /// retire it and report why it could not become live. Either way the
-    /// reservation's reply is sent exactly once.
+    /// Promote an authoritatively applied child into the live window set and
+    /// send the reservation's reply. A child that closed before this ran is
+    /// published all the same, and its notice, which arrives after this
+    /// handler returns, closes the window.
     fn publish_applied_window<A>(
         &mut self,
         ctx: &mut NativeCtx<'_, A>,
-        path: ErasedActorPath,
+        path: ActorPath<WindowInstance>,
         child: ActorRef<WindowInstance>,
         pending: PendingWindowCreate,
     ) {
         let PendingWindowCreate { spec, held } = pending;
-        let monitor = match ctx.monitor(child.erase()) {
-            Ok(monitor) => monitor,
-            Err(error) => {
-                ctx.send_to(child, &RetireWindow);
-                answer(
-                    ctx,
-                    held,
-                    &CreateWindowResult::Err { error: format!("failed to monitor window child: {error:?}") },
-                );
-                return;
-            }
-        };
         // The child's path needs no check against a prediction: the window
         // identities read the shared window namespace consts, so the child's
-        // name is the canonical path `window_path` wrote.
+        // name is the canonical path `WindowInstance::path` wrote.
         let window = Self::describe(spec, path.clone());
-        self.child_monitors.insert(child.erase(), (path.clone(), monitor));
+        self.child_monitors.insert(child.erase(), (path.clone(), ctx.monitor(child)));
         self.windows
             .insert(path.clone(), SyntheticWindow { info: window.clone(), commands: child.narrow::<WindowCommands>() });
         self.publish(ctx, &path, &WindowOpened { window: window.clone() });
@@ -136,7 +128,7 @@ impl SyntheticWindows {
     fn apply_at_window<A>(
         &mut self,
         ctx: &mut NativeCtx<'_, A>,
-        window: &ErasedActorPath,
+        window: &ActorPath<WindowInstance>,
         command: WindowCommand,
     ) -> ApplyWindowCommandResult {
         match command {
@@ -169,6 +161,19 @@ impl SyntheticWindows {
                     width: info.width,
                     height: info.height,
                 })
+            }
+            // No surface and no clock stand behind a synthetic window, so
+            // every value is accepted for a live window and stored for
+            // `aether.window.list`; frames stay driven by explicit advances.
+            WindowCommand::SetPresentation { presentation } => {
+                let info = match self.window_mut(window) {
+                    Ok(info) => info,
+                    Err(error) => {
+                        return ApplyWindowCommandResult::SetPresentation(SetWindowPresentationResult::Err { error });
+                    }
+                };
+                info.presentation = presentation;
+                ApplyWindowCommandResult::SetPresentation(SetWindowPresentationResult::Ok { presentation })
             }
             WindowCommand::SetTitle { title } => {
                 let info = match self.window_mut(window) {
@@ -256,7 +261,7 @@ impl SyntheticWindows {
     pub(super) fn finish_window_child_spawn<A>(
         &mut self,
         ctx: &mut NativeCtx<'_, A>,
-        path: &ErasedActorPath,
+        path: &ActorPath<WindowInstance>,
         outcome: SpawnOutcome<WindowInstance>,
     ) {
         let Some(pending) = self.pending_creates.remove(path) else {
@@ -314,28 +319,37 @@ impl SyntheticWindows {
 
 #[cfg(test)]
 mod tests {
+    use crate::Key;
     use aether_data::Kind;
-    use aether_kinds::Key;
     use std::collections::BTreeSet;
 
     use super::*;
     use crate::runtime::subscribers::fixture::{Rig, receivers, recipients, watcher};
-    use crate::{InjectWindowEvent, SubscribeWindow, SubscribeWindowResult, WindowSelector, WindowSubscription};
+    use crate::{
+        InjectWindowEvent, SubscribeWindow, SubscribeWindowResult, WindowPresentation, WindowSelector,
+        WindowSubscription,
+    };
 
     fn test_state() -> SyntheticWindows {
         SyntheticWindows::new()
     }
 
-    fn window_path(name: &str) -> ErasedActorPath {
-        crate::window_path(&aether_data::LoadName::new(name).expect("fixture window name"))
+    fn window_path(name: &str) -> ActorPath<WindowInstance> {
+        WindowInstance::path(&aether_data::LoadName::new(name).expect("fixture window name"))
     }
 
-    fn main_path() -> ErasedActorPath {
+    fn main_path() -> ActorPath<WindowInstance> {
         window_path("main")
     }
 
     fn spec(name: &str, title: &str) -> WindowSpec {
-        WindowSpec { name: name.to_owned(), title: title.to_owned(), mode: WindowMode::Windowed, size: None }
+        WindowSpec {
+            name: name.to_owned(),
+            title: title.to_owned(),
+            mode: WindowMode::Windowed,
+            size: None,
+            presentation: WindowPresentation::Display,
+        }
     }
 
     /// An explicit subscribe carries a subscriber path its decode proves

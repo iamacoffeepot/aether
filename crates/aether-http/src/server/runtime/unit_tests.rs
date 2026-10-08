@@ -1,18 +1,17 @@
 use super::{
-    Arc, HttpResponseStreamOpen, HttpServerCapability, HttpServerConfig, OPCODE_BINARY, OPCODE_CONTINUATION,
-    OPCODE_TEXT, RegisterRouteResult, RwLock, SharedRoutes, WsFrameParse, http_date, normalize_prefix,
-    parse_http_method, parse_ws_frame, percent_decode_path, reason_phrase, register_route, render_stream_head,
-    request_keeps_alive, sec_websocket_accept, serialize_ws_frame, sha1, unregister_route, unregister_routes_all,
-    validate_ws_handshake,
+    Arc, HttpResponseStreamOpen, HttpServerCapability, HttpServerConfig, HttpVersion, OPCODE_BINARY,
+    OPCODE_CONTINUATION, OPCODE_TEXT, RegisterRouteResult, RwLock, SharedRoutes, WsFrameParse, http_date,
+    normalize_prefix, parse_http_method, parse_ws_frame, percent_decode_path, reason_phrase, register_route,
+    render_stream_head, request_keeps_alive, sec_websocket_accept, serialize_ws_frame, sha1, unregister_route,
+    unregister_routes_all, validate_ws_handshake,
 };
-use crate::kinds::{HttpHeader, HttpMethod, RegisterRouteError};
-use crate::typed::route_matches;
+use crate::kinds::{HttpHeader, HttpMethod, MethodFilter, RegisterRouteError};
+use crate::typed::{route_matches, route_rank};
 use aether_actor::ErasedActorRef;
 use aether_substrate::actor::native::PumpedSlot;
 use aether_substrate::chassis::builder::PassiveChassis;
 use aether_substrate::mail::outbound::EgressEvent;
-use aether_substrate::mail::registry::{Registry, noop_handler};
-use aether_substrate::testing::{TestChassis, boot_bare_test_chassis, fresh_substrate_and_rx, registered_ref};
+use aether_substrate::testing::{TestChassis, boot_bare_test_chassis, fresh_substrate_and_rx};
 use std::sync::mpsc;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -25,7 +24,6 @@ struct Supervisor {
     /// pumped root it hosts, which closes when its slot drops.
     chassis: PassiveChassis<TestChassis>,
     slot: PumpedSlot<HttpServerCapability>,
-    registry: Arc<Registry>,
     egress: mpsc::Receiver<EgressEvent>,
 }
 
@@ -38,12 +36,7 @@ fn boot_supervisor(config: HttpServerConfig) -> Supervisor {
     let (slot, _wake) =
         chassis.boot_pumped_actor::<HttpServerCapability>(config, ()).expect("the http supervisor boots pumped");
 
-    Supervisor { chassis, slot, registry, egress }
-}
-
-/// Register a named test-local mailbox and return its proven reference.
-fn proven(registry: &Registry, name: &str) -> ErasedActorRef {
-    registered_ref(registry, name, noop_handler())
+    Supervisor { chassis, slot, egress }
 }
 
 fn conn_header(value: &str) -> Vec<HttpHeader> {
@@ -69,7 +62,7 @@ fn disabled_http_server_err_replies_to_register_route() {
         supervisor.chassis.boot_pumped_actor::<EchoHttpHandler>((), ()).expect("the route holder boots pumped");
     let register = RegisterRoute {
         prefix: "/".to_string(),
-        method: None,
+        method: MethodFilter::Any,
         handler: ActorPath::<EchoHttpHandler>::root().narrow::<HttpRouter>(),
         shared: false,
     };
@@ -91,17 +84,18 @@ fn disabled_http_server_err_replies_to_register_route() {
 /// and an explicit token wins over the version default either way.
 #[test]
 fn keep_alive_defaults_by_version_and_connection_header() {
-    // HTTP/1.1 (version 1): keep-alive by default, `close` overrides.
-    assert!(request_keeps_alive(Some(1), &[]));
-    assert!(!request_keeps_alive(Some(1), &conn_header("close")));
-    assert!(request_keeps_alive(Some(1), &conn_header("keep-alive")));
-    // HTTP/1.0 (version 0): close by default, `keep-alive` overrides.
-    assert!(!request_keeps_alive(Some(0), &[]));
-    assert!(request_keeps_alive(Some(0), &conn_header("keep-alive")));
-    assert!(!request_keeps_alive(Some(0), &conn_header("close")));
+    // HTTP/1.1: keep-alive by default, `close` overrides.
+    assert!(request_keeps_alive(HttpVersion::Http11, &[]));
+    assert!(!request_keeps_alive(HttpVersion::Http11, &conn_header("close")));
+    assert!(request_keeps_alive(HttpVersion::Http11, &conn_header("keep-alive")));
+    // HTTP/1.0: close by default, `keep-alive` overrides.
+    assert!(!request_keeps_alive(HttpVersion::Http10, &[]));
+    assert!(request_keeps_alive(HttpVersion::Http10, &conn_header("keep-alive")));
+    assert!(!request_keeps_alive(HttpVersion::Http10, &conn_header("close")));
     // Case-insensitive, and a token among comma-separated values counts.
-    assert!(!request_keeps_alive(Some(1), &conn_header("Close")));
-    assert!(request_keeps_alive(Some(0), &conn_header("keep-alive, Upgrade")));
+    assert!(!request_keeps_alive(HttpVersion::Http11, &conn_header("Close")));
+    assert!(request_keeps_alive(HttpVersion::Http10, &conn_header("keep-alive, Upgrade")));
+    assert!(!request_keeps_alive(HttpVersion::Unknown, &[]));
 }
 
 /// Segment-boundary semantics (ADR-0130): a prefix matches at `/`
@@ -114,6 +108,36 @@ fn route_match_is_segment_boundary() {
     assert!(!route_matches("/api", "/ap"));
     assert!(route_matches("/", "/anything"));
     assert!(route_matches("/", "/"));
+}
+
+/// Conversion-risk: `MethodFilter::Any` matches every method while `Only`
+/// matches its own — swapped arms would invert the rank, so this pins
+/// parity across every method plus prefix match/mismatch with computed
+/// expectations.
+#[test]
+fn method_filter_rank_parity() {
+    for method in [
+        HttpMethod::Get,
+        HttpMethod::Post,
+        HttpMethod::Put,
+        HttpMethod::Delete,
+        HttpMethod::Patch,
+        HttpMethod::Head,
+        HttpMethod::Options,
+    ] {
+        let prefix_len = "/api".len();
+        assert_eq!(route_rank("/api", MethodFilter::Any, "/api", method), Some((prefix_len, false)));
+        assert_eq!(route_rank("/api", MethodFilter::Only(method), "/api", method), Some((prefix_len, true)));
+        let other = if method == HttpMethod::Get {
+            HttpMethod::Post
+        } else {
+            HttpMethod::Get
+        };
+        assert_eq!(route_rank("/api", MethodFilter::Only(method), "/api", other), None);
+    }
+    assert_eq!(route_rank("/api", MethodFilter::Any, "/other", HttpMethod::Get), None);
+    assert_eq!(route_rank("/api", MethodFilter::Only(HttpMethod::Get), "/apiary", HttpMethod::Get), None);
+    assert_eq!(route_rank("/", MethodFilter::Any, "/anything", HttpMethod::Get), Some((1, false)));
 }
 
 /// Prefix normalization: leading `/` required, trailing slashes
@@ -372,12 +396,12 @@ fn config_layer_defaults_match_the_named_consts() {
 /// pinned deterministically, with no dependence on the order two
 /// independent actors' registration mail happens to reach the table.
 mod route_registration {
-    use super::super::{RouteMember, RouteTable};
+    use super::super::{RequestStreamSupport, RouteMember, RouteTable, StreamCreditSupport, WebSocketSupport};
     use super::{
         Arc, ErasedActorRef, RegisterRouteResult, RwLock, SharedRoutes, register_route, unregister_route,
         unregister_routes_all,
     };
-    use crate::kinds::{HttpMethod, HttpRouter, RegisterRouteError};
+    use crate::kinds::{HttpMethod, HttpRouter, MethodFilter, RegisterRouteError};
     use crate::server::tests::handlers::router_holders as holders;
     use aether_actor::ProtocolRef;
 
@@ -386,9 +410,14 @@ mod route_registration {
     }
 
     /// The route member for a holder that covers only `HttpRouter`, as the
-    /// fixture handlers do: no data-phase cast.
+    /// fixture handlers do: no data-phase support.
     fn member(router: ProtocolRef<HttpRouter>) -> RouteMember {
-        RouteMember { router, credit: None, request_stream: None, websocket: None }
+        RouteMember {
+            router,
+            credit: StreamCreditSupport::Unsupported,
+            request_stream: RequestStreamSupport::Unsupported,
+            websocket: WebSocketSupport::Unsupported,
+        }
     }
 
     #[track_caller]
@@ -430,8 +459,11 @@ mod route_registration {
         let routes = fresh_routes();
         let (_chassis, first, second) = holders();
 
-        expect_ok(register_route(&routes, "/dup", None, member(first), false));
-        expect_err_containing(register_route(&routes, "/dup", None, member(second), false), "already claimed by");
+        expect_ok(register_route(&routes, "/dup", MethodFilter::Any, member(first), false));
+        expect_err_containing(
+            register_route(&routes, "/dup", MethodFilter::Any, member(second), false),
+            "already claimed by",
+        );
 
         assert_eq!(only_route(&routes), (vec![first.erase()], false));
     }
@@ -445,8 +477,8 @@ mod route_registration {
         let routes = fresh_routes();
         let (_chassis, holder, _) = holders();
 
-        expect_ok(register_route(&routes, "/dup", None, member(holder), false));
-        expect_ok(register_route(&routes, "/dup", None, member(holder), false));
+        expect_ok(register_route(&routes, "/dup", MethodFilter::Any, member(holder), false));
+        expect_ok(register_route(&routes, "/dup", MethodFilter::Any, member(holder), false));
 
         assert_eq!(only_route(&routes), (vec![holder.erase()], false));
     }
@@ -459,8 +491,8 @@ mod route_registration {
         let routes = fresh_routes();
         let (_chassis, a, b) = holders();
 
-        expect_ok(register_route(&routes, "/m", Some(HttpMethod::Get), member(a), false));
-        expect_ok(register_route(&routes, "/m", Some(HttpMethod::Post), member(b), false));
+        expect_ok(register_route(&routes, "/m", MethodFilter::Only(HttpMethod::Get), member(a), false));
+        expect_ok(register_route(&routes, "/m", MethodFilter::Only(HttpMethod::Post), member(b), false));
 
         assert_eq!(routes.read().expect("route table lock").routes.len(), 2);
     }
@@ -474,14 +506,14 @@ mod route_registration {
         // Shared claim onto an exclusive key: rejected, stays exclusive.
         let excl = fresh_routes();
         let (_chassis, a, b) = holders();
-        expect_ok(register_route(&excl, "/k", None, member(a), false));
-        expect_err_containing(register_route(&excl, "/k", None, member(b), true), "exclusively claimed");
+        expect_ok(register_route(&excl, "/k", MethodFilter::Any, member(a), false));
+        expect_err_containing(register_route(&excl, "/k", MethodFilter::Any, member(b), true), "exclusively claimed");
         assert_eq!(only_route(&excl), (vec![a.erase()], false));
 
         // Exclusive claim onto a shared key: rejected, stays shared.
         let shared = fresh_routes();
-        expect_ok(register_route(&shared, "/k", None, member(a), true));
-        expect_err_containing(register_route(&shared, "/k", None, member(b), false), "shared member set");
+        expect_ok(register_route(&shared, "/k", MethodFilter::Any, member(a), true));
+        expect_err_containing(register_route(&shared, "/k", MethodFilter::Any, member(b), false), "shared member set");
         assert_eq!(only_route(&shared), (vec![a.erase()], true));
     }
 
@@ -494,10 +526,10 @@ mod route_registration {
         let routes = fresh_routes();
         let (_chassis, a, b) = holders();
 
-        expect_ok(register_route(&routes, "/pool", None, member(a), true));
-        expect_ok(register_route(&routes, "/pool", None, member(b), true));
+        expect_ok(register_route(&routes, "/pool", MethodFilter::Any, member(a), true));
+        expect_ok(register_route(&routes, "/pool", MethodFilter::Any, member(b), true));
         // Idempotent re-registration of an existing member.
-        expect_ok(register_route(&routes, "/pool", None, member(a), true));
+        expect_ok(register_route(&routes, "/pool", MethodFilter::Any, member(a), true));
 
         assert_eq!(only_route(&routes), (vec![a.erase(), b.erase()], true));
 
@@ -515,20 +547,20 @@ mod route_registration {
     fn unregister_releases_members_and_drops_empty_routes() {
         let routes = fresh_routes();
         let (_chassis, a, b) = holders();
-        expect_ok(register_route(&routes, "/pool", None, member(a), true));
-        expect_ok(register_route(&routes, "/pool", None, member(b), true));
+        expect_ok(register_route(&routes, "/pool", MethodFilter::Any, member(a), true));
+        expect_ok(register_route(&routes, "/pool", MethodFilter::Any, member(b), true));
 
         // One member leaves; the set survives with the rest.
-        expect_ok(unregister_route(&routes, "/pool", None, a.erase()));
+        expect_ok(unregister_route(&routes, "/pool", MethodFilter::Any, a.erase()));
         assert_eq!(only_route(&routes), (vec![b.erase()], true));
 
         // The last member leaves; the route is dropped.
-        expect_ok(unregister_route(&routes, "/pool", None, b.erase()));
+        expect_ok(unregister_route(&routes, "/pool", MethodFilter::Any, b.erase()));
         assert!(routes.read().expect("route table lock").routes.is_empty());
 
         // unregister_routes_all clears every route the holder holds.
-        expect_ok(register_route(&routes, "/x", None, member(a), false));
-        expect_ok(register_route(&routes, "/y", None, member(a), false));
+        expect_ok(register_route(&routes, "/x", MethodFilter::Any, member(a), false));
+        expect_ok(register_route(&routes, "/y", MethodFilter::Any, member(a), false));
         unregister_routes_all(&routes, a.erase());
         assert!(routes.read().expect("route table lock").routes.is_empty());
     }
@@ -542,7 +574,7 @@ mod shard_startup {
 
     use super::super::{
         Arc, HttpDispatchShard, HttpServerConfig, HttpSupervisorState, InboundEvent, PendingPeer, ShardSettlement,
-        ShardSink, ShardSlot, ShardStartup,
+        ShardSink, ShardSlot, ShardSpawnOutcome, ShardStartup, StageCursor,
     };
     use super::{Supervisor, boot_supervisor};
     use aether_substrate::Subname;
@@ -583,7 +615,7 @@ mod shard_startup {
     fn starting(count: usize, pending_peers: VecDeque<PendingPeer>) -> ShardStartup {
         ShardStartup::Starting {
             remaining: count,
-            next_to_stage: None,
+            next_to_stage: StageCursor::Exhausted,
             slots_by_index: (0..count).map(|_| ShardSlot::Pending).collect(),
             pending_peers,
         }
@@ -634,7 +666,7 @@ mod shard_startup {
         let (sink_two, rx_two) = sink(&supervisor.chassis, "test-two");
 
         let early = supervisor.slot.host_turn(|state, ctx| {
-            let settled = state.finish_shard_spawn(2, Some(sink_two));
+            let settled = state.finish_shard_spawn(2, ShardSpawnOutcome::Ready(sink_two));
             let pending = matches!(settled, ShardSettlement::Pending);
             state.apply_shard_settlement(ctx, settled);
             pending
@@ -644,10 +676,10 @@ mod shard_startup {
         assert!(rx_two.try_recv().is_err(), "a successful shard is not selectable before every attempt settles");
 
         let last = supervisor.slot.host_turn(|state, ctx| {
-            let middle = state.finish_shard_spawn(0, Some(sink_zero));
+            let middle = state.finish_shard_spawn(0, ShardSpawnOutcome::Ready(sink_zero));
             let middle_pending = matches!(middle, ShardSettlement::Pending);
             state.apply_shard_settlement(ctx, middle);
-            let settled = state.finish_shard_spawn(1, None);
+            let settled = state.finish_shard_spawn(1, ShardSpawnOutcome::Failed);
             let ready = matches!(settled, ShardSettlement::Ready { shard_count: 2, .. });
             state.apply_shard_settlement(ctx, settled);
             (middle_pending, ready)
@@ -672,10 +704,13 @@ mod shard_startup {
         let mut state = starting_state(2, VecDeque::new());
         let (sink_zero, _rx_zero) = sink(&supervisor.chassis, "test-duplicate-zero");
 
-        assert!(matches!(state.finish_shard_spawn(0, Some(sink_zero)), ShardSettlement::Pending));
-        assert!(matches!(state.finish_shard_spawn(0, None), ShardSettlement::Stale));
+        assert!(matches!(state.finish_shard_spawn(0, ShardSpawnOutcome::Ready(sink_zero)), ShardSettlement::Pending));
+        assert!(matches!(state.finish_shard_spawn(0, ShardSpawnOutcome::Failed), ShardSettlement::Stale));
         assert!(matches!(state.shard_startup, ShardStartup::Starting { remaining: 1, .. }));
-        assert!(matches!(state.finish_shard_spawn(1, None), ShardSettlement::Ready { shard_count: 1, .. }));
+        assert!(matches!(
+            state.finish_shard_spawn(1, ShardSpawnOutcome::Failed),
+            ShardSettlement::Ready { shard_count: 1, .. }
+        ));
     }
 
     /// When every deterministic child fails, each retained socket receives
@@ -688,7 +723,7 @@ mod shard_startup {
         let mut supervisor = booted_starting(8, 1, once(pending).collect());
 
         let failed = supervisor.slot.host_turn(|state, ctx| {
-            let settled = state.finish_shard_spawn(0, None);
+            let settled = state.finish_shard_spawn(0, ShardSpawnOutcome::Failed);
             let failed = matches!(settled, ShardSettlement::Failed { .. });
             state.apply_shard_settlement(ctx, settled);
             failed
@@ -727,6 +762,59 @@ mod shard_startup {
         assert_eq!(live_connections(&supervisor), 0);
 
         drop(first_client);
+    }
+
+    /// Conversion-risk: the staging cursor must stage each index once, in
+    /// order, then exhaust — a cursor that re-stages or skips would either
+    /// double-stage an index or leave a slot pending, so this drives
+    /// `stage_next_shard` through each index to `Exhausted` then false.
+    #[test]
+    fn staging_cursor_stages_each_index_once_then_exhausts() {
+        let mut supervisor = boot_supervisor(config(8));
+        supervisor.slot.host_turn(|state, _ctx| {
+            state.shard_startup = starting(2, VecDeque::new());
+            if let ShardStartup::Starting { next_to_stage, .. } = &mut state.shard_startup {
+                *next_to_stage = StageCursor::Next(0);
+            }
+        });
+
+        let first = supervisor.slot.host_turn(|state, ctx| {
+            let staged = state.stage_next_shard(ctx);
+            let cursor = match &state.shard_startup {
+                ShardStartup::Starting { next_to_stage: StageCursor::Next(index), .. } => Some(*index),
+                ShardStartup::Starting { next_to_stage: StageCursor::Exhausted, .. }
+                | ShardStartup::Idle
+                | ShardStartup::Ready { .. }
+                | ShardStartup::Failed => None,
+            };
+            let staged_zero = match &state.shard_startup {
+                ShardStartup::Starting { slots_by_index, .. } => {
+                    let first_slot = slots_by_index.first();
+                    matches!(first_slot, Some(ShardSlot::Staged(_)))
+                }
+                ShardStartup::Idle | ShardStartup::Ready { .. } | ShardStartup::Failed => false,
+            };
+            (staged, cursor, staged_zero)
+        });
+        assert_eq!(first, Some((true, Some(1), true)));
+
+        let second = supervisor.slot.host_turn(|state, ctx| {
+            let staged = state.stage_next_shard(ctx);
+            let exhausted =
+                matches!(state.shard_startup, ShardStartup::Starting { next_to_stage: StageCursor::Exhausted, .. });
+            let staged_one = match &state.shard_startup {
+                ShardStartup::Starting { slots_by_index, .. } => {
+                    let second_slot = slots_by_index.get(1);
+                    matches!(second_slot, Some(ShardSlot::Staged(_)))
+                }
+                ShardStartup::Idle | ShardStartup::Ready { .. } | ShardStartup::Failed => false,
+            };
+            (staged, exhausted, staged_one)
+        });
+        assert_eq!(second, Some((true, true, true)));
+
+        let third = supervisor.slot.host_turn(HttpSupervisorState::stage_next_shard);
+        assert_eq!(third, Some(false));
     }
 
     /// Dropping a supervisor during startup drops its one owner of every
@@ -850,40 +938,5 @@ mod wake_coalescing {
         // wake, or the event would sit undelivered.
         assert!(counted.sink.post(probe_event()));
         assert_eq!(counted.drained_wakes(), 2);
-    }
-}
-
-mod monitor_collapse {
-    use super::super::HttpServerConfig;
-    use super::{boot_supervisor, proven};
-
-    /// The `route holder is not monitorable` warn must fire once per
-    /// mailbox, not once per route. A mailbox that fails to monitor
-    /// leaves its slot remembered in `unmonitorable`, so a second
-    /// `watch` for the same mailbox is a no-op. The targets are closure
-    /// routes, which hold no actor slot, so the supervisor's real monitor
-    /// index answers `TargetNotFound` for them.
-    #[test]
-    fn watch_remembers_unmonitorable_mailbox() {
-        let mut supervisor = boot_supervisor(HttpServerConfig::default());
-        let target = proven(&supervisor.registry, "test.http.watch.target");
-        let other = proven(&supervisor.registry, "test.http.watch.other");
-
-        supervisor.slot.host_turn(|state, ctx| {
-            assert!(!state.monitors.contains_key(&target));
-            assert!(!state.unmonitorable.contains(&target));
-
-            state.watch(ctx, target);
-            assert!(state.unmonitorable.contains(&target), "first failed monitor inserts into unmonitorable");
-            assert!(!state.monitors.contains_key(&target));
-            let after_first = state.unmonitorable.len();
-
-            state.watch(ctx, target);
-            assert_eq!(state.unmonitorable.len(), after_first, "second watch for same mailbox stays collapsed");
-
-            state.watch(ctx, other);
-            assert!(state.unmonitorable.contains(&other), "different mailbox still warns");
-            assert_eq!(state.unmonitorable.len(), after_first + 1);
-        });
     }
 }

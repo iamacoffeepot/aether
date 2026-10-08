@@ -16,9 +16,10 @@ use crate::mail::registry::effect::{
     PreparedCostCells, PreparedMail, PreparedSpawnActivation, PreparedSpawnCommit, PreparedSpawnFailure,
     RegistryApplied, RegistryEffect,
 };
-use crate::mail::registry::{MailboxEntry, OwnedDispatch, Registry, RouteContract, canonical_mailbox_id};
+use crate::mail::registry::{MailboxEntry, OwnedDispatch, Registry, RouteContract};
 use crate::mail::{KindId, Mail, MailId, MailboxId, Source, SourceAddr};
 use crate::testing::boot_authority as auth;
+use crate::testing::canonical_id;
 
 pub(super) fn inventory_subscription_fixture()
 -> (Arc<Registry>, Arc<Mailer>, crossbeam_channel::Receiver<KindId>, MailboxId) {
@@ -147,7 +148,9 @@ pub(super) fn prepared_test_spawn(
     expected_starting: Vec<MailboxId>,
     bootstrap: u8,
 ) -> (MailboxId, Arc<CostCell>, Arc<AtomicUsize>, RegistryEffect) {
-    let id = canonical_mailbox_id(name);
+    // The lineage fold, which a root name meets at its name hash, so a
+    // nested fixture name stands where the registry looks for its path.
+    let id = canonical_id(name);
     let cell = Arc::new(CostCell::new());
     let cancelled = Arc::new(AtomicUsize::new(0));
     let effect = RegistryEffect::PreparedSpawn(PreparedSpawnCommit::new(

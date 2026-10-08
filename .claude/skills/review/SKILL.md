@@ -3,9 +3,9 @@ name: review
 description: "Run Aether's independent findings-first five-lens review over existing Rust code or a named pull request, returning current-head findings, verdict, and any rescope recommendation to its caller."
 ---
 
-# /review — independent direct review engine
+# /review — independent five-lens review engine
 
-This skill is read-only. It is a standalone review, run on request or as a backfill audit; `/implement` and `/resolve` review their own heads directly and do not call it. It inspects repository and GitHub facts and returns structured review material to whoever invoked it; the caller owns comments, reviews, fixes, pushes, and thread resolution.
+This skill is read-only. It is a standalone review, run on request or as a backfill audit; no workflow step requires it, and `/implement`, `/resolve`, and `/land` do not call it. It inspects repository and GitHub facts and returns structured review material to whoever invoked it; the caller owns comments, reviews, fixes, pushes, and thread resolution.
 
 ## Invocation
 

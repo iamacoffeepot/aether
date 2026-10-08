@@ -1,190 +1,204 @@
 # Text
 
-> **Decision status:** [ADR-0105](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0105-text-rendering.md) is
-> Accepted and marked shipped. Its load-bearing split is stable: the
-> `aether.text` capability owns fonts and layout on the CPU, while
-> `aether.render` owns textures and textured-quad drawing.
+> **Decision status:** the renderer draws text.
+> [ADR-0248 §10](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0248-lineage-is-an-ordered-tree.md)
+> (Proposed) records that, and supersedes the part of
+> [ADR-0105](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0105-text-rendering.md)
+> that made text a capability of its own. ADR-0105's render surface, and its
+> layout and atlas design, stand.
 
-`aether.text` turns TTF bytes and strings into render mail. It has no GPU
-handle and no private rendering path: it loads fonts, measures and rasterizes
-glyphs, maintains a CPU atlas, then mails texture updates and textured quads to
-`aether.render`. This keeps font machinery replaceable and gives sprites,
-images, widgets, and text one shared texture surface.
+Text is part of `aether.render`. There is no `aether.text` mailbox: the three
+text kinds are `aether.render.*` kinds, sent to the renderer like any other
+draw. The renderer registers fonts, lays strings out, keeps the glyph atlas as
+one of its own textures, and draws each batch of strings as one textured
+overlay batch. See [Rendering & camera](rendering.md) for the overlay pass it
+draws in.
 
 ## Mental model
 
-The capability holds two session-scoped caches:
+The render actor holds two pieces of session state for text:
 
-1. a font registry keyed by numeric `font_id`, with a reverse index from
-   `(namespace, path)` to id; and
-2. one 512 × 512 RGBA8 glyph atlas, with entries keyed by
-   `(font_id, glyph index, rounded pixel size)`.
+1. a font registry keyed by numeric `font_id`; and
+2. the glyph atlas: a shelf packer and a cache keyed by
+   `(font_id, glyph index, rounded pixel size)`, over one 512 × 512 RGBA8
+   texture the renderer reserves for itself.
 
-Loading and measuring are retained operations. Drawing is immediate-mode:
-send a draw every frame it should be visible. The capability lays out a
-horizontal glyph run, uploads atlas misses before use, and emits one or more
-`aether.render.draw_textured_quads` batches. The renderer, not the text actor,
-applies projection, clipping, blending, and frame lifetime. See
-[Rendering & camera](rendering.md).
+Both are plain state of the one render actor, with no lock around either.
+Registering a font is a request with a reply. Drawing is immediate mode: send
+a draw every frame it should be visible.
 
-`TextCapability` is available as a lightweight addressing identity under the
-`text` feature. Its fontdue-backed native state is compiled only with
-`text-runtime`; wasm senders can use the kinds without linking fontdue or
-substrate runtime types. The split is defined in
-[`text/lib.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/lib.rs).
+A text draw is one mail from the actor that wants the text to the renderer,
+and nothing else. The renderer lays it out on its own turn and pushes one
+batch onto the overlay list, where a shape batch would go. So text and shapes
+from one actor keep the order that actor sent them in. Between two actors the
+order is lineage order: a child's draws lie over its parent's and a later
+sibling's over an earlier one's, whatever order the mail arrived in
+([Rendering](rendering.md)).
+
+The kinds compile without the renderer's native half: a wasm guest that
+depends on `aether-render` with `default-features = false` gets the kind types
+and the `RenderCapability` identity without `fontdue` or `wgpu`.
 
 ## Public mail surface
 
-Wire kind names and Rust types are deliberately shown separately:
+All three go to the `aether.render` mailbox.
 
 | Mail kind | Rust payload | Contract |
 |---|---|---|
-| `aether.text.load_font` | `LoadFont` | read `namespace://path`; reply `aether.text.load_font_result` / `LoadFontResult` |
-| `aether.text.load_font_bytes` | `LoadFontBytes` | parse request-carried TTF bytes; reply with the same `LoadFontResult` kind |
-| `aether.text.font_metrics` | `FontMetricsRequest` | resolve `FontRef::Id` or `FontRef::Path`; reply `aether.text.font_metrics_result` / `FontMetricsResult` |
-| `aether.text.draw` | `DrawText` | fire-and-forget one string |
-| `aether.text.draw_batch` | `DrawTextBatch` | fire-and-forget ordered strings with compatible-run batching |
+| `aether.render.create_font` | `CreateFont { bytes }` | parse a font from a blob; reply `aether.render.create_font_result` / `CreateFontResult` |
+| `aether.render.font_metrics` | `FontMetricsRequest { font_id }` | reply `aether.render.font_metrics_result` / `FontMetricsResult` |
+| `aether.render.draw_text` | `DrawText { clip, space, runs }` | fire-and-forget one batch of strings |
 
 The exact schemas are in
-[`text/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/kinds.rs).
-`FontRef`, `DrawText`, and `LoadFontBytes` are Rust value types, not extra
-mail-kind names.
+[`aether-render/src/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/src/kinds.rs).
+`TextRun` is a value type inside `DrawText.runs`, not a mail kind.
 
-### Loading a font
+### Registering a font
 
-`LoadFont { namespace, path }` forwards an `aether.fs.read`, preserves the
-original reply route through typed request context, and parses the bytes on a
-blocking task. Success returns `font_id`, a filename-derived display name, and
-the source byte count. Read and parse errors return the requested namespace and
-path with a reason. See [File I/O](file-io.md).
+`CreateFont { bytes }` carries the whole of a TrueType or OpenType file as a
+blob (`aether_data::Blob`). The renderer reads no file and depends on no other
+capability, so the caller gets the bytes however it likes:
 
-`LoadFontBytes { name, bytes }` takes the same parse path without fs. It
-registers under the synthetic namespace `memory`, using `name` as both path key
-and display name. This is the route for a guest with an embedded fallback TTF.
+- a component reads the file with `aether.fs.read` and passes the `bytes` blob
+  of the `ReadResult` on, or takes one of its module's assets. A blob held
+  this way is sent on by reference, so the font is not copied through the
+  guest's memory;
+- a component that embeds a font builds the blob with `Blob::from`;
+- an MCP session passes the bytes as `{"$hex": "..."}`.
 
-Path-backed fonts are deduplicated by exact `(namespace, path)`: repeated loads
-reuse the existing session id. Memory-backed loads likewise collide by exact
-name. Font ids start at zero, are monotonic for the process, and are not stable
-across restart. There is no unload operation.
+The parse runs on a blocking worker, off the renderer's turn, and the reply
+comes when it finishes: `Ok { font_id }`, or `Err { error }` for bytes that
+are not a font. Each request has its own parse and its own reply.
+
+Font ids start at zero, count up for the process, and are not stable across a
+restart. A second `create_font` of the same bytes is a second font with a new
+id, as a second `create_texture` of the same pixels is a second texture. There
+is no destroy operation. A session that runs out of ids is answered `Err`.
 
 ### Drawing
 
-`DrawText` names a resident `font_id`, UTF-8 text, positive finite
-`size_pixels`, a linear RGBA tint, an `origin`, a `QuadSpace`, and optional
-`ClipRect`.
+`DrawText` carries a `QuadSpace`, an optional `ClipRect`, and a list of runs.
+Each `TextRun` names a registered `font_id`, UTF-8 text, a positive finite
+`size_pixels`, a linear RGBA `color`, and an `origin`.
 
-- `QuadSpace::Screen` treats `origin` as the top-left screen-pixel offset from
-  which the horizontal run flows. Screen y increases downward.
-- `QuadSpace::World { anchor, scale }` ignores `origin`, centers the run
+- `QuadSpace::Screen` treats each run's `origin` as the pen's starting pixel,
+  from which the run flows left to right. Screen y increases downward.
+- `QuadSpace::World { anchor, scale }` ignores `origin`, centres each run
   horizontally on `anchor`, and places its baseline at the anchor. The glyph
   quads remain camera-facing. `QuadScale::Pixels` holds screen size;
   `QuadScale::Distance` holds the requested pixel size at its reference
   distance and shrinks with perspective.
 - `clip`, when present, is a framebuffer-pixel scissor in either projection
-  mode. It is not local to `origin` or to the world anchor.
+  mode. It is not local to an origin or to the world anchor.
 
-Layout currently walks Unicode scalar values with fontdue horizontal metrics.
-It does not shape scripts, apply kerning, perform BiDi, choose fallback fonts,
-or build multiple lines. A newline is not a layout command; callers that need
-line wrapping or line breaks must measure and emit separate runs.
+The projection and the clip are on the batch, as they are on `DrawShapes`.
+Runs that need a different clip or projection go in a different `DrawText`.
 
-World runs use pixel offsets relative to their anchor; screen runs receive the
-authored origin after glyph placement. Empty-coverage glyphs such as spaces do
-not emit quads but still advance the pen. An unknown font id warn-drops that
-item. A non-finite or non-positive size silently drops it.
+Layout walks Unicode scalar values with fontdue's horizontal metrics. It does
+not shape scripts, apply kerning, perform BiDi, choose fallback fonts, or
+build multiple lines. A newline is not a layout command; callers that need
+line wrapping or line breaks measure and send separate runs.
 
-`DrawTextBatch` preserves authored item order. Adjacent non-empty items with
-equal projection and equal clip are coalesced into one quad send. A projection
-or clip transition flushes the current run; later items with an earlier key do
-not reorder backward to join it. Unknown-font or invalid-size items alone are
-dropped, without discarding valid neighbors. Glyph uploads are sent before the
-quad run that can sample them. The implementation is in
-[`text/runtime/mod.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/runtime/mod.rs)
+Empty-coverage glyphs such as spaces draw nothing and still advance the pen.
+A run naming an unknown font id, or a size that is not finite and positive, is
+dropped with a warning, and the other runs of the batch still draw. The
+implementation is in
+[`runtime/text/mod.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/src/runtime/text/mod.rs)
 and
-[`text/runtime/layout.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/runtime/layout.rs).
+[`runtime/text/layout.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/src/runtime/text/layout.rs).
 
 ### Measuring locally
 
-`FontMetricsRequest` accepts either a known id or a path. A resident id/path
-replies immediately. A path miss loads and registers the font through fs before
-replying. An unknown id returns `FontMetricsResult::Err` rather than a warning.
+`FontMetricsRequest { font_id }` is answered inside the call. An unknown id
+returns `FontMetricsResult::Err`.
 
 The result is size-independent: units per em, ascent, descent, line gap,
 default advance, and a codepoint-sorted advance table. Consumers scale those
 font units locally for caret placement, hit testing, or fit-to-content layout,
-avoiding a mail round trip for every string measurement. The shared wire value
+avoiding a mail round trip for every string measurement. The shared value
 types are in
 [`aether-kinds/src/lib.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kinds/src/lib.rs), and the
 wasm-safe scaling helper is in
 [`text_metrics.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kinds/src/text_metrics.rs).
 
-## Atlas lifecycle
+## The reserved atlas
 
-The first valid draw has no texture id yet. It sends one
-`aether.render.create_texture` for a zeroed 512 × 512 RGBA8 atlas and emits no
-glyph draw. The correlated `CreateTextureResult` stores the id; because drawing
-is immediate-mode, the caller's next frame retries naturally.
+The glyph atlas is an entry in the renderer's texture registry under a
+reserved id: `u32::MAX` is the white texture, and the atlas is the id below
+it. `create_texture` hands ids out from zero and stops below both, so the
+atlas never shifts a caller's ids. A caller can sample it, and an
+`update_texture` or `destroy_texture` naming it is refused with a warning.
 
-On a glyph miss, fontdue coverage is stored as alpha over white RGB and one
-sub-rectangle update is mailed. A one-pixel gutter separates packed glyphs.
-Pixel sizes are rounded to the nearest integer, at least one, for cache keys;
-layout still uses the authored float size. Nearby fractional sizes can
-therefore share one raster while retaining different advances and quad
-placement.
+The texture is registered in the call that first draws text, zeroed, so that
+first draw shows. Its staged pixels are the only copy of the atlas image, and
+it is counted on the renderer's `textures` memory gauge at its 1 MiB like any
+other texture. The staged pixels survive a render device replacement, so the
+glyph cache stays valid across one.
+
+On a glyph miss, fontdue coverage is written into the staged pixels as alpha
+over white RGB, and the texture uploads at the next frame record. A one-pixel
+gutter separates packed glyphs. Pixel sizes are rounded to the nearest
+integer, at least one, for cache keys; layout still uses the authored float
+size. Nearby fractional sizes can therefore share one raster while keeping
+different advances and quad placement.
 
 If a glyph cannot fit, that glyph is omitted and the atlas marks itself full.
-At the top of the next draw call, the capability clears the CPU pixels and
-cache, resets the shelf packer, uploads one full transparent rectangle, then
-re-rasterizes the requested glyphs as misses. The saturating frame may be
-partial; the next frame recovers if its working set fits. There is no LRU or
-multi-atlas spill. See
-[`text/runtime/atlas.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/runtime/atlas.rs).
+At the top of the next text draw the renderer clears the cache, resets the
+shelf packer, zeroes the texture, and places that draw's glyphs as misses. The
+saturating draw may be partial; the next recovers if its working set fits.
+There is no LRU or multi-atlas spill. See
+[`runtime/text/atlas.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/src/runtime/text/atlas.rs).
 
 ## Invariants and failure modes
 
-- Font parsing and fs reads are settlement-held deferred work; the eventual
-  result must resolve the original requester, not the intermediate fs sender.
-- The CPU atlas is the source of truth. Texture creation and glyph sub-rect
-  uploads must remain ordered before draw mail on the same chain.
-- Draw mail has no success reply. Unknown ids, bad sizes, atlas overflow, and
-  renderer-side texture errors are observable through logs or missing output.
-- A failed atlas `create_texture` clears the in-flight flag but leaves no
-  texture id. The next immediate-mode draw retries creation.
-- Font ids and the atlas texture id are process/session state. They must never
-  be persisted as durable asset identifiers.
-- The current id allocator uses saturating increment and has no explicit
-  exhaustion error. Code that changes registry lifetime should add an
-  observable exhaustion policy rather than relying on practical unreachability.
+- A text draw and a shape from one actor keep that actor's send order. Both
+  are mail to the one renderer through one queue, and each becomes an overlay
+  batch in the turn its mail is handled. An opaque plate sent after a text
+  draw covers it, and text sent after a plate lies on it. Text and a plate
+  from two different actors lie in lineage order instead: the actor created
+  later, or beneath the other, is on top.
+- The first draw of a registered font shows. Nothing is created by a round
+  trip on the way.
+- Draw mail has no success reply. Unknown ids, bad sizes and atlas overflow
+  are observable through logs or missing output.
+- Layout and the rasterising of unseen glyphs run on the renderer's turn,
+  which on desktop is the driver thread. A warm draw costs one metrics call,
+  one cache lookup and one quad per character.
+- A `Screen` run's `origin` is the pen, not the ink: layout starts the pen
+  at the origin and places the baseline one **ascent** below it (the face's
+  horizontal line ascent at the draw size, or the size itself for a face
+  without line metrics). A caller that wants a run centred in a row computes
+  the baseline it wants and subtracts the ascent `FontMetricsResult` reports,
+  scaled to the draw size;
+  treating the origin as the top of a `size_pixels`-tall box sinks the run.
+- A character the face lacks is not an error and is not skipped. Its cmap
+  lookup yields glyph index `0`, so the run draws and advances by the face's
+  `.notdef` glyph, and `FontMetrics::default_advance` is that same advance.
+  A caller that wants `⌘` in a label ships a face that has it.
+- A dirty staged texture uploads whole, so one new glyph re-uploads the
+  atlas at the next frame record.
+- Font ids are session state. They must never be persisted as durable asset
+  identifiers.
 
 ## Chassis and feature caveats
 
-Desktop and the render-capable SubstrateHarness compose both text and render, so all
-operations are usable. Text depends on render, and a chassis composes only the
-capabilities it serves, so headless and the minimal hub compose neither
-`aether.text` nor `aether.render`; a component that depends on text is refused
-at load there
+Text is available wherever the renderer is: the desktop chassis and a
+render-composing SubstrateHarness. A chassis composes only the capabilities it
+serves, so headless and the hub compose no `aether.render`, and a component
+that depends on it is refused at load there
 ([ADR-0232 §6](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0232-flat-ctx-send-verbs.md)).
-
-The current composition is defined in
-[`aether-chassis-desktop/src/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis-desktop/src/chassis.rs),
-[`aether-chassis-harness/src/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis-harness/src/chassis.rs),
-and
-[`aether-harness-substrate/src/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-harness-substrate/src/chassis.rs).
 
 ## Where to change or extend it
 
-- Change the wire surface in
-  [`text/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/kinds.rs) and
-  update ADR-0105 when the contract changes. Keep mail kind strings distinct
-  from helper value types.
-- Add shaping, fallback, kerning, or multiline behavior in the CPU layout
-  layer. If callers need new authored policy, add an explicit schema field;
-  otherwise keep it behind the existing draw kinds.
-- Change packing or rasterization in `runtime/atlas.rs` without exposing GPU
-  state to the text capability. A multi-atlas design would need batching and
-  lifecycle work because each draw run names one texture id.
-- Projection, clipping, texture format, and blending changes belong to the
-  render surface, not font layout. Coordinate changes with
-  [Rendering & camera](rendering.md).
-- Any new native implementation remains behind `text-runtime`; the always-on
-  identity and kinds must stay wasm-safe.
+- Change the mail surface in
+  [`aether-render/src/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/src/kinds.rs)
+  and record the change in the governing ADR.
+- Add shaping, fallback, kerning, or multiline behavior in
+  `runtime/text/layout.rs`. If callers need new authored policy, add an
+  explicit schema field; otherwise keep it behind the existing draw kind.
+- Change packing in `runtime/text/atlas.rs`. A multi-atlas design would need
+  batching work, because each text batch names one texture.
+- Projection, clipping and blending belong to the overlay pass text shares
+  with the other overlay draws; see [Rendering & camera](rendering.md).
+- New native code stays behind the `runtime` feature; the kinds and the
+  identity must stay wasm-safe.

@@ -64,11 +64,7 @@ pub(crate) use kinds::RetireWindow;
 pub use kinds::*;
 
 use aether_actor::{ActorPath, Publisher, Publishes, actor};
-use aether_data::{ErasedActorPath, Kind, LoadName};
-use aether_kinds::{
-    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
-    WindowSize,
-};
+use aether_data::{Kind, LoadName};
 /// The one declaration of the `aether.window` mailbox name, which
 /// [`WindowCapability`]'s runtime reads as its `NAMESPACE`
 /// (iamacoffeepot/aether#5720).
@@ -132,21 +128,21 @@ impl Publisher for WindowCapability {
     }
 }
 
-/// The canonical actor path of the window named `name`:
-/// `aether.window/aether.window.instance:<name>`, written from the
-/// [`WindowCapability`] and [`WindowInstance`] types. It is the identity every
-/// window-originated event, `aether.window.list`, and `capture_frame` carry.
-///
-/// # Panics
-///
-/// Never: the path is two steps of valid segments, under the depth and byte
-/// caps.
-#[must_use]
-pub fn window_path(name: &LoadName) -> ErasedActorPath {
-    ActorPath::<WindowInstance>::child(&ActorPath::<WindowCapability>::root(), name)
-        .expect("a window path is two valid steps, under both caps")
-        .as_erased()
-        .clone()
+impl WindowInstance {
+    /// The typed path of the window named `name`: `aether.window/aether.window.instance:<name>`,
+    /// written from the [`WindowCapability`] and [`WindowInstance`] types. It is the path every
+    /// window kind carries, such as [`TakeKeyFocus::window`] and a key's `window`. It compiles
+    /// without the runtime, so a wasm guest builds it.
+    ///
+    /// # Panics
+    ///
+    /// Never: the path is two steps of valid segments, under the depth and
+    /// byte caps.
+    #[must_use]
+    pub fn path(name: &LoadName) -> ActorPath<Self> {
+        ActorPath::<Self>::child(&ActorPath::<WindowCapability>::root(), name)
+            .expect("a window path is two valid steps, under both caps")
+    }
 }
 
 /// The validated load name of a window spec's `name`.
@@ -173,8 +169,8 @@ pub use kinds::InjectWindowEvent;
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseWindow, FocusWindow, RequestWindowRedraw, SetWindowCursor, SetWindowMenu, SetWindowMode, SetWindowTitle,
-        WindowCapability, WindowInstance,
+        CloseWindow, FocusWindow, RequestWindowRedraw, SetWindowCursor, SetWindowMenu, SetWindowMode,
+        SetWindowPresentation, SetWindowTitle, WindowCapability, WindowInstance,
     };
     use aether_actor::{Addressable, HandlesKind};
 
@@ -189,6 +185,7 @@ mod tests {
     fn neutral_window_instance_has_the_exact_control_handler_facts() {
         assert_handles::<CloseWindow>();
         assert_handles::<SetWindowMode>();
+        assert_handles::<SetWindowPresentation>();
         assert_handles::<SetWindowTitle>();
         assert_handles::<SetWindowMenu>();
         assert_handles::<SetWindowCursor>();
@@ -209,15 +206,16 @@ mod tests {
         let typed = WindowInstance::resolve(WindowCapability::resolve(0, ()).0, "main");
         let canonical = "aether.window/aether.window.instance:main";
         let registry = Registry::new();
+        registered_ref(&registry, "aether.window", noop_handler());
         let live = registered_ref(&registry, canonical, noop_handler());
         assert_eq!(live.id(), typed, "the fixture stands the route at the typed resolver's position");
 
-        // Tripwire: `window_path` writes the window's path from actor types;
+        // Tripwire: `WindowInstance::path` writes the window's path from actor types;
         // its text must be the name the registry gives the spawned child, or
         // every event, list row, and capture names a window nothing resolves.
-        let written = super::window_path(&aether_data::LoadName::new("main").expect("a valid window name"));
-        assert_eq!(written.as_str(), canonical);
-        assert_eq!(registry.resolve_address(&written).expect("the written path resolves").mailbox_id, typed);
+        let written = WindowInstance::path(&aether_data::LoadName::new("main").expect("a valid window name"));
+        assert_eq!(written.as_erased().as_str(), canonical);
+        assert_eq!(registry.resolve_address(written.as_erased()).expect("the written path resolves").mailbox_id, typed);
 
         for address in [canonical, "aether.window/:main"] {
             let address = aether_data::ErasedActorPath::new(address).expect("fixture is a well-formed actor path");

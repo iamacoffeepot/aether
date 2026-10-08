@@ -2,12 +2,17 @@
 //!
 //! Owns the whole stack: the mail kinds ([`kinds`]), the [`FileAdapter`] trait
 //! and its `LocalFileAdapter`, the [`AdapterRegistry`] over the `save`,
-//! `assets`, and `config` namespaces, and the [`FsCapability`] itself. A
+//! `assets`, `config`, and `objects` namespaces, and the [`FsCapability`]
+//! itself. `objects` is the read-only namespace of objects read by path
+//! through its own adapter (`object_adapter`): a package's named objects on
+//! a packaged engine, the files of a plain directory otherwise, as the
+//! composer's [`ObjectSource`] says. A path there is a [`NamespacePath`]. A
 //! chassis main resolves a [`NamespaceRoots`] (usually through
-//! `NamespaceRoots::from_env`) and passes it to
-//! `with_actor::<FsCapability>(roots)`; `init` builds the adapter registry and
-//! returns `BootError` when a root is unusable, so a misconfigured chassis
-//! fails at boot and not at the first read.
+//! `NamespaceRoots::from_env`) and passes it with the source to
+//! `with_actor_configured::<FsCapability>(source, roots)`; `init` builds the
+//! adapter registry and returns `BootError` when a root is unusable or a
+//! package's named object is absent or the wrong length, so a misconfigured
+//! chassis or a truncated install fails at boot and not at the first read.
 //!
 //! `read` and `load` run their adapter calls on bounded worker queues, so
 //! several files are read at once: a `read` holds its caller's chain until
@@ -21,6 +26,9 @@ pub mod kinds;
 
 mod adapter;
 mod config;
+mod named_object;
+mod namespace_path;
+mod object_adapter;
 mod registry;
 
 pub use kinds::*;
@@ -35,7 +43,10 @@ pub use config::NamespaceRoots;
 // `into_layer`) ride the type and need no re-export.
 #[cfg(feature = "runtime")]
 pub use config::{NamespaceRootsLayer, NamespaceRootsOverlay};
-pub use registry::{AdapterRegistry, build_registry};
+pub use named_object::{NamedObject, Sha256, Sha256ParseError};
+pub use namespace_path::{NamespacePath, NamespacePathError};
+pub use object_adapter::{NamedObjectError, ObjectSource};
+pub use registry::{AdapterRegistry, RegistryError, build_registry};
 
 /// `aether.fs` cap **identity** (ADR-0122 identity/runtime split). A ZST
 /// carrying only the addressing — `Addressable` (`NAMESPACE`, `Resolver`),

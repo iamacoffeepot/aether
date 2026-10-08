@@ -44,6 +44,7 @@ use wasmtime::{Engine, Linker};
 use crate::actor::native::local as actor_local;
 use crate::chassis::error::BootError;
 use crate::mail::registry::{BootAuthority, InlineHandler};
+use crate::runtime::actor_clock::ActorClock;
 use crate::runtime::log_install;
 use crate::runtime::panic_hook;
 use crate::{ComponentCtx, HubOutbound, Mailer, Registry, actor::wasm::host_fns};
@@ -112,6 +113,17 @@ impl SubstrateBoot {
     /// ADR-0063: both conditions indicate a substrate-level invariant
     /// violation discovered before any user code runs.
     pub fn build() -> wasmtime::Result<Self> {
+        Self::build_with_clock(ActorClock::running())
+    }
+
+    /// [`Self::build`] with `clock` as the engine's actor clock, the one
+    /// every ctx's `now()` reads. An engine boots through [`Self::build`],
+    /// which passes a running clock; a harness whose test steps the clock by
+    /// hand passes a stepped one.
+    ///
+    /// # Panics
+    /// As [`Self::build`].
+    pub fn build_with_clock(clock: ActorClock) -> wasmtime::Result<Self> {
         // Issue #321: route panics through tracing so dispatcher-thread
         // crashes surface in `engine_logs` instead of vanishing to
         // stderr. Idempotent — chassis re-entries / repeated builds in
@@ -134,7 +146,8 @@ impl SubstrateBoot {
             registry.register_kind_with_descriptor(&authority, d.clone()).expect("duplicate kind in substrate init");
         }
 
-        let queue = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)));
+        let mailer = Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)).with_actor_clock(clock);
+        let queue = Arc::new(mailer);
 
         let mut linker: Linker<ComponentCtx> = Linker::new(&engine);
         host_fns::register(&mut linker)?;

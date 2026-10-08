@@ -80,7 +80,7 @@ macro_rules! close_observed_actor {
         impl Dispatch<Self> for $type {
             fn dispatch(
                 _state: &mut Self,
-                _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+                _ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
                 _kind: KindId,
                 _payload: &[u8],
             ) -> Option<()> {
@@ -94,7 +94,9 @@ macro_rules! shutdown_on_kind_actor {
     ($type:ident, $namespace:literal, $kind:ty) => {
         close_observed_state!($type, $namespace);
 
-        impl HandlesKind<$kind> for $type {}
+        impl HandlesKind<$kind> for $type {
+            type Sender = aether_actor::Anyone;
+        }
 
         shutdown_dispatch!($type, $kind);
     };
@@ -105,7 +107,7 @@ macro_rules! shutdown_dispatch {
         impl Dispatch<Self> for $type {
             fn dispatch(
                 _state: &mut Self,
-                ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+                ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
                 kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {
@@ -131,7 +133,9 @@ macro_rules! unit_shutdown_actor {
 
         impl aether_actor::Root for $type {}
 
-        impl HandlesKind<$kind> for $type {}
+        impl HandlesKind<$kind> for $type {
+            type Sender = aether_actor::Anyone;
+        }
 
         impl aether_actor::Lifecycle<Self> for $type {
             type Config = ();
@@ -192,7 +196,7 @@ impl NativeActor for StubLog {
 impl Dispatch<Self> for StubLog {
     fn dispatch(
         _state: &mut Self,
-        _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+        _ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
         _kind: KindId,
         _payload: &[u8],
     ) -> Option<()> {

@@ -18,7 +18,8 @@
 //! A test that owns a pumped actor drives it through [`PumpedDriver`],
 //! which waits the way a pumped chassis driver does (ADR-0161 §Decision 2);
 //! a test that waits on a pooled actor's chain uses [`await_settled`], and
-//! one that waits on a detached effect uses [`await_signal`].
+//! one that waits on a detached effect uses [`await_signal`], or
+//! [`await_event`] when the effect carries a value the test asserts on.
 //!
 //! A replace test that needs its guest's own code under a new content hash
 //! takes it from [`successor_wasm`].
@@ -42,7 +43,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_actor::{ErasedActorRef, Root};
-use aether_data::{Kind, MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
+use aether_data::{ActorPathForm, ErasedActorPath, Kind, MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
 use aether_kinds::descriptors;
 
 use crate::actor::native::NativeActor;
@@ -55,13 +56,13 @@ use crate::chassis::inbox::inbox_channel;
 use crate::config::ConfigMember;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::{EgressEvent, HubOutbound};
-use crate::mail::registry::{BootAuthority, InboxHandler, NameConflict, Registry, lineage_mailbox_id};
+use crate::mail::registry::{BootAuthority, InboxHandler, RegisterError, Registry, lineage_mailbox_id};
 use crate::runtime::lifecycle::FatalAborter;
 
 mod pumped;
 mod successor;
 
-pub use pumped::{PumpedDriver, await_settled, await_signal};
+pub use pumped::{PumpedDriver, await_event, await_settled, await_signal};
 pub use successor::successor_wasm;
 
 /// Canonical test chassis. `build()` is unreachable — every consumer
@@ -183,26 +184,44 @@ pub fn registered_binding(
 /// `Registry::resolve_address`, and a spawn claiming the same path all meet
 /// it. A root name folds to its name hash, the position it always had.
 ///
+/// A nested path needs its parent standing: the registry refuses a name
+/// nested beneath a parent that holds no record (ADR-0248 §5), so a fixture
+/// registers `a` before `a/b:k`, as production births do.
+///
 /// The reference is proven by the registry's own liveness read, the same
 /// one a handler's `ctx.resolve_live` takes, so a fixture proof and a
 /// production proof come from the same code.
 ///
 /// # Panics
-/// Panics if `name` is already registered.
+/// Panics if `name` is already registered, or is nested beneath a parent
+/// that is not.
 pub fn registered_ref(registry: &Registry, name: &str, handler: Arc<dyn InboxHandler>) -> ErasedActorRef {
     try_registered_ref(registry, name, handler).expect("the fixture name is free")
 }
 
 /// [`registered_ref`] for a fixture that needs the refusal: `Err` when `name`
-/// is already registered, where `registered_ref` panics.
+/// is already registered or its parent holds no record, where
+/// `registered_ref` panics.
 pub fn try_registered_ref(
     registry: &Registry,
     name: &str,
     handler: Arc<dyn InboxHandler>,
-) -> Result<ErasedActorRef, NameConflict> {
+) -> Result<ErasedActorRef, RegisterError> {
     registry
-        .try_register_inbox_with_id(&boot_authority(), lineage_mailbox_id(name), name, handler)
+        .try_register_inbox_with_id(&boot_authority(), canonical_id(name), name, handler)
         .map(|id| registry.resolve_live(id).expect("a freshly registered inbox proves"))
+}
+
+/// The position the canonical fixture path `name` names. Panics on a name
+/// that is no actor path or is a short path: a fixture names its actor in
+/// full.
+pub(crate) fn canonical_id(name: &str) -> MailboxId {
+    let path = ErasedActorPath::new(name).expect("the fixture name is an actor path");
+    let ActorPathForm::Canonical(view) = path.form() else {
+        panic!("the fixture name is canonical");
+    };
+
+    lineage_mailbox_id(&view)
 }
 
 /// Register a relay inbox under `name` the way `ChassisCtx::claim_mailbox`

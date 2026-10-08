@@ -20,6 +20,7 @@ use aether_data::{Kind, RequestId, wire};
 use super::{NO_INBOUND_SOURCE, Registry, WasmCtx};
 use crate::HeldReply;
 use crate::mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyHandle};
+use crate::model::Anyone;
 use crate::model::ctx::{Erased, Unchecked};
 use crate::request_context::split_state_envelope;
 use crate::wasm::ctx::{CapturedState, Held, WasmDropCtx};
@@ -61,7 +62,7 @@ struct Ask {
 const ACTOR: u64 = 0x10;
 
 /// A ctx dispatching mail whose reply handle is `handle`.
-fn ctx_for(registry: &Registry, handle: u32) -> WasmCtx<'_, Erased, Unchecked> {
+fn ctx_for(registry: &Registry, handle: u32) -> WasmCtx<'_, Erased, Anyone, Unchecked> {
     let mut ctx = WasmCtx::__new(ACTOR, registry, NO_INBOUND_SOURCE);
     ctx.__set_reply_to(Some(ReplyHandle::__from_raw(handle)));
     ctx
@@ -100,7 +101,7 @@ fn dispatch_hold(registry: &Registry, handle: u32) -> Held<Answer> {
     let payload = Ask { value: 0 }.encode_into_bytes();
     // SAFETY: `payload` outlives the `Mail` built over it.
     let mail = unsafe { Mail::__from_ptr(Ask::ID.0, payload.as_ptr().addr(), payload.len() as u32, 1, handle, ACTOR) };
-    let mut ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(ACTOR, registry, NO_INBOUND_SOURCE);
+    let mut ctx: WasmCtx<'_, Erased, Anyone, Unchecked> = WasmCtx::__new(ACTOR, registry, NO_INBOUND_SOURCE);
     let rc = <Holder as crate::WasmDispatch<Holder>>::dispatch(&mut holder, &mut ctx, mail);
     assert_eq!(rc, crate::DISPATCH_HANDLED_HOLD, "a single `-> Pending<R>` arm reports the hold");
     holder.parked.take().expect("the handler parked its ticket")
@@ -152,7 +153,7 @@ fn second_hold_panics() {
     let payload = Ask { value: 0 }.encode_into_bytes();
     // SAFETY: `payload` outlives the `Mail` built over it.
     let mail = unsafe { Mail::__from_ptr(Ask::ID.0, payload.as_ptr().addr(), payload.len() as u32, 1, 5, ACTOR) };
-    let mut ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(ACTOR, &registry, NO_INBOUND_SOURCE);
+    let mut ctx: WasmCtx<'_, Erased, Anyone, Unchecked> = WasmCtx::__new(ACTOR, &registry, NO_INBOUND_SOURCE);
     let _ = <DoubleHolder as crate::WasmDispatch<DoubleHolder>>::dispatch(&mut holder, &mut ctx, mail);
 }
 
@@ -273,7 +274,9 @@ fn dehydrate_refuses_live_unsaved_and_reverts() {
     let unsaved = hold_on(&registry, 6);
 
     let mut capture = CapturedState::default();
-    WasmDropCtx::__new_capturing(ACTOR, &mut capture, &registry).save_state_kind(0, &HeldState { debt: saved });
+    WasmDropCtx::__new_capturing(&mut capture, &registry)
+        .save_state_kind(0, &HeldState { debt: saved })
+        .expect("a live ticket saves");
     assert!(registry.__held_unsaved(), "the unsaved ticket refuses the dehydrate");
 
     discharge(&registry, unsaved);
@@ -300,7 +303,7 @@ fn save_state_kind_bytes_match_serde() {
     let value = PlainState { count: 7, label: String::from("seven") };
 
     let mut capture = CapturedState::default();
-    WasmDropCtx::__new_capturing(ACTOR, &mut capture, &registry).save_state_kind(0, &value);
+    WasmDropCtx::__new_capturing(&mut capture, &registry).save_state_kind(0, &value).expect("a plain state saves");
 
     // Tripwire: the saved-state framing is the cross-SDK replace format; a
     // drift here breaks replace between old and new guests.

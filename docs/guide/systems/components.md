@@ -126,12 +126,13 @@ mailbox:
 | `aether.component.spawn` | stand up an instance of a published type at `NS`, `NS:key`, or `parent/NS:key`, or return a live one | `SpawnResult` |
 | `aether.component.load` | publish the module, then spawn the export it selects, in one call | `LoadResult` |
 | `aether.component.drop` | close the instance, which runs the guest's `unwire`; answers once the guest is released; its name tombstones | `DropResult` |
+| `aether.component.unpublish` | withdraw one published namespace; refused while any instance of it is live, naming it | `UnpublishResult` |
 | `aether.component.list` | enumerate the engine's live components | `ListComponentsResult` |
 | `aether.component.describe` | introspect one component's receive-side capabilities | `DescribeComponentResult` |
 
 A bare `Publish { code, configs }` binds every namespace the module exports;
 identical bytes already bound are a no-op, and a first publish spawns the
-module's boot once (ADR-0147). A `Spawn { namespace, key, parent, config, code }`
+module's boot once (ADR-0147). A `Spawn { namespace, key, parent, config }`
 then stands up an instance of a published type: a live name answers
 `SpawnResult::Live` without re-init, an absent name answers `Spawned`, and a
 tombstoned name (§8, below) is refused. A `namespace` naming a native type —
@@ -154,7 +155,7 @@ The successful reply is sent by the loaded component itself: the component host
 waits with the load's held reply until the guest's birth completes, then hands
 it off to the guest (as `aether.component.load_delivered`,
 [ADR-0243](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0243-typed-held-replies.md)
-§9), and the guest answers the requester in its own name. An actor that loaded a component therefore takes `ctx.sender()`
+§9), and the guest answers the requester in its own name. An actor that loaded a component, native or guest, therefore takes `ctx.sender()`
 from the reply as its proven reference, and casts it once, there, to the
 protocol it will send the component, since an erased reference has no send
 verb (ADR-0231 §4); an embedder reads the stamped sender off the reply event
@@ -170,34 +171,26 @@ module's namespaces are the group it binds, or, for a successor, republishes.
 The engine compiles each distinct module, and parses its custom sections, once
 per content hash (the BLAKE3 hash of its wasm bytes). Every load, module boot,
 and publish of the same bytes shares that one entry, which lives
-while its publication or any of them holds it. Neither the wasm bytes nor any
-`aether.asset.*` payload is kept once the module is built; the entry keeps each
-asset's catalog entry and byte range
+while its publication or any of them holds it. A publish checks each asset
+into the engine blob store as its own deduplicated blob held by the `Module`;
+the file bytes are let go once the module is built, while each asset lives
+exactly as long as a `Module` holds it
 ([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md) §2).
-A guest's load window (`init` + `wire`) reads its assets from the bytes the
-load or republish brought and lets go of them when `wire` returns
-([ADR-0163](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0163-content-addressed-packages-and-asset-bundles.md) §3).
-The window has two verbs. `asset_blob(name)` hands the asset over as a `Blob`
-the guest holds by handle: a range of the module's bytes where they already
-sit in the engine blob store, so no payload byte enters guest memory, and
-sending it on as a `Blob` field gives an in-process recipient the same bytes
-uncopied. It is the verb for a bundle that is mostly payload and routes an
-asset to the actor that makes it resident. `asset(name)` copies the asset into
-guest memory as a `Vec<u8>`, for an actor that parses or transforms the payload
-itself, or whose asset is small beside its module's code, as the reference
-bundle's tile is. A blob the actor keeps in its state past `wire`, or that its recipient
-keeps, holds the module's bytes resident until it drops; the window itself
-still lets go when `wire` returns, and neither verb is reachable from a
-handler.
-A `Spawn` reads its module's assets only from the bytes it brings. One that
-brings the published module's bytes in `code` opens a window over them, and
-its guest reads its assets as a loaded one does; bytes of any other module are
-refused, since the asset ranges belong to the published module. A boot
-manifest entry spawns this way: every instance it stands up, each replica of a
-`replicas: N` entry included, brings the entry's module and reads its assets in
-`wire`. A `Spawn` with no `code` brings no bytes: its guest sees the catalog,
-and a fetch of a catalogued asset by either verb traps naming the two doors
-that bring them, a spawn with its code and `load_component`.
+A guest reads its assets from its own module in every hook — `init`, `wire`,
+all handlers, `on_rehydrate`, and `unwire` — through the `Assets` ctx trait
+([ADR-0250](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0250-a-component-reads-its-assets-whenever-it-runs.md)).
+The surface has two verbs. `asset_blob(name)` hands the asset over as a `Blob`
+the guest holds by handle: the asset's own store entry, so no payload byte
+enters guest memory, and sending it on as a `Blob` field gives an in-process
+recipient the same bytes uncopied. It is the verb for a bundle that is mostly
+payload and routes an asset to the actor that makes it resident. `asset(name)`
+copies the asset into guest memory as a `Vec<u8>`, for an actor that parses or
+transforms the payload itself, or whose asset is small. A name the catalog
+does not carry answers `None`, as do both verbs. A `Spawn` of a published
+type always builds an instance that can read its assets, whoever asks for it:
+a boot manifest entry spawns this way, every instance it stands up, each
+replica of a `replicas: N` entry included, reading its assets from its own
+module in `wire` and in every later hook.
 
 For a multi-actor module, the load also chooses **which exported type** to
 instantiate: `aether.component.load` takes an optional **export selector** — the
@@ -243,7 +236,8 @@ to bring the component back.
 
 The close is what releases the guest: it runs the guest's `unwire`, answers each
 reply the guest still holds with its registered `unanswered` value, and drops
-the instance. The drop request is answered `DropResult::Ok` once that is done,
+the instance. The guest's `unwire` runs on its inline children first, children
+before their parents and deepest first, and on the entry actor last. The drop request is answered `DropResult::Ok` once that is done,
 so a caller that reads `Ok` reads a released guest. Mail the guest sends from
 `unwire` starts its own chains, outside the drop's, and is on its recipients'
 inboxes before the drop answers. The same close runs when nobody drops the
@@ -251,6 +245,14 @@ instance and the engine tears down
 ([ADR-0247](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0247-six-invariants-where-actors-meet-the-engine.md)
 rule 5): a guest's `unwire` runs on every exit of its instance, so what its
 `wire` created can be released there.
+
+A guest whose `wire` fails fails its birth (rule 3). A `wire` that returns
+`Err` answers the load or spawn `Err` with the guest's message; the guest then
+runs its `unwire` and is dropped. A `wire` that traps answers `Err` too, and
+the guest is released without running any more of its code. Either way no
+instance is left at the name, nothing the guest sent from `wire` leaves, and
+the name is free for another load. A boot manifest holding such a component
+fails the chassis build.
 
 In practice you drive this through the MCP harness — `publish(engine_id,
 selector, configs?)`, `spawn(engine_id, namespace, key?, parent?, config?)`,
@@ -277,7 +279,7 @@ manifests only and refuses the whole module at the first failing namespace:
 - **Namespace.** No exported namespace may be native. A module that holds one
   of the candidate's exported namespaces is its predecessor, and the candidate
   must export every namespace each predecessor exports: a namespace, once
-  published, stays published.
+  published, stays published until `aether.component.unpublish` withdraws it.
 - **Contract growth.** Each exported namespace keeps its predecessor's rows and
   `#[fallback]`; rows may only be added. Each private child type
   (`export!(private = [..])`) a predecessor declares must still be declared,
@@ -304,7 +306,15 @@ A refusal answers `LoadResult::Err` or `PublishResult::Err` with
 swapped. A publish of a successor publishes too, so its new kinds register. A
 load that publishes and is then refused at spawn (an unmet dependency, a failed
 module boot) leaves its module published: publish and spawn are separate steps.
-A published module stays resident for the engine's life.
+A published module stays resident until its namespaces are unpublished.
+
+Operators unload a bundle by dropping its instances and unpublishing it: send
+`aether.component.drop` for each live instance, then `aether.component.unpublish`
+for its namespace. The unpublish is refused while any instance of the namespace
+is live, naming it. Withdrawing a publication does not resurrect tombstoned
+instance names: a later spawn at the same instance name is still refused as
+retired. Publishing the same bytes afterwards binds as a first publish, and the
+module's boot is not spawned again.
 
 ## Boot configuration across the boundary
 
@@ -319,6 +329,14 @@ raw wire bytes through tool JSON. The two JSON sources are mutually exclusive.
 Omit `type Config` and the macro synthesizes `()` and injects the unused argument,
 so a no-config `init` stays terse. A declared config kind shows up in the
 component's advertised capabilities, so `describe_kinds` can resolve its schema.
+
+A config may name a peer by path: an `ActorPath<R>` when the component needs
+one actor type, or a `ProtocolPath<P>` when it needs only a protocol. Its
+decode in `init` proves a `ProtocolPath<P>` against the routes published at
+that moment, so the peer is loaded first; a path that does not prove refuses
+the load.
+[Naming a peer by protocol](#naming-a-peer-by-protocol) has the rules and the
+cost.
 
 ## Spawning children inline
 
@@ -346,8 +364,10 @@ impl WasmActor for Panel { /* … */ }
 
 A ctx that omits its actor is typed by it: the macro reads `WasmCtx<'_>` as
 `WasmCtx<'_, Self>`, so the ctx reaches only the actors the component declares
-with `depends(R)`. The actor is the first parameter, the reply mode the second
-(`WasmCtx<'_, Self, Unchecked>`); spell `WasmCtx<'_, Erased>` for the untyped view.
+with `depends(R)`. The ctx's type arguments are receiver, sender, mode: the actor first, the
+sender the handler requires second (`Anyone` when it states none), and the
+reply mode third (`WasmCtx<'_, Self, Anyone, Unchecked>`); spell
+`WasmCtx<'_, Erased>` for the untyped view.
 
 The one bound `RootManager: Spawns<Panel>` carries both proofs the spawn needs.
 `spawns(..)` is the rebuild manifest: every `export!` that lists the spawner
@@ -423,24 +443,54 @@ to carry state forward: `on_dehydrate` serializes the old instance's state, and
 `on_rehydrate` recovers it on the replacement. There's no `replaceable` flag on
 `export!` and no subtrait — participation is the override itself. `on_rehydrate`'s
 ctx is typed by the actor like a handler's (`WasmCtx<'_>` reads as
-`WasmCtx<'_, Self>`):
+`WasmCtx<'_, Self>`). Both hooks return `Result<(), ActorInitError>`, as `init`
+and `wire` do, and the save verbs return the save's error for the hook to pass
+on with `?`
+([ADR-0249](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0249-a-republish-wires-the-successor-and-unwires-the-old-guest-at-commit.md) §1):
 
 ```rust
 #[actor(root)]
 impl WasmActor for MyComponent {
     // init / wire / #[handler::<class>]s as usual …
 
-    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
-        ctx.save_state_kind::<Snapshot>(0, &snapshot);   // hand state to the successor
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
+        ctx.save_state_kind::<Snapshot>(0, &snapshot)?;   // hand state to the successor
+        Ok(())
     }
 
-    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
-        if let Some(snap) = prior.decode_kind::<Snapshot>() { … }
+    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) -> Result<(), ActorInitError> {
+        let snap = prior.decode_kind::<Snapshot>().ok_or("the saved snapshot does not decode")?;
+        …
+        Ok(())
     }
 }
 
 aether_actor::export!(public = [MyComponent]);
 ```
+
+A returned error is how a replace hook says no, and a trap is a bug:
+
+- **`on_dehydrate` returns an error:** the republish is refused naming the
+  hook, and the old instance keeps running. It is handed back whatever it
+  saved before the error, through its own `on_rehydrate`. `on_dehydrate`
+  saves and does not send: `WasmDropCtx` has no send verb, and `unwire` is
+  the hook that announces a departure.
+- **`on_dehydrate` traps:** the engine aborts. The old instance is the live
+  guest, and a guest that trapped runs no more code.
+- **A successor's `on_rehydrate` returns an error or traps:** the republish is
+  refused naming the hook, and the successor is dropped.
+- **The old instance's `on_rehydrate` returns an error** when it is handed
+  its state back after a refused republish: the instance closes. Each reply
+  it holds is answered `unanswered` and its name is spent. A trap there
+  aborts the engine.
+
+The hooks `#[actor]` generates for a declared `type State` return the save's
+result and the decode's, so a successor whose `type State` kind changed shape
+refuses the republish. An author who wants a fresh start on a mismatch writes
+both hooks by hand and returns `Ok(())` when `decode_kind` answers `None`. A
+resident inline child the successor cannot rebuild refuses the republish the
+same way: an unknown type, a placement the successor rejects, a config that
+no longer decodes, a failed `init`, or the child's own `on_rehydrate` error.
 
 A `Publish { code, configs }` of a module that succeeds one already bound
 republishes every live instance of the module's namespaces as one group
@@ -470,33 +520,51 @@ not refused: it binds as a first publish.
 
 Then each member prepares: its inbox gate closes, so mail for it waits; the
 candidate instantiates behind the same binding with its outbox held, the old
-guest runs `unwire` and `on_dehydrate` and is kept, the correlation cursor,
-reply table and request contexts move to the candidate, and it runs
-`on_rehydrate`. Once every member is ready the module publishes, and each member
-commits: its held mail leaves on a chain of its own, and the mail its gate queued
-reaches the candidate in order. `PublishResult::Ok { types }`, each republished
-type with its capabilities, comes once every commit's chain has settled. A
-component that leaves both state hooks at their defaults swaps cleanly and comes
-back fresh from `init`. Resident inline children are rebuilt from the module's
-exported types and its `export!` `private` list, each under its old alias; the
-`spawns(..)` check guarantees that list names every child a listed actor can
-spawn inline.
+guest runs `on_dehydrate` and is kept, the correlation cursor, reply table,
+request contexts and watches move to the candidate, and it runs `on_rehydrate`
+and then `wire`, still with its outbox held. Once every member is ready the
+module publishes, and each member commits: the old guest runs `unwire`, whose
+mail leaves at once, then drops, and the candidate's held mail leaves on a
+chain of its own, with the mail its gate queued reaching the candidate in
+order. `PublishResult::Ok { types }`, each republished type with its
+capabilities, comes once every commit's chain has settled. A component that
+leaves both state hooks at their defaults swaps cleanly and comes back fresh
+from `init`. Resident inline children are rebuilt from the module's exported
+types and its `export!` `private` list, each under its old alias, and wire
+after their parent's `wire`; the `spawns(..)` check guarantees that list names
+every child a listed actor can spawn inline.
 
-A refusal in any member's prepare (a failed `init`, a rejected state save, a
-carried request context the candidate does not declare
+A refusal in any member's prepare (a failed `init`, an `on_dehydrate` that
+returned an error, a rejected state save, a carried context, a request's or a
+watch's, that the candidate does not declare
 ([ADR-0139](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0139-guest-reply-correlation-and-request-contexts.md)
-§4), or a failed rehydrate), or a refused publish, aborts every member: each
-reinstates its old guest with its reply table and counters, hands it back the
-state its `on_dehydrate` saved through its `on_rehydrate`, runs its `wire`
-again, and receives the mail its gate queued; nothing a candidate sent leaves.
-Only teardown outside that saved state and outside what `wire` rebuilds is not
-undone
+§4), a failed rehydrate, or a failed `wire`), or a refused publish, aborts
+every member: each unwires its candidate exactly when that candidate wired,
+discards it, reinstates its old guest, still wired, with its reply table,
+counters and watches, hands it back the state its `on_dehydrate` saved through
+its `on_rehydrate`, with no second `wire`, and receives the mail its gate
+queued; nothing a candidate sent leaves. Only teardown outside that saved state
+and outside what `wire` built is not undone
 ([ADR-0016](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0016-persistent-state-across-hot-reload.md) §4),
 so an `on_rehydrate` override should assign from `prior` rather than accumulate
 onto what the instance already holds.
 While a republish is in flight, a load of one of its namespaces and a drop of a
 member wait for the answer and then run against the code that won; a republish
 that arrives while a load of its namespaces is in flight waits for those births.
+
+A component's watches on other actors stand across a republish with no code
+from its author ([Watching another actor](#watching-another-actor)). The host
+moves each registration with the mailbox, and each watch's context rides the
+saved state whether or not the component overrides `on_dehydrate`, so the
+successor's handler runs with the context its predecessor stored, under the id
+its predecessor was given. A watched actor that closes while the component is
+prepared is reported to the guest that wins: its notice waits at the inbox
+gate with the rest of the mail. A successor's `wire` that watches finds the
+standing watch and takes its id, and an aborted republish never doubles a
+watch: the old guest never unwired, so it is still wired and runs no second
+`wire`. A successor whose handler for a watched type takes another context kind
+is refused when it no longer declares the old kind; one that still declares it
+gets an error in its log ring at the notice, and its handler does not run.
 
 The load-bearing property is **binding stability** ([ADR-0038](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0038-actor-per-component-dispatch.md)): each swap replaces
 the wasm Module *in place* behind a stable mailbox handle, so the mailbox id, any
@@ -581,11 +649,12 @@ decode, and the guest proves it once with `ctx.resolve(&path)`
 §3, #7205):
 
 ```rust
-fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
-    match ctx.resolve(&self.config.journal) {
-        Ok(journal) => self.journal = Some(journal),
-        Err(error) => tracing::error!(path = self.config.journal.as_erased().as_str(), %error, "the journal does not prove"),
-    }
+fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
+    let journal = ctx
+        .resolve(&self.config.journal)
+        .map_err(|error| ActorInitError::new(format!("the journal does not prove: {error}")))?;
+    self.journal = Some(journal);
+    Ok(())
 }
 ```
 
@@ -601,9 +670,10 @@ way. It refuses one way, naming no position:
 
 It costs one host call reading the published route view. Call it once, at
 `wire` (a `WireCtx` derefs to `WasmCtx`) or at receipt, and keep the
-`ActorRef<R>` it returns; never re-resolve at a send. The verb is on the
-receive and `wire` ctx only, not on `WasmInitCtx`, so a refused path does not
-fail the load: the guest decides what a refusal means.
+reference it returns; never re-resolve at a send. The verb is on the
+receive and `wire` ctx only, not on `WasmInitCtx`. The guest decides what a
+refusal means: returned from `wire`, as above, it fails the load with that
+message; handled, the instance goes live without the peer.
 
 The answer is kind-checked: `ctx.send_to(journal, &kind)` compiles only for a
 kind `R` handles, caught where the send is written rather than at the
@@ -628,9 +698,68 @@ Any loaded component can reach any `Live` actor whose path it
 can spell, so a native actor that must not take guest mail cannot rely on its
 path being unknown.
 
+### Naming a peer by protocol
+
+An `ActorPath<R>` makes the guest depend on the crate of one actor type. A
+guest that needs only "an actor that handles protocol `P` stands here" takes
+a `ProtocolPath<P>` instead, in its config, in mail, or in an inline child's
+config
+([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md)
+§3, #7501). A kind that carries one is declared `no_serde`, since the path
+decodes only against an engine. A scene that draws from whatever publishes a
+view names it this way and never depends on a camera crate:
+
+```rust
+#[aether_data::kind(name = "example.scene.config", default, no_serde)]
+pub struct SceneConfig {
+    /// The actor to take the view from. `None` only in the compiled default.
+    pub view: Option<ProtocolPath<ViewSource>>,
+}
+
+fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
+    let Some(path) = &self.config.view else {
+        return Err(ActorInitError::new("the scene's config names no view source"));
+    };
+    let source = ctx.resolve(path).map_err(|error| ActorInitError::new(error.to_string()))?;
+    ctx.send_to(source, &ViewSubscribe);
+    self.source = Some(source);
+    Ok(())
+}
+```
+
+Two proofs run, as they do for a native actor. The decode proves the path's
+type: that the route standing under exactly that path, `Live` or closed,
+published every row of `P`. `ctx.resolve` then proves liveness and mints the
+`ProtocolRef<P>`; it compares no rows.
+
+| Where it is refused | Refusal | When |
+|---|---|---|
+| decode | `Unpublished` | no route has stood at the path, or its actor is still starting |
+| decode | `Uncovered { kind }` | the route does not publish the protocol row `kind` |
+| `resolve` | `ResolveError::NotLive { path }` | the path proved, and its actor has closed |
+
+A config that does not decode refuses the load before `init` runs, and the
+load's error names the actor, the config kind, the path, and the reason:
+
+```text
+example.scene: config `example.scene.config` did not decode: aether wire: protocol path `aether.kit.camera:main` refused: no route has published at this path
+```
+
+So the target is loaded before the component whose config names it; a
+component's own path, and any actor born after it, does not prove. An inline
+spawn whose config does not decode returns `SpawnError::InitFailed` with the
+same text. A request whose path does not decode is answered through its
+reply's `From<PathRefused>`, and its handler does not run.
+
+Each `ProtocolPath<P>` field costs one host call per decode, which reads the
+route's rows into guest memory; nothing is cached. That suits a config, an
+attach, or a subscribe kind. A kind sent every frame carries no path: resolve
+once, keep the `ProtocolRef<P>`, and send through it. A kind with no
+`ProtocolPath` field makes no host call.
+
 A guest can load a component itself. It declares the component host,
 `depends(ComponentHostCapability)`, sends it `aether.component.load`, and keeps the
-sender of `LoadResult::Ok`, which is the loaded actor, as its reference to the
+`ctx.sender()` of its response handler for `LoadResult::Ok`, which is the loaded actor, as its reference to the
 component, as
 [Publishing, spawning, loading, and dropping](#publishing-spawning-loading-and-dropping)
 describes. The loaded component has no door back to its loader;
@@ -643,6 +772,121 @@ The worked example is the environment bootstrap script,
 `ctx.resolve`, logs one error and stops on a refusal, and otherwise drives an
 import, merge, and publish sequence through the two kind-checked references
 (see [Building an environment](workspace.md#building-an-environment)).
+
+### Requiring something of the sender
+
+A guest that will mail its sender back states what the sender must handle on
+the handler that takes the first mail, as its ctx's sender, the second type
+argument
+([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md)
+§11):
+
+```rust
+#[handler::request]
+fn on_dial(&mut self, ctx: &mut WasmCtx<'_, Self, Consumer>, dial: Dial) -> Dialed {
+    let consumer = ctx.sender(); // ProtocolRef<Consumer>
+    self.consumers.push(consumer);
+    ctx.send_to(consumer, &Ready { tag: dial.tag });
+    Dialed::Ok
+}
+```
+
+`#[handler::tell]` and `#[handler::request]` state one. A component that sends
+`Dial` writes the plain `ctx.send::<Dialer>(&Dial { .. })`, which builds only
+when the component has a handler for each of `Consumer`'s kinds. The engine
+casts the sender to `Consumer` before `on_dial` runs, so `ctx.sender()` there
+is a `ProtocolRef<Consumer>`, with no `Option` and no `ctx.cast`. A handler
+that states nothing keeps `Anyone`, whose `ctx.sender()` is an
+`Option<ErasedActorRef>`. A sender that reaches the guest another way and does not cover the
+protocol never runs the handler: a request is answered with the reply's
+`From<PathRefused>`, naming the sender, and a tell is refused, logged in the
+guest's log, and reported to a caller relayed through `aether.rpc.server`.
+The bundle fixture's `SenderGate`
+(`crates/aether-test-fixtures-bundle/src/sender_gate.rs`) is the worked
+example. See
+[Reply classes](../foundations/actor-model.md#reply-classes) for the rule on
+both transports.
+
+## Watching another actor
+
+A component that keeps state on behalf of another actor needs to learn when
+that actor is gone, whether or not it said so on its way out. `ctx.watch`
+does that for any typed reference the component holds
+([ADR-0079](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0079-instanced-actors-as-a-first-class-category.md)
+§8): when the target closes, by a drop, a trap in its own `unwire`, or engine
+teardown, the component's handler for the type it was watched through runs
+once.
+
+```rust
+/// What the ledger notes about each provider it holds rows for.
+#[aether_data::kind(name = "example.ledger.provider_note")]
+pub struct ProviderNote {
+    pub last: u32,
+}
+
+#[handler::tell]
+fn on_admit(&mut self, ctx: &mut WasmCtx<'_>, admit: Admit) {
+    let Some(sender) = ctx.sender() else { return };
+    let Some(provider) = ctx.cast::<Provider>(sender) else { return };   // ProtocolRef<Provider>
+    let watch = ctx.watch(provider, ProviderNote { last: admit.id });    // the same id on every mail from this provider
+    self.rows.entry(watch).or_default().push(admit.row);
+}
+
+#[handler::event]
+fn on_provider_gone(&mut self, _ctx: &mut WasmCtx<'_>, event: Departed<Provider>, _note: ProviderNote) {
+    self.rows.remove(&event.watch);          // event.actor: ProtocolRef<Provider>
+}
+```
+
+The pattern is: cast the sender to a protocol and watch it on every mail, key
+the component's own table by the returned `WatchId`, and remove by
+`event.watch` in the handler. The cast and the watch are one host call each.
+
+- **The target is a typed reference.** An `ActorRef<R>` watches through the
+  actor type, and a `ProtocolRef<P>` through a protocol, such as a sender cast
+  at receipt. An `ErasedActorRef` is cast first.
+- **One handler per watched type.** The handler is a `#[handler::event]` whose
+  third parameter is `Departed<W>`, and `ctx.watch` compiles only for a type
+  the actor has one for. `event.actor` is the departed actor as the reference
+  it was watched through, for identity, an in-memory key, or a log line;
+  `event.watch` is the id `watch` returned.
+- **One context kind per watched type.** The handler's fourth parameter is the
+  context every `watch` of that type passes; a watch with another kind does
+  not compile. A component that keeps notes of different shapes about actors
+  of one type declares one enum kind for them. The context is never
+  `Option<C>`, since a watch always stores one.
+- **`NoContext` for nothing to note.** A handler that leaves the fourth
+  parameter out is watched for with `ctx.watch(camera, NoContext)`.
+- **A watch is unique per target and watched type.** Watching a target that is
+  already watched through the same type makes no second watch: it returns the
+  same `WatchId` and replaces the stored context with the one passed. So the
+  id is the component's own stable name for the target. One actor
+  watched through two types is two watches with two ids, and its departure
+  runs each handler once.
+- **The id stays with the component that holds it.** A `WatchId` names a row
+  in its holder's own watch table and is meaningful only to that actor: the
+  same number in another actor's hands names one of that actor's own watches.
+  It has actor reach, so a kind with a `WatchId` field is never mail and does
+  not compile as a handler's kind or a send's argument, and no component
+  builds one from a number. It may sit in the component's saved state and in
+  a context it stores with a request. Two actors that must speak of one watch
+  use a name of their own, such as a key the watcher keeps beside the id.
+- **It never fails.** A target that had already closed is noticed the same
+  way. The notice is mail, handled after the handler that watched returns, so
+  what that handler keyed on the id is in place.
+- **A watch ends at its notice**, or at `ctx.unwatch(id)`. A notice already
+  posted when `unwatch` runs finds no watch and runs no handler. Watching the
+  target again afterwards is a new id.
+- **The host releases every watch** when the component closes, fails or traps
+  in `wire`, or is dropped as a republish candidate, with none of its code
+  run, unless its `wire` ran — then `unwire`. An inline child watches from
+  its own `wire` like any actor and hears its own notice.
+
+`watch` and `unwatch` are on `WasmCtx`, so a handler, `wire`, `unwire`, and
+`on_rehydrate` can call them; `init` and `on_dehydrate` cannot. A watch stands
+across a republish of the watcher ([Hot reload](#hot-reload)). A native actor
+watches with `ctx.monitor`, keeps the `MonitorHandle`, and takes
+`MonitorNotice`.
 
 ## Where to read more
 

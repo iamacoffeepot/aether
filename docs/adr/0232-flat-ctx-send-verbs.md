@@ -280,6 +280,19 @@ leave a second way to send per cap.)*
 
 ## Amendments
 
+- **2026-10-06 (ADR-0231 §11).** Every flat verb gains one bound on its
+  payload, `K: SentBy<A, R>`, beside `SendableTo<R>`, and every verb that
+  takes a `Target` requires `T::Sender: CoveredBy<A>`: the ctx's own actor
+  covers what the recipient's handler requires of its sender. A handler that
+  takes no `sender: ProtocolRef<P>` parameter requires `Anyone`, so no
+  existing call site changes.
+- **2026-10-06 (ADR-0231 §7, §11, #7545).** Both ctxs take the sender as
+  their second type argument and the reply mode as their third:
+  `WasmCtx<'a, A = Erased, S = Anyone, M: ReplyMode = Single>`, and the same
+  for `NativeCtx`. The verbs above are defined for every `S`, so the snippets
+  in this ADR read `impl<A, S, M> WasmCtx<'_, A, S, M>` today, and a handler
+  states its sender requirement there in place of the fourth parameter the
+  amendment above names.
 - **ADR-0230 §5.** The deletion of `ctx.actor::<R>()` stands. Its replacement
   at the call site is the flat verbs above, proven by `depends(R)`; the
   `Reaches<R>` bound goes with it.

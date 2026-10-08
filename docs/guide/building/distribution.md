@@ -61,7 +61,8 @@ stale.
 `cargo xtask package` is the shipping channel (ADR-0163 §1). It emits a depot
 directory: the chassis binary alongside a `pack/` tree whose `manifest`
 references each component's wasm (and optional config) bytes by content hash
-into `pack/objects/`.
+into `pack/objects/`, and lists the named objects the depot ships for a running
+engine to read by path.
 
 ```text
 <out>/
@@ -69,7 +70,7 @@ into `pack/objects/`.
   LICENSE-MIT                 # the workspace licenses, shipped beside the statically linked binary
   LICENSE-APACHE
   pack/manifest               # the persisted, versioned package manifest
-  pack/objects/<sha256>       # component wasm + config bytes, content-addressed
+  pack/objects/<sha256>       # component wasm + config bytes and named objects, content-addressed
   pack/assets/…               # the `--assets` tree, verbatim
 ```
 
@@ -77,6 +78,10 @@ The depot writes to `target/package/` unless `--out` names another directory.
 The chassis boots by decoding `pack/manifest` and resolving each entry's hash
 against `pack/objects/`, so identity is the content and a `name` is a label.
 A depot ships release artifacts, so `--profile` defaults to release.
+
+The manifest format is version 3, which added the table of named objects. A
+chassis refuses a manifest of another version, so a depot built before it is
+re-emitted with `cargo xtask package`.
 
 ### Selecting content
 
@@ -128,6 +133,57 @@ decode error inside the guest. The JSON boot manifest takes the same pair of
 fields, so a spec and a manifest can share one config file. Setting both on one
 entry is an error, not a precedence question.
 
+### Naming objects boot does not load
+
+A boot component is loaded when the engine starts. A product that pages content
+in later (a module per map square, say) ships those modules as **named
+objects**: each is written into `pack/objects/` under its sha256 like any other
+object, and the manifest lists it under a path with that hash and its size. A
+running actor reads it by that path through the `objects` file namespace and
+publishes the blob it is answered with; see [File I/O](../systems/file-io.md).
+
+A spec's `named` list holds one-key entries, one per source:
+
+```json
+{
+  "components": [{ "package": "my-game" }],
+  "named": [
+    { "package": { "name": "my-game-cave", "path": "modules/cave.wasm" } },
+    { "wasm": { "file": "build/boss.wasm", "path": "modules/boss.wasm" } },
+    { "dir": { "from": "build/squares", "under": "world/squares" } }
+  ]
+}
+```
+
+- `package` builds a workspace package for wasm32 and ships its lib cdylib at
+  `path`.
+- `wasm` ships a prebuilt file at `path`.
+- `dir` ships every file beneath the directory `from`, each at
+  `<under>/<its path relative to from>`.
+
+On the command line, `--named <UNDER> <DIR>` is the directory form; repeat it
+for more directories. It needs `--components`, and a single object goes through
+`--spec`.
+
+```sh
+cargo xtask package \
+  --components my-game \
+  --named world/squares build/squares
+```
+
+A path is lowercase: segments of `a-z`, `0-9`, `.`, `_` and `-` joined by single
+`/`. A `path` or `under` that breaks the rule fails the spec parse, and a file
+in a directory whose resulting path breaks it fails the run naming the file;
+nothing is skipped, so a stray `.DS_Store` is removed before packaging, not
+shipped or ignored. Two entries that resolve to one path fail the run naming
+both files. The run prints each named object's path, sha256 and size.
+
+When the depot boots, the `objects` namespace checks that every named object is
+present under `pack/objects/` at the size the manifest records, and the boot
+fails naming the object when one is not: a truncated install fails at boot, as
+one missing a boot component does, and not at the moment an actor first reads
+the path. The check compares sizes; it does not read or hash the bytes.
+
 ### Shipping assets
 
 `--assets <dir>` copies a directory verbatim into `pack/assets`, and the
@@ -142,6 +198,13 @@ default, the same precedence a manifest's title and tick cadence take, so an
 operator's `AETHER_ASSETS_DIR` / `--assets-dir` still overrides a shipped depot.
 The check is per member rather than per field: any pinned `aether.fs` root — save
 or config as much as assets — keeps the operator's whole `NamespaceRoots`.
+
+The `objects` namespace takes the same slot: a packaged chassis reads the
+depot's named objects by path out of `pack/objects`, and `AETHER_OBJECTS_DIR` /
+`--objects-dir` or any other pinned root replaces that with the plain directory
+it names, where an object is the file at its path. With no package it is the
+`objects` directory beside the binary, which need not exist. See
+[File I/O](../systems/file-io.md).
 
 ```sh
 cargo xtask package \

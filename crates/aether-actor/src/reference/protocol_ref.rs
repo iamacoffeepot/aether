@@ -76,6 +76,14 @@ impl<P> ProtocolRef<P> {
     }
 }
 
+/// A protocol reference is an erased one with its protocol forgotten, so a
+/// verb that takes any proven reference (`monitor`) accepts it as it is.
+impl<P> From<ProtocolRef<P>> for ErasedActorRef {
+    fn from(reference: ProtocolRef<P>) -> Self {
+        reference.erase()
+    }
+}
+
 impl<P> Clone for ProtocolRef<P> {
     fn clone(&self) -> Self {
         *self

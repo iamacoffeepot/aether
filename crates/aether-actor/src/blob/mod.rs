@@ -7,3 +7,4 @@
 //! never holds a guest blob; there the encoder is the plain one.
 
 pub mod guest;
+mod read;

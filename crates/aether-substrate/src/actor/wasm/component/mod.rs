@@ -16,12 +16,13 @@ mod ctx;
 mod dispatch;
 mod instantiate;
 mod lifecycle;
+mod meter;
 mod outbox;
 mod sections;
 mod state;
 
-pub use ctx::{ComponentCtx, CorrelationCursor, InlineChildType, PendingReplies};
-pub use dispatch::{DISPATCH_DROPPED_OVERSIZE, DISPATCH_UNKNOWN_KIND};
+pub use ctx::{ComponentCtx, CorrelationCursor, InlineChildType, PendingReplies, Watches};
+pub use dispatch::{DISPATCH_DROPPED_OVERSIZE, DISPATCH_UNKNOWN_KIND, HookFault};
 pub use instantiate::Component;
 pub(crate) use outbox::GuestAnswer;
 pub use state::StateBundle;
@@ -44,9 +45,9 @@ const SMALL_REGION_BYTES: usize = 8 * 1024;
 /// (iamacoffeepot/aether#1337). A payload past this is dropped (mail) or
 /// rejected (config / state) with a loud log rather than asking the guest to
 /// allocate a buffer that could exhaust its memory and trap. The wire frame cap
-/// bounds arrivals upstream — this is defense in depth. 64 MiB matches the
+/// bounds arrivals upstream — this is defense in depth. 128 MiB matches the
 /// codec's default max frame size (`aether_codec::frame::MAX_FRAME_SIZE`).
-const MAX_DELIVERABLE_MAIL_BYTES: usize = 64 << 20;
+const MAX_DELIVERABLE_MAIL_BYTES: usize = 128 << 20;
 
 /// Contract with the guest: it exports a
 /// `receive(kind, ptr, byte_len, count, sender, recipient) -> u32`

@@ -16,7 +16,8 @@
 use std::sync::mpsc::{self, Sender};
 
 use aether_actor::{
-    ActorPath, Addressable, ErasedActorRef, PathRefusal, PathRefused, ProtocolPath, ProtocolRef, Unchecked, Undeclared,
+    ActorPath, Addressable, Anyone, ErasedActorRef, PathRefusal, PathRefused, ProtocolPath, ProtocolRef, Unchecked,
+    Undeclared,
 };
 use aether_data::{ErasedActorPath, Kind, KindId, LoadName};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
@@ -59,7 +60,7 @@ fn cast_self<A>(ctx: &NativeCtx<'_, A>, namespace: &str) -> Option<ProtocolRef<F
 /// Forward the refuser seven bytes of an encoded [`Probe`], one short of its
 /// field, under the handler's chain with its reply target: the boundary item
 /// proves the refuser's path and carries the bytes as given.
-fn forward_truncated_probe<A>(ctx: &NativeCtx<'_, A, Unchecked>) {
+fn forward_truncated_probe<A>(ctx: &NativeCtx<'_, A, Anyone, Unchecked>) {
     let mut bytes = Probe { value: 7 }.encode_into_bytes();
     bytes.pop();
     let refuser = ErasedActorPath::new(Refuser::NAMESPACE).expect("a canonical path");
@@ -103,8 +104,9 @@ impl NativeActor for NoticedAsker {
         Ok(Self { notices, me: None })
     }
 
-    fn wire(state: &mut Self, ctx: &mut NativeCtx<'_>) {
+    fn wire(state: &mut Self, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         state.me = cast_self(ctx, Self::NAMESPACE);
+        Ok(())
     }
 
     #[aether_actor::handler::tell]
@@ -113,7 +115,7 @@ impl NativeActor for NoticedAsker {
     }
 
     #[aether_actor::handler::unchecked(reason = "test: forwards the probe, reply target pinned to this asker")]
-    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, _forward: Forward) {
+    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, _forward: Forward) {
         let _ = self;
         forward_truncated_probe(ctx);
     }
@@ -141,8 +143,9 @@ impl NativeActor for FallbackAsker {
         Ok(Self { arrivals, me: None })
     }
 
-    fn wire(state: &mut Self, ctx: &mut NativeCtx<'_>) {
+    fn wire(state: &mut Self, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         state.me = cast_self(ctx, Self::NAMESPACE);
+        Ok(())
     }
 
     #[aether_actor::handler::tell]
@@ -151,7 +154,7 @@ impl NativeActor for FallbackAsker {
     }
 
     #[aether_actor::handler::unchecked(reason = "test: forwards the probe, reply target pinned to this asker")]
-    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, _forward: Forward) {
+    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, _forward: Forward) {
         let _ = self;
         forward_truncated_probe(ctx);
     }

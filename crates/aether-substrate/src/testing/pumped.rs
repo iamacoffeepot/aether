@@ -14,11 +14,14 @@
 //! chain — a detached send, a close-tail notice — never settles a root the
 //! test holds, so the observing actor signals a test channel and the test
 //! waits on it through [`await_signal`], under the same cap and named as the
-//! signal it is rather than as settlement.
+//! signal it is rather than as settlement. When the effect carries a value
+//! the test asserts on — a lifecycle event, a completion wake's id — the
+//! channel carries that value and the test takes it through [`await_event`],
+//! the same wait returning what it received.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use aether_actor::{Root, Single};
+use aether_actor::{Anyone, Root, Single};
 use aether_data::{Kind, MailId};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 
@@ -28,7 +31,8 @@ use crate::actor::native::{NativeActor, PumpedSlot};
 use crate::chassis::builder::{ChassisTarget, PassiveChassis, ReplyTarget};
 use crate::chassis::frame_loop;
 use crate::chassis::settlement::{
-    PumpWake, TerminalDisposition, await_internal_signal, await_settlement_pumped, install_pump_wake,
+    GateFailure, GateWedge, PumpWake, TerminalDisposition, await_internal_signal, await_settlement_pumped,
+    install_pump_wake,
 };
 use crate::config::SettlementConfig;
 
@@ -165,7 +169,10 @@ impl<A: Root + NativeActor> PumpedDriver<A> {
     }
 
     /// Run one host turn against the actor's state without draining.
-    pub fn host_turn<T>(&mut self, turn: impl FnOnce(&mut A::State, &mut NativeCtx<'_, A, Single>) -> T) -> Option<T> {
+    pub fn host_turn<T>(
+        &mut self,
+        turn: impl FnOnce(&mut A::State, &mut NativeCtx<'_, A, Anyone, Single>) -> T,
+    ) -> Option<T> {
         self.slot.host_turn(turn)
     }
 }
@@ -193,4 +200,47 @@ pub fn await_signal(signal: &Receiver<()>, gate: &str) {
         TerminalDisposition::Panic,
         None,
     );
+}
+
+/// Wait for the next value on `events` — a test channel an observing actor
+/// or route sends on when an effect lands — and return it, under the same
+/// escalating patience as [`await_signal`]: the wait re-arms every
+/// `frame_loop::DRAIN_BUDGET`, logging that it is slow, and gives up only at
+/// the settlement cap. `gate` names the wait in the slow-log and in the
+/// panic.
+///
+/// [`await_signal`] is this wait for a channel of `()`; it stays on the
+/// chassis gate because that is the gate production waits on.
+///
+/// # Panics
+/// Panics with the gate's wedge reason when nothing arrives within the
+/// settlement cap, or when every sender dropped without sending.
+pub fn await_event<T>(events: &Receiver<T>, gate: &str) -> T {
+    let cap = SettlementConfig::from_env().to_cap();
+    let start = Instant::now();
+    loop {
+        match events.recv_timeout(frame_loop::DRAIN_BUDGET) {
+            Ok(event) => return event,
+            Err(RecvTimeoutError::Timeout) => {
+                let waited = start.elapsed();
+                assert!(waited < cap, "{}", wedge_reason(gate, waited, GateFailure::Silent));
+                tracing::warn!(
+                    target: "aether_substrate::testing",
+                    gate,
+                    waited_millis = waited.as_millis(),
+                    cap_millis = cap.as_millis(),
+                    "gate {gate} slow: waited {waited:?}, extending",
+                );
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("{}", wedge_reason(gate, start.elapsed(), GateFailure::Disconnected))
+            }
+        }
+    }
+}
+
+/// The text [`await_signal`] panics with for the same wedge, so a failed
+/// wait reads the same whichever of the two a test used.
+fn wedge_reason(gate: &str, waited: Duration, failure: GateFailure) -> String {
+    GateWedge { gate: gate.to_owned(), waited, failure }.reason()
 }

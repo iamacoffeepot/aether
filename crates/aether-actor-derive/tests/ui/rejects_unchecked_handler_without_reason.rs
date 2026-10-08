@@ -22,7 +22,7 @@ impl aether_actor::WasmActor for NoReason {
     }
 
     #[handler::unchecked]
-    fn on_ping(&mut self, _ctx: &mut aether_actor::WasmCtx<'_, aether_actor::Erased, aether_actor::Unchecked>, _ping: Ping) {}
+    fn on_ping(&mut self, _ctx: &mut aether_actor::WasmCtx<'_, aether_actor::Erased, aether_actor::Anyone, aether_actor::Unchecked>, _ping: Ping) {}
 }
 
 struct BlankReason;
@@ -36,7 +36,7 @@ impl aether_actor::WasmActor for BlankReason {
     }
 
     #[handler::unchecked(reason = "  ")]
-    fn on_ping(&mut self, _ctx: &mut aether_actor::WasmCtx<'_, aether_actor::Erased, aether_actor::Unchecked>, _ping: Ping) {}
+    fn on_ping(&mut self, _ctx: &mut aether_actor::WasmCtx<'_, aether_actor::Erased, aether_actor::Anyone, aether_actor::Unchecked>, _ping: Ping) {}
 }
 
 fn main() {}

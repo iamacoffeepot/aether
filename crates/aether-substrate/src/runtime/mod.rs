@@ -4,6 +4,7 @@
 //! routes panic backtraces through the same logging machinery actor
 //! `tracing::*` calls flow through.
 
+pub mod actor_clock;
 pub mod clock;
 pub mod effect_chain;
 pub(crate) mod infra_thread;

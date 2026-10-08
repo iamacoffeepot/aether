@@ -100,7 +100,7 @@ pub struct DrawSetsPass {
     pub depth: Option<DepthUse>,
     pub load: PassLoad,
 }
-pub enum Cull { None, Back }
+pub enum Cull { None, Back, Front }
 pub struct DepthUse { pub slot: u32, pub write: DepthWrite }
 pub enum DepthWrite { Write, TestOnly }
 
@@ -119,7 +119,7 @@ The pass binds a draw's geometry as vertex buffer 0, stepped per vertex, and its
 
 `DrawSetsPass.draw_sets` indexes the dispatch's lists. A program's list count is one more than the highest index a pass names, and every index below it is named by some pass, so a dispatch carries no list that nothing draws. Two passes may name one list.
 
-`depth` attaches a `depth_transients` slot under a `LessEqual` test; `Write` writes the depth of each fragment that passes and `TestOnly` leaves the slot as it was. The first pass of a dispatch to attach a depth slot clears it to the far plane, whatever its stage and whatever its `write`. `Cull::Back` discards clockwise triangles.
+`depth` attaches a `depth_transients` slot under a `LessEqual` test; `Write` writes the depth of each fragment that passes and `TestOnly` leaves the slot as it was. The first pass of a dispatch to attach a depth slot clears it to the far plane, whatever its stage and whatever its `write`. `Cull::Back` discards clockwise triangles. `Cull::Front` discards counter-clockwise ones.
 
 A `DrawSets` pass is timed as a draw pass: `PassStageKind` gains no variant.
 
@@ -244,7 +244,7 @@ Scene depth under 4× multisampling is read from a second slot. The scene pass a
 - `PassStage::Draw` and `DrawIndexedIndirect` stay. Whether `DrawSets` should replace them is left until it has a second consumer.
 - A single-sample depth slot is readable, so a shadow, fog, a water depth fade and a soft edge need no colour target carrying a copy of depth. A depth pre-pass needs nothing more either: a depth-only pass writes the slot and the colour pass attaches it `TestOnly`, which the `LessEqual` test admits at equal depth.
 - A shadow map is redrawn in every dispatch that reads it. A depth slot that keeps its contents across dispatches, for a light and a scene that did not move, is not designed here.
-- The engine applies no depth bias and `Cull` has no front-face variant, so a pass that compares against a shadow map offsets its reference depth in its own shader. A bias on the depth-only pass is left until a consumer shows that the shader offset is not enough.
+- The engine applies no depth bias, so a pass that compares against a shadow map offsets its reference depth in its own shader. A bias on the depth-only pass is left until a consumer shows that the shader offset is not enough.
 - A `Four` depth slot stays unreadable, and scene depth under 4× multisampling costs a second geometry pass onto a `One` slot.
 - Not measured: the stage inside the program executor (the prototype ran beside it), every part of decision 9 (a depth-only pass, a comparison read, the second geometry pass under 4× multisampling), any backend but Metal, device-loss recovery, and adapters whose array-layer limit stays at 256.
 - The measurements also showed the frame wait rounding every frame to about 1.27 ms, because the Metal fence wait in wgpu-hal sleeps in 1 ms steps. That bounds frame rate independently of this decision and is its own issue.

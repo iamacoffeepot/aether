@@ -1,0 +1,132 @@
+error[E0277]: `HalfHolder` has no contract row for `FocusLost`
+  --> tests/ui/rejects_send_from_actor_lacking_sender_rows_wasm.rs:81:28
+   |
+81 |         ctx.send::<Window>(&TakeFocus);
+   |             ----           ^^^^^^^^^^ no handler for `FocusLost` on this target
+   |             |
+   |             required by a bound introduced by this call
+   |
+help: the trait `Contract<FocusLost>` is not implemented for `HalfHolder`
+  --> tests/ui/rejects_send_from_actor_lacking_sender_rows_wasm.rs:69:1
+   |
+69 | struct HalfHolder;
+   | ^^^^^^^^^^^^^^^^^
+   = note: a `#[fallback]` does not count as handling a kind
+help: `HalfHolder` implements trait `Contract<K>`
+  --> tests/ui/rejects_send_from_actor_lacking_sender_rows_wasm.rs:71:1
+   |
+71 | #[actor(instanced, root, child_of(Window), depends(Window))]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   | |
+   | `Contract<FocusGained>`
+   | `Contract<Trigger>`
+   = note: required for `HalfHolder` to implement `CoversRows<(Row<FocusGained, Silent>, Row<FocusLost, Silent>)>`
+   = note: required for `FocusHolder` to implement `CoveredBy<HalfHolder>`
+   = note: required for `TakeFocus` to implement `SentBy<HalfHolder, Window>`
+note: required by a bound in `aether_actor::wasm::ctx::send::<impl WasmCtx<'_, A, S, M>>::send`
+  --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/send.rs
+   |
+   |     pub fn send<R: Singleton + CallerAddressable>(&mut self, payload: &(impl SendableTo<R> + SentBy<A, R>))
+   |                                                                                              ^^^^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::send::<impl WasmCtx<'_, A, S, M>>::send`
+   = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `HalfHolder` has no contract row for `FocusLost`
+  --> tests/ui/rejects_send_from_actor_lacking_sender_rows_wasm.rs:82:21
+   |
+82 |         ctx.send_to(ctx.actor_ref::<Window>(), &TakeFocus);
+   |             ------- ^^^^^^^^^^^^^^^^^^^^^^^^^ no handler for `FocusLost` on this target
+   |             |
+   |             required by a bound introduced by this call
+   |
+help: the trait `Contract<FocusLost>` is not implemented for `HalfHolder`
+  --> tests/ui/rejects_send_from_actor_lacking_sender_rows_wasm.rs:69:1
+   |
+69 | struct HalfHolder;
+   | ^^^^^^^^^^^^^^^^^
+   = note: a `#[fallback]` does not count as handling a kind
+help: `HalfHolder` implements trait `Contract<K>`
+  --> tests/ui/rejects_send_from_actor_lacking_sender_rows_wasm.rs:71:1
+   |
+71 | #[actor(instanced, root, child_of(Window), depends(Window))]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   | |
+   | `Contract<FocusGained>`
+   | `Contract<Trigger>`
+   = note: required for `HalfHolder` to implement `CoversRows<(Row<FocusGained, Silent>, Row<FocusLost, Silent>)>`
+   = note: required for `FocusHolder` to implement `CoveredBy<HalfHolder>`
+note: required by a bound in `aether_actor::wasm::ctx::send::<impl WasmCtx<'_, A, S, M>>::send_to`
+  --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/send.rs
+   |
+   |     pub fn send_to<K: ActorMail, I, T: Target<K, I>>(&mut self, target: T, payload: &K)
+   |            ------- required by a bound in this associated function
+   |     where
+   |         T::Sender: CoveredBy<A>,
+   |                    ^^^^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::send::<impl WasmCtx<'_, A, S, M>>::send_to`
+   = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `HalfHolder` has no contract row for `FocusLost`
+  --> tests/ui/rejects_send_from_actor_lacking_sender_rows_wasm.rs:84:25
+   |
+84 |             parent.send(&TakeFocus);
+   |                    ---- ^^^^^^^^^^ no handler for `FocusLost` on this target
+   |                    |
+   |                    required by a bound introduced by this call
+   |
+help: the trait `Contract<FocusLost>` is not implemented for `HalfHolder`
+  --> tests/ui/rejects_send_from_actor_lacking_sender_rows_wasm.rs:69:1
+   |
+69 | struct HalfHolder;
+   | ^^^^^^^^^^^^^^^^^
+   = note: a `#[fallback]` does not count as handling a kind
+help: `HalfHolder` implements trait `Contract<K>`
+  --> tests/ui/rejects_send_from_actor_lacking_sender_rows_wasm.rs:71:1
+   |
+71 | #[actor(instanced, root, child_of(Window), depends(Window))]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   | |
+   | `Contract<FocusGained>`
+   | `Contract<Trigger>`
+   = note: required for `HalfHolder` to implement `CoversRows<(Row<FocusGained, Silent>, Row<FocusLost, Silent>)>`
+   = note: required for `FocusHolder` to implement `CoveredBy<HalfHolder>`
+   = note: required for `(Window, ())` to implement `AllHandle<TakeFocus, HalfHolder>`
+note: required by a bound in `InlineParent::<'_, A>::send`
+  --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/parent.rs
+   |
+   |     pub fn send<K: ActorMail>(&self, payload: &K)
+   |            ---- required by a bound in this associated function
+   |     where
+   |         A::Parents: AllHandle<K, A>,
+   |                     ^^^^^^^^^^^^^^^ required by this bound in `InlineParent::<'_, A>::send`
+   = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `HalfHolder` has no contract row for `FocusLost`
+  --> tests/ui/rejects_send_from_actor_lacking_sender_rows_wasm.rs:93:21
+   |
+93 |     child.send(ctx, &TakeFocus);
+   |           ----      ^^^^^^^^^^ no handler for `FocusLost` on this target
+   |           |
+   |           required by a bound introduced by this call
+   |
+help: the trait `Contract<FocusLost>` is not implemented for `HalfHolder`
+  --> tests/ui/rejects_send_from_actor_lacking_sender_rows_wasm.rs:69:1
+   |
+69 | struct HalfHolder;
+   | ^^^^^^^^^^^^^^^^^
+   = note: a `#[fallback]` does not count as handling a kind
+help: `HalfHolder` implements trait `Contract<K>`
+  --> tests/ui/rejects_send_from_actor_lacking_sender_rows_wasm.rs:71:1
+   |
+71 | #[actor(instanced, root, child_of(Window), depends(Window))]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   | |
+   | `Contract<FocusGained>`
+   | `Contract<Trigger>`
+   = note: required for `HalfHolder` to implement `CoversRows<(Row<FocusGained, Silent>, Row<FocusLost, Silent>)>`
+   = note: required for `FocusHolder` to implement `CoveredBy<HalfHolder>`
+   = note: required for `TakeFocus` to implement `SentBy<HalfHolder, Window>`
+note: required by a bound in `InlineChild::<C>::send`
+  --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/child.rs
+   |
+   |     pub fn send<K: ActorMail + SentBy<A, C>, A, S, M: ReplyMode>(&self, ctx: &mut WasmCtx<'_, A, S, M>, payload: &K)
+   |                                ^^^^^^^^^^^^ required by this bound in `InlineChild::<C>::send`
+   = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)

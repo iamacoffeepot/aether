@@ -23,16 +23,14 @@ aether-chassis = { path = "../aether-chassis" }
 aether-substrate = { path = "../aether-substrate", features = ["render"] }
 # The desktop cap set: the pumped render actor (ADR-0161 R3 — the driver
 # boots it and owns the surface on the winit thread), plus the
-# window/text/audio/clipboard caps and the common-cap configs the env threads
-# through `with_common_caps`. Text rides here rather than in the shared
-# full-stack set because it depends on render, which only desktop serves.
+# window/audio/clipboard caps and the common-cap configs the env threads
+# through `with_common_caps`. Text is drawn by the render actor itself.
 # `aether-render/desktop` pulls the pumped runtime and its per-window surface
 # support.
 aether-render = { path = "../aether-render", features = ["desktop"] }
 aether-window = { path = "../aether-window", features = ["desktop"] }
 aether-audio = { path = "../aether-audio", features = ["runtime"] }
 aether-clipboard = { path = "../aether-clipboard", features = ["runtime"] }
-aether-text = { path = "../aether-text", features = ["runtime"] }
 aether-lifecycle = { path = "../aether-lifecycle" }
 aether-component = { path = "../aether-component" }
 aether-http = { path = "../aether-http" }
@@ -40,6 +38,10 @@ aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 clap = { workspace = true }
+# `DesktopDriverConfig` derives `aether_substrate::Config` (ADR-0090), which
+# emits a confique-shaped `DesktopDriverConfigLayer` beside the clap-shaped
+# `DesktopDriverOverlay`, so both crates must be reachable here.
+confique = { workspace = true }
 tracing = { workspace = true, features = ["std", "attributes"] }
 # The winit event loop. The wgpu surface stack now lives in the pumped
 # render actor (`aether-render/desktop`, ADR-0161 R3), so the chassis holds

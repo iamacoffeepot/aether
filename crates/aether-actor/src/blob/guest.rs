@@ -29,10 +29,11 @@
 //! tag 0 and its bytes.
 //!
 //! One value is held without a delivery: an asset the guest takes from its
-//! load window as a blob ([`asset_blob`], ADR-0163 §3). The host places it in
+//! own module as a blob ([`asset_blob`], ADR-0250). The host places it in
 //! the blob table already held once and hands back its hash, and the SDK
 //! wraps that hold in the same `GuestHold` a decode builds, so it reads,
-//! forwards and drops as any held value does.
+//! forwards and drops as any held value does. [`asset`] is that blob read
+//! whole into a `Vec`, then dropped.
 //!
 //! The backing and the grant exist only on wasm32. The host build of the SDK
 //! never holds a guest blob, so there [`encode_guest`] is the plain encode
@@ -40,6 +41,7 @@
 
 use alloc::vec::Vec;
 
+use super::read::read_whole;
 use aether_data::{Blob, Kind};
 #[cfg(target_arch = "wasm32")]
 use {
@@ -164,8 +166,8 @@ pub fn __mint_guest_blob(hash: BlobHash) -> Option<Blob> {
     Some(aether_data::__mint_shared_blob(Arc::new(GuestHold { hash, len })))
 }
 
-/// The asset named `name` in this instance's load window as a `Shared` value
-/// (ADR-0163 §3), or `None` when the component carries no such asset. The
+/// The asset named `name` in this instance's own module as a `Shared` value
+/// (ADR-0250), or `None` when the component carries no such asset. The
 /// host already took the hold the value owns, so this takes none: it only
 /// wraps the hash and length the host answered. No payload byte enters guest
 /// memory until the value is read.
@@ -176,7 +178,7 @@ pub fn asset_blob(name: &str) -> Option<Blob> {
     Some(aether_data::__mint_shared_blob(Arc::new(GuestHold { hash, len })))
 }
 
-/// The host build of the SDK has no load window to ask.
+/// The host build of the SDK has no module to ask.
 ///
 /// # Panics
 ///
@@ -185,6 +187,15 @@ pub fn asset_blob(name: &str) -> Option<Blob> {
 #[must_use]
 pub fn asset_blob(_name: &str) -> Option<Blob> {
     panic!("aether-actor: asset_blob called outside the FFI guest");
+}
+
+/// The bytes of the asset named `name` in this instance's own module, or
+/// `None` when the component carries no such asset: the [`asset_blob`] value
+/// read whole. The blob drops when the call returns and its hold goes back
+/// through `blob_drop_p32`, so nothing stays in the instance's blob table.
+#[must_use]
+pub fn asset(name: &str) -> Option<Vec<u8>> {
+    asset_blob(name).map(|blob| read_whole(&blob))
 }
 
 /// Resolves a decode's tag-1 hashes by taking a hold on each. A decode that

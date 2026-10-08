@@ -23,7 +23,7 @@ use aether_substrate::actor::native::NativeCtx;
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::testing::{TestChassis, fresh_substrate};
 
-use crate::kinds::{HttpRouter, RegisterRouteSelf};
+use crate::kinds::{HttpRouter, MethodFilter, RegisterRouteSelf};
 use crate::server::{HttpServerCapability, HttpServerConfig};
 
 mod basic;
@@ -75,5 +75,9 @@ pub(in crate::server) fn router_holders()
 /// shared replacement for the retired `handler_mailbox` default, so a
 /// route-unmatched request reaches that handler.
 fn bind_catch_all<A: DependsOn<HttpServerCapability>>(ctx: &mut NativeCtx<'_, A>) {
-    ctx.send::<HttpServerCapability>(&RegisterRouteSelf { prefix: "/".to_string(), method: None, shared: false });
+    ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
+        prefix: "/".to_string(),
+        method: MethodFilter::Any,
+        shared: false,
+    });
 }

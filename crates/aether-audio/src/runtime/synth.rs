@@ -3,7 +3,7 @@
 //! summed output the cpal callback drains.
 
 use std::cmp::{Ordering, Reverse};
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crossbeam_queue::ArrayQueue;
@@ -56,6 +56,13 @@ pub struct Synth {
     /// `set_sender_gain` inserts/overwrites here; `fill` resolves each
     /// voice's entry once per block, so the trim ducks sounding voices.
     sender_gains: HashMap<Option<ErasedActorRef>, f32>,
+    /// Departed senders whose gain row is kept alive for still-fading
+    /// voices and tracks (ADR-0079 §8). `forget_sender` removes the row
+    /// at once when nothing still references the sender and otherwise
+    /// records it here; the `fill` tail drops rows whose sender has no
+    /// remaining references and stops tracking them. Never holds the
+    /// shared `None` key, which has no actor to depart.
+    departed_senders: HashSet<ErasedActorRef>,
     /// Monotonically increasing counter stamped into each `Voice::seq`
     /// at allocation. Note-off reads the minimum value to locate the
     /// oldest voice on a shared key regardless of pool order (voice-steal
@@ -87,6 +94,7 @@ impl Synth {
             reverb: Reverb::new(sample_rate),
             reverb_send: 0.0,
             sender_gains: HashMap::new(),
+            departed_senders: HashSet::new(),
             next_seq: 0,
             frame_clock: 0,
             scheduled: BinaryHeap::new(),
@@ -278,6 +286,9 @@ impl Synth {
                         self.scheduled.push(Reverse(ScheduledEntry { due_frame, seq, sender, note: event.event }));
                     }
                 }
+                AudioEvent::SenderDeparted { sender } => {
+                    self.forget_sender(sender);
+                }
             }
         }
     }
@@ -298,6 +309,58 @@ impl Synth {
         let fade = self.fade_samples();
         if let Some(t) = self.tracks.iter_mut().find(|t| t.matches(sender, lane, namespace, path)) {
             t.stop(fade);
+        }
+    }
+
+    /// True while anything still names `sender`: a sounding voice, a
+    /// track (fading or not), or a parked scheduled entry. The gain-row
+    /// prune reads this, so a row lives exactly as long as its sender's
+    /// sound does.
+    fn sender_referenced(
+        voices: &[Voice],
+        tracks: &[TrackVoice],
+        scheduled: &BinaryHeap<Reverse<ScheduledEntry>>,
+        sender: ErasedActorRef,
+    ) -> bool {
+        let key = Some(sender);
+        voices.iter().any(|voice| voice.sender == key)
+            || tracks.iter().any(|track| track.matches_sender(sender))
+            || scheduled.iter().any(|entry| entry.0.sender == key)
+    }
+
+    /// Forget a departed sender on the callback thread (ADR-0079 §8).
+    /// Sounding one-shot voices release through their envelopes — the
+    /// equivalent of `note_off` on every unreleased voice, whose kernels
+    /// already early-return when releasing or done — so nothing clicks
+    /// and nothing drones on. Tracks stop uniformly, looping or not,
+    /// through the idempotent `TrackVoice::stop` fade. Scheduled entries
+    /// of that sender drop from the heap in place, `On` and `Off` alike,
+    /// so no post-close note spawns a voice. The `dying` steal-release
+    /// pool needs nothing: it renders from captured gains and retires on
+    /// its own. The gain row goes at once when nothing still references
+    /// the sender; otherwise the sender joins `departed_senders` and the
+    /// `fill` tail prunes the row once its last voice, track, and
+    /// scheduled entry retire.
+    pub fn forget_sender(&mut self, sender: ErasedActorRef) {
+        for voice in &mut self.voices {
+            let unreleased = !voice.released;
+            let owned = voice.sender == Some(sender);
+            if owned && unreleased {
+                voice.note_off();
+            }
+        }
+        let fade = self.fade_samples();
+        for track in &mut self.tracks {
+            if track.matches_sender(sender) {
+                track.stop(fade);
+            }
+        }
+        self.scheduled.retain(|entry| entry.0.sender != Some(sender));
+        if Self::sender_referenced(&self.voices, &self.tracks, &self.scheduled, sender) {
+            self.departed_senders.insert(sender);
+        } else {
+            self.sender_gains.remove(&Some(sender));
+            self.departed_senders.remove(&sender);
         }
     }
 
@@ -394,6 +457,19 @@ impl Synth {
         self.voices.retain(|v| !v.done());
         self.dying.retain(|v| !v.done());
         self.tracks.retain(|t| !t.done());
+        // Prune gain rows whose departed sender has no remaining
+        // references. Live senders' idle rows are never touched, and the
+        // `None` key is never pruned. Allocation-free scans over the
+        // departed set; the forget-time insert and heap retain in the
+        // drain arm carry the allocation.
+        let Self { departed_senders, voices, tracks, scheduled, sender_gains, .. } = self;
+        departed_senders.retain(|sender| {
+            let live = Self::sender_referenced(voices, tracks, scheduled, *sender);
+            if !live {
+                sender_gains.remove(&Some(*sender));
+            }
+            live
+        });
     }
 
     #[cfg(test)]
@@ -429,5 +505,10 @@ impl Synth {
     #[cfg(test)]
     pub fn scheduled_count(&self) -> usize {
         self.scheduled.len()
+    }
+
+    #[cfg(test)]
+    pub fn sender_gain_count(&self) -> usize {
+        self.sender_gains.len()
     }
 }

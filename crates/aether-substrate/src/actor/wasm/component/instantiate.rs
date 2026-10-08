@@ -87,7 +87,7 @@ impl Component {
             return Ok(Placement::Oversize);
         }
         // Wasm32 carries u32 byte lengths; `len <= MAX_DELIVERABLE_MAIL_BYTES`
-        // (64 MiB) keeps the cast lossless.
+        // (128 MiB) keeps the cast lossless.
         #[allow(clippy::cast_possible_truncation)]
         let new_cap = len as u32;
         if *large_cap < new_cap {
@@ -187,10 +187,17 @@ impl Component {
         type_tag: Option<u64>,
     ) -> wasmtime::Result<Self> {
         let mut store = Store::new(engine, ctx);
+        // The meter allows every growth and keeps wasmtime's default
+        // instance, table, and memory counts, so it limits nothing; it is
+        // installed before instantiation so the initial size is counted too.
+        store.limiter(|ctx| &mut ctx.memory_meter);
         let instance = linker.instantiate(&mut store, module)?;
         let memory = instance
             .get_memory(&mut store, "memory")
             .ok_or_else(|| wasmtime::Error::msg("guest exports no `memory`"))?;
+        // The meter counts the exported `memory` whatever the limiter was
+        // told about it at instantiate.
+        store.data().memory_meter.seed(memory.data_size(&store));
         let receive = instance.get_typed_func::<(u64, u32, u32, u32, u32, u64, u64), u32>(&mut store, "receive_p32")?;
 
         // Optional `init(mailbox_id) -> u32` export: called once before

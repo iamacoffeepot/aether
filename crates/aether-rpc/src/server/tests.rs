@@ -3,7 +3,7 @@
 #![allow(clippy::disallowed_methods)]
 use super::*;
 use crate::{Hello, HelloAck, PeerKind, Recipient, WIRE_VERSION, WireFrame};
-use aether_actor::{ActorRef, Addressable, OutboundReply, Unchecked};
+use aether_actor::{ActorRef, Addressable, Anyone, OutboundReply, Unchecked};
 use aether_codec::frame::{FrameError, read_frame, write_frame};
 use aether_data::{EngineId, ErasedActorPath, Source, Uuid};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -89,13 +89,13 @@ impl NativeActor for UncheckedEngineRoute {
     }
 
     #[handler::unchecked(reason = "test: parks the forwarded call for a later completion")]
-    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, _mail: crate::ForwardEnvelope) {
+    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, _mail: crate::ForwardEnvelope) {
         self.pending.push_back(ctx.reply_target());
         self.forwards.send(()).expect("forward observer stays live");
     }
 
     #[handler::unchecked(reason = "test: completes a parked call from another handler")]
-    fn on_complete(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, mail: CompleteEngineRouteForTest) {
+    fn on_complete(&mut self, ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, mail: CompleteEngineRouteForTest) {
         let target = self.pending.pop_front().expect("a forwarded call is pending");
         ctx.reply_to(target, &EngineRouteReplyForTest { value: mail.value });
         ctx.reply_to(target, &crate::CallSettled::Ok);
@@ -1153,7 +1153,7 @@ fn oversize_frame_replies_with_frame_too_large_and_session_survives() {
     stream.set_write_timeout(Some(Duration::from_secs(10))).expect("set_write_timeout");
 
     // Announce a body just over the cap, then push that many zero
-    // bytes. The cap defaults to 64 MiB (MAX_FRAME_SIZE), and the
+    // bytes. The cap defaults to 128 MiB (MAX_FRAME_SIZE), and the
     // process-wide accessor caches on first read — so the drain
     // ceiling is exactly `2 * max_frame_size()`. Pick the smallest
     // legal oversize: max + 1.
@@ -1164,7 +1164,7 @@ fn oversize_frame_replies_with_frame_too_large_and_session_survives() {
     #[allow(clippy::cast_possible_truncation)]
     let prefix = (oversize as u32).to_le_bytes();
     stream.write_all(&prefix).expect("write oversize length prefix");
-    // Write the body in chunks so a 64 MiB+ payload doesn't single-
+    // Write the body in chunks so a 128 MiB+ payload doesn't single-
     // syscall through.
     let chunk = vec![0u8; 1024 * 1024];
     let mut remaining = oversize;
@@ -1416,4 +1416,118 @@ fn oversized_attached_reply_closes_the_call_and_keeps_the_connection() {
 
     call_blob_replier(&mut stream, 0x0b12, BlobRequest { blob_len: 16, padding_len: 0 });
     assert_eq!(read_blob_reply(&mut stream, 0x0b12), patterned(16));
+}
+
+/// Asks [`LargeReplier`] for a blob-free reply whose body is `body_len`
+/// bytes of text.
+#[aether_data::kind(name = "aether.rpc.test.large_request", copy, default, eq)]
+struct LargeRequest {
+    body_len: u64,
+}
+
+/// [`LargeReplier`]'s reply: padding that sizes the payload with no blob
+/// attached.
+#[aether_data::kind(name = "aether.rpc.test.large_result")]
+struct LargeResult {
+    body: String,
+}
+
+/// Replies to each [`LargeRequest`] with a plain string body. The reply
+/// carries no blob, so it passes `wire_payload` unwalked and its first
+/// size check is the `ReplyEvent` frame encode.
+struct LargeReplier;
+
+#[aether_actor::actor(singleton, root)]
+impl NativeActor for LargeReplier {
+    type Config = ();
+    const NAMESPACE: &'static str = "aether.rpc.test.large_replier";
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    /// Reply with a plain body sized by the request.
+    #[handler::request]
+    fn on_large_request(&mut self, _ctx: &mut NativeCtx<'_>, mail: LargeRequest) -> LargeResult {
+        let len = usize::try_from(mail.body_len).expect("test body fits memory");
+        LargeResult { body: "l".repeat(len) }
+    }
+}
+
+fn boot_with_large_replier() -> (PassiveChassis<TestChassis>, TcpStream) {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<TraceDispatchCapability>(())
+        .with_actor::<LargeReplier>(())
+        .with_actor_configured::<RpcServerCapability>(
+            RpcServerParams { peer_kind: test_peer_kind(), bind: RpcBind::Boot },
+            RpcServerConfig { port: Some(0), port_file: None },
+        )
+        .build_passive()
+        .expect("caps boot");
+    let mut stream = connect_to_rpc_server(&chassis, Duration::from_secs(10));
+    complete_handshake(&mut stream);
+    (chassis, stream)
+}
+
+fn call_large_replier(stream: &mut TcpStream, cid: u64, request: LargeRequest) {
+    use crate::MailEnvelope;
+    use aether_data::Kind;
+
+    write_frame(
+        stream,
+        &WireFrame::Call {
+            cid: Some(cid),
+            envelope: MailEnvelope {
+                to: recipient_of::<LargeReplier>(),
+                kind: <LargeRequest as Kind>::ID,
+                payload: request.encode_into_bytes(),
+            },
+        },
+    )
+    .expect("write Call");
+}
+
+/// Read one call's `ReplyEvent` and `ReplyEnd { Ok }`, returning the reply
+/// body.
+fn read_large_reply(stream: &mut TcpStream, cid: u64) -> String {
+    use aether_data::Kind;
+
+    let envelope = match read_frame(stream).expect("read ReplyEvent") {
+        WireFrame::ReplyEvent { cid: event_cid, envelope } if event_cid == cid => envelope,
+        other => panic!("expected ReplyEvent for cid {cid}, got {other:?}"),
+    };
+    assert_eq!(envelope.kind, <LargeResult as Kind>::ID);
+    let reply = LargeResult::decode_from_bytes(&envelope.payload).expect("the reply decodes");
+
+    match read_frame(stream).expect("read ReplyEnd") {
+        WireFrame::ReplyEnd { cid: end_cid, result } if end_cid == cid => result.expect("ReplyEnd Ok"),
+        other => panic!("expected ReplyEnd for cid {cid}, got {other:?}"),
+    }
+    reply.body
+}
+
+/// A blob-free reply that cannot fit one frame closes its own call with
+/// `FrameTooLarge` naming the size and the cap, and the connection carries
+/// the next call. Catches the reply-event write closing the whole
+/// connection on `EncodeTooLarge`, or leaving the failed call open.
+#[test]
+fn oversized_plain_reply_closes_the_call_and_keeps_the_connection() {
+    use crate::RpcError;
+    use aether_codec::frame::max_frame_size;
+
+    let (_chassis, mut stream) = boot_with_large_replier();
+    let max = max_frame_size();
+
+    call_large_replier(&mut stream, 0x0c11, LargeRequest { body_len: max as u64 });
+    match read_frame(&mut stream).expect("read ReplyEnd") {
+        WireFrame::ReplyEnd { cid: 0x0c11, result: Err(RpcError::FrameTooLarge { size, max: limit }) } => {
+            assert!(size > max as u64, "the reported size {size} must exceed the limit {max}");
+            assert_eq!(limit, max as u64);
+        }
+        other => panic!("expected ReplyEnd FrameTooLarge for cid 0x0c11, got {other:?}"),
+    }
+
+    call_large_replier(&mut stream, 0x0c12, LargeRequest { body_len: 16 });
+    assert_eq!(read_large_reply(&mut stream, 0x0c12), "l".repeat(16));
 }

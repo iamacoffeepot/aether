@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
 use aether_actor::{
-    ActorRef, Addressable, ErasedActorRef, HandlesKind, MailSender, OutboundReply, ReplyMode, Single, Unchecked,
-    Undeclared,
+    ActorRef, Addressable, Anyone, ErasedActorRef, HandlesKind, MailSender, OutboundReply, ReplyMode, Single,
+    Unchecked, Undeclared,
 };
 use aether_data::{Encoded, Kind, MailId, RequestId};
 
@@ -50,7 +50,7 @@ impl NativeActor for UncheckedCastRelay {
     }
 
     #[handler::unchecked(reason = "test: a cast-only receiver exercising the unchecked row")]
-    fn on_cast(&mut self, _ctx: &mut NativeCtx<'_, Self, Unchecked>, _mail: CastOnly) {
+    fn on_cast(&mut self, _ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, _mail: CastOnly) {
         self.received += 1;
     }
 }
@@ -115,8 +115,8 @@ struct Turn {
 }
 
 impl Turn {
-    fn of<M: ReplyMode>(
-        ctx: &NativeCtx<'_, SendProbe, M>,
+    fn of<S, M: ReplyMode>(
+        ctx: &NativeCtx<'_, SendProbe, S, M>,
         emitted: Vec<Option<MailId>>,
         detached: Vec<MailId>,
     ) -> Self {
@@ -133,7 +133,7 @@ impl Turn {
 /// The id of the mail this turn last sent, for a verb that returns none: the
 /// binding mints each id from its own mailbox and the correlation it
 /// advances per send (ADR-0042).
-fn last_sent<M: ReplyMode>(ctx: &NativeCtx<'_, SendProbe, M>) -> MailId {
+fn last_sent<S, M: ReplyMode>(ctx: &NativeCtx<'_, SendProbe, S, M>) -> MailId {
     MailId::new(ctx.binding.self_mailbox(), ctx.prev_correlation())
 }
 
@@ -191,7 +191,7 @@ impl NativeActor for SendProbe {
     }
 
     #[handler::unchecked(reason = "test: forwards the request, reply pinned to the requester")]
-    fn on_forward_to(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, _trigger: ForwardTo) {
+    fn on_forward_to(&mut self, ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, _trigger: ForwardTo) {
         ctx.forward_to(self.relay.narrow::<CastRelay>(), &CastOnly { code: 9 });
         self.turns.push(Turn::of(ctx, Vec::new(), Vec::new()));
     }
@@ -439,7 +439,7 @@ fn flat_send_detached_reaches_the_declared_dependency_on_a_fresh_chain() {
 /// context under the routed mail's correlation, which the answering actor's
 /// real reply turn takes back. A body copied from `send_detached` with no
 /// lineage, a wrong recipient, or a context stored under another correlation
-/// fails here rather than only in the audio and text caps' fs round trips.
+/// fails here rather than only in the audio cap's fs round trips.
 #[test]
 fn flat_send_and_send_with_context_reach_the_declared_dependency_on_the_handlers_chain() {
     let mut rig = Rig::boot();
@@ -482,11 +482,11 @@ type CastOnlyTaskDones =
 /// `TaskDone::resolve*`) alike.
 #[allow(dead_code)]
 fn _assert_cast_kind_repliable(
-    ctx: &mut NativeCtx<'_, Erased, Unchecked>,
+    ctx: &mut NativeCtx<'_, Erased, Anyone, Unchecked>,
     sender: Source,
     deferred: DeferredReply,
     task_dones: CastOnlyTaskDones,
-    task_ctx: &mut NativeCtx<'_, Erased, Single>,
+    task_ctx: &mut NativeCtx<'_, Erased, Anyone, Single>,
 ) {
     OutboundReply::reply(ctx, &CastOnly { code: 2 });
     OutboundReply::reply_to(ctx, sender, &CastOnly { code: 3 });

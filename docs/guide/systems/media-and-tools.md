@@ -1,9 +1,8 @@
 # Media, interaction, and product tools
 
 These systems turn engine state into human-visible or editable output. Native
-capabilities own devices and low-level resources; `aether-kit` and
-`aether-widget` actors compose them into reusable camera, mesh, and
-widget behavior.
+capabilities own devices and low-level resources; `aether-kit` actors compose
+them into reusable camera and mesh behavior.
 
 | Concern | Chapter |
 |---|---|
@@ -13,9 +12,8 @@ widget behavior.
 | Realtime synthesis/samples/tracks | [Audio](audio.md) |
 | Keyboard, pointer, text and IME streams | [Input](input.md) |
 | Window lifecycle, mode/title, menu and cursor chrome | [Window](window.md) |
-| Widget state/focus/composition | [Widgets](widgets.md) |
 
-Keep frame ownership explicit. Product actors may emit render/text/audio mail,
+Keep frame ownership explicit. Product actors may emit render and audio mail,
 but native callbacks and presentation remain chassis responsibilities. For
 visual changes, pair structural/SubstrateHarness checks with captured evidence; for
 realtime audio, keep allocation and blocking work off the callback.

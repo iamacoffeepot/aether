@@ -70,11 +70,11 @@ project replies.
 | Guest SDK | `aether-actor` and its derive crate | actor authoring, exports, contexts, replies |
 | Runtime | `aether-substrate` | registry, mail, scheduler, native/wasm host, settlement |
 | Native services | one `aether-<capability>` crate per cap | chassis resource actors and public capability kinds |
-| Process profiles | `aether-chassis` + `aether-chassis-*` | desktop/headless/hub/harness composition; the shippable package depot comes from `cargo xtask package` |
+| Process profiles | `aether-chassis` + `aether-chassis-*` | desktop/headless/hub/bloomery composition; the shippable package depot comes from `cargo xtask package` |
 | Operator bridge | `aether-mcp` | live tools, JSON/schema adaptation, hub RPC and caches |
 | Test harnesses | `aether-harness-*` | in-process substrate, real-process fleet, capture, and perf drivers |
 | Build tooling | `xtask`, fixtures, `fuzz/` | artifact discovery, package depots, compatibility fixtures, fuzz targets |
-| Guest actors shipped with the engine | `aether-kit`, `aether-widget`, `aether-mesh` | camera and camera-controller, mesh viewer, the widget set, geometry authoring |
+| Guest actors shipped with the engine | `aether-kit`, `aether-mesh` | camera and camera-controller, mesh viewer, geometry authoring |
 
 The [repository map](orientation/repository-map.md) routes changes across the
 full workspace. Capability messages such as render/audio/filesystem kinds live
@@ -84,7 +84,12 @@ with their own capability crate, not in a universal central kind catalog
 ## Chassis composition
 
 Four checked-in chassis profiles reuse the substrate but install different
-drivers and capabilities: desktop, headless, hub, and substrate harness.
+drivers and capabilities: desktop, headless, hub, and bloomery. The in-process
+substrate harness is a library chassis in `aether-harness-substrate`.
+
+Every chassis, and the in-process `SubstrateHarness`, composes `aether.trace`
+and `aether.inventory` from the shared base, ahead of the capabilities each one
+chooses.
 
 Source presence does not imply every chassis has a working actor. A chassis
 composes only the capabilities it serves, so a surface it cannot serve has no

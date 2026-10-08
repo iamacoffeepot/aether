@@ -7,6 +7,7 @@
 //! there is no behaviour here to pin that its readers and writers do not
 //! already own.
 
+use std::process::abort;
 use std::sync::Arc;
 
 use aether_data::ErasedActorPath;
@@ -18,12 +19,40 @@ use crate::mail::registry::handlers::{InboxHandler, InlineHandler};
 
 use super::{MailboxEntry, SeizeCell};
 
+/// When a route record was first inserted, among every record this registry
+/// has ever inserted (ADR-0248 §5). The registry draws one for each birth and
+/// nothing else writes one, so two records compare in the order the registry
+/// applied their births. Serials are registry-local: a caller may compare and
+/// copy one but cannot make one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct BirthSerial(u64);
+
+impl BirthSerial {
+    /// Below every serial [`Self::next`] hands out, which start at one. It
+    /// fills the slots of a `LineageOrder` past its depth, which nothing
+    /// reads, and no record carries it.
+    pub(super) const BEFORE_ANY: Self = Self(0);
+
+    pub(super) fn next(counter: &mut u64) -> Self {
+        *counter = counter.checked_add(1).unwrap_or_else(|| {
+            tracing::error!("birth serial sequence exhausted; registry cannot keep lineage order");
+            abort();
+        });
+        Self(*counter)
+    }
+}
+
 /// A route's name is proven against the ADR-0166 grammar once, when a writer
 /// in [`super::apply`] first publishes it, so reading one back for a
 /// reference (`Mailer::actor_path`) has no failure to report.
+///
+/// `born` is stamped by the same writer, when the record is first inserted,
+/// and every later write of the record carries it unchanged (ADR-0248 §5):
+/// a route keeps its serial from `Starting` through `Live` to `Dropped`.
 #[derive(Clone)]
 pub(super) struct RouteRecord {
     pub(super) canonical_name: ErasedActorPath,
+    pub(super) born: BirthSerial,
     pub(super) lifecycle: RouteLifecycle,
 }
 

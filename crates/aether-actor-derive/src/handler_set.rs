@@ -76,9 +76,8 @@
 //! A wasm set's bridge is instead a plain `macro_rules!` re-exported
 //! crate-wide under the set trait's own name, so an adopter in any module
 //! reaches it through the set path it already names (see
-//! `build_wasm_marker_bridge`). Its rows are what let the widget panel narrow
-//! each spawned child to the lane protocols that list a set kind (ADR-0231
-//! §2, §3).
+//! `build_wasm_marker_bridge`). Its rows are what let a parent narrow a
+//! spawned adopter to a protocol that lists a set kind (ADR-0231 §2, §3).
 //!
 //! # Typed members
 //!
@@ -87,7 +86,7 @@
 //! trait method's own signature, so the default body type-checks against
 //! `WasmCtx<'_, Self>` / `NativeCtx<'_, Self>`. A default body that reaches
 //! another actor needs the adopter to declare it, so the set states that reach
-//! as a supertrait (`trait WidgetDefaults: DependsOn<TextCapability>`), and the
+//! as a supertrait (`trait Shared: DependsOn<AudioCapability>`, say), and the
 //! expansion adds `Sized` to the supertraits, because the typed ctx needs a
 //! sized `Self` and every adopter is a concrete actor. A member that spells
 //! `Erased` keeps the erased view: its arm erases before the call. An override
@@ -134,16 +133,16 @@ use syn::{FnArg, ItemTrait, TraitItem, Type};
 
 use crate::diagnostics::extract_agent_doc;
 use crate::handler_parse::{
-    HandlerClass, HandlerFn, HandlerReply, HandlerVariant, allow_context_by_value, attr_is_fallback, attr_is_handler,
-    check_intent_signature, classify_handler_reply, erase_unless_ctx_names_actor, extract_handler_kind_type,
-    extract_native_actor_handler_kind, fill_ctx_actor, handler_cfgs, parse_handler_args, parse_handler_class,
-    reject_duplicate_handler_kinds, silent_call,
+    HandlerClass, HandlerFn, HandlerReply, HandlerVariant, IntentParameters, allow_context_by_value, attr_is_fallback,
+    attr_is_handler, check_intent_signature, classify_handler_reply, erase_unless_ctx_names_actor,
+    extract_handler_kind_type, extract_native_actor_handler_kind, fill_ctx_actor, handler_cfgs, parse_handler_args,
+    parse_handler_class, reject_ctx_sender, reject_departed_handler, reject_duplicate_handler_kinds, silent_call,
 };
 use crate::manifest::build_handler_set_manifest_const;
 use crate::reply_markers::{
-    ReplyMarkerSite, concat_contract_rows, conjoined_cfg_predicate, contract_element, contract_element_ty,
-    contract_row_impl, contract_rows_expr, declaration_list, native_reply_contract, owned_reason, position_past,
-    refusal_answer, reply_marker_impl, row_entry, static_reason,
+    ContractRow, ReplyMarkerSite, concat_contract_rows, conjoined_cfg_predicate, contract_element, contract_element_ty,
+    contract_row_impl, contract_rows_expr, declaration_list, handles_kind_impl, native_reply_contract, owned_reason,
+    position_past, refusal_answer, reply_marker_impl, row_entry, static_reason,
 };
 use crate::wasm_expand::wasm_arm_body;
 
@@ -166,10 +165,10 @@ impl SetTransport {
     fn dispatch_ctx(self) -> TokenStream2 {
         match self {
             Self::Wasm => quote! {
-                ::aether_actor::WasmCtx<'_, Self, ::aether_actor::Unchecked>
+                ::aether_actor::WasmCtx<'_, Self, ::aether_actor::Anyone, ::aether_actor::Unchecked>
             },
             Self::Native => quote! {
-                ::aether_substrate::actor::native::NativeCtx<'_, Self, ::aether_actor::Unchecked>
+                ::aether_substrate::actor::native::NativeCtx<'_, Self, ::aether_actor::Anyone, ::aether_actor::Unchecked>
             },
         }
     }
@@ -351,7 +350,15 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
         // parameter reaches `check_intent_signature` below.
         let (class, intent) = parse_handler_class(&f.attrs[idx], &args)?;
         let kind_ty = match this_transport {
-            SetTransport::Wasm => extract_handler_kind_type(&f.sig, intent.is_some())?,
+            SetTransport::Wasm => {
+                let kind_ty = extract_handler_kind_type(&f.sig, intent.is_some())?;
+                reject_departed_handler(
+                    &kind_ty,
+                    "write the handler in the component's own `#[actor]` block, which declares the watch; a \
+                     handler set cannot",
+                )?;
+                kind_ty
+            }
             SetTransport::Native => {
                 let (kind_ty, is_slice) = extract_native_actor_handler_kind(&f.sig, this_split, intent.is_some())?;
                 if is_slice {
@@ -367,7 +374,16 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
         };
         let agent_doc = extract_agent_doc(&f.attrs);
         let reply = classify_handler_reply(&f.sig.output);
-        let response_context = intent.map(|i| check_intent_signature(i, &reply, &f.sig, false)).transpose()?.flatten();
+        // ADR-0231 §11: a set handler states nothing about its sender. The
+        // requirement belongs to one actor's row, and a set's rows are pasted
+        // onto every adopter through a bridge that carries no protocol path.
+        reject_ctx_sender(
+            &f.sig,
+            "a `#[handler_set]` member",
+            "a set's rows are pasted onto every adopter, and a set states nothing about its sender",
+        )?;
+        let IntentParameters { response_context, .. } =
+            intent.map(|i| check_intent_signature(i, &reply, &f.sig, false)).transpose()?.unwrap_or_default();
         let cfgs = handler_cfgs(&f.attrs);
         f.attrs.remove(idx);
         allow_context_by_value(&mut f.attrs, response_context.as_ref());
@@ -399,6 +415,7 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
             class,
             unchecked_reason: args.reason,
             response_context,
+            sender: None,
         });
     }
 
@@ -662,12 +679,13 @@ fn handler_markers(h: &HandlerFn, position: usize, cfgs: &[syn::Attribute]) -> [
     let self_ty = quote! { $ty };
     let site = ReplyMarkerSite { impl_generics: &empty, self_ty: &self_ty, where_clause: &empty, cfgs };
     [
-        quote! {
-            #(#cfgs)*
-            impl ::aether_actor::HandlesKind<#kind_ty> for $ty {}
-        },
+        handles_kind_impl(kind_ty, None, &site),
         reply_marker_impl(h.class, &h.reply, kind_ty, &site),
-        contract_row_impl(h.class, &h.reply, kind_ty, &position_past(quote! { $base }, position), &site),
+        contract_row_impl(
+            ContractRow { class: h.class, reply: &h.reply, kind_ty, sender: None },
+            &position_past(quote! { $base }, position),
+            &site,
+        ),
     ]
 }
 

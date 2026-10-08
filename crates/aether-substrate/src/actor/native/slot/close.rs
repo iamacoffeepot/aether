@@ -108,7 +108,9 @@ pub fn close<A>(
 /// watcher through the binding's mailer.
 ///
 /// The actor registry's tombstone is the synchronous authority spawn
-/// admission and `register_monitor` read. The route's `Dropped` record is
+/// admission and `register_monitor` read: a monitor registered after it is
+/// written is not entered in the index, and its caller posts the notice
+/// instead (see [`ActorRegistry`]). The route's `Dropped` record is
 /// its published mirror for route readers (`resolve_live` refuses it and the
 /// live inventory drops it), staged through the ADR-0165 owner, so it lands
 /// at the owner's next apply. The route keeps its proven name, so a held
@@ -119,8 +121,8 @@ pub fn close<A>(
 /// The closing actor's inline-child aliases (ADR-0114 §2) depart with it, so
 /// each of those addresses fans out under its own name too (see
 /// `notify_alias_departures`). Each alias closes with it and tombstones
-/// (ADR-0241 §8), so a watch on it is refused and its key is never spawned
-/// again; only `self_id` goes `Dead`, because an alias is served by this slot
+/// (ADR-0241 §8), so a later watch on it is answered with its notice at once
+/// and its key is never spawned again; only `self_id` goes `Dead`, because an alias is served by this slot
 /// rather than owning one. An alias resolves through its target, so its route
 /// reads `Dropped` with it.
 ///

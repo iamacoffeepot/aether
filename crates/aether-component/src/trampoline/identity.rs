@@ -41,12 +41,24 @@ impl Declared for WasmTrampoline {
     type Parents = ();
 }
 
-impl HandlesKind<DropComponent> for WasmTrampoline {}
-impl HandlesKind<LoadDelivered> for WasmTrampoline {}
-impl HandlesKind<SpawnDelivered> for WasmTrampoline {}
-impl HandlesKind<Prepare> for WasmTrampoline {}
-impl HandlesKind<Commit> for WasmTrampoline {}
-impl HandlesKind<Abort> for WasmTrampoline {}
+impl HandlesKind<DropComponent> for WasmTrampoline {
+    type Sender = aether_actor::Anyone;
+}
+impl HandlesKind<LoadDelivered> for WasmTrampoline {
+    type Sender = aether_actor::Anyone;
+}
+impl HandlesKind<SpawnDelivered> for WasmTrampoline {
+    type Sender = aether_actor::Anyone;
+}
+impl HandlesKind<Prepare> for WasmTrampoline {
+    type Sender = aether_actor::Anyone;
+}
+impl HandlesKind<Commit> for WasmTrampoline {
+    type Sender = aether_actor::Anyone;
+}
+impl HandlesKind<Abort> for WasmTrampoline {
+    type Sender = aether_actor::Anyone;
+}
 
 impl Replies<DropComponent> for WasmTrampoline {
     type Reply = DropResult;
@@ -92,25 +104,31 @@ impl Contracts for WasmTrampoline {
 
 impl Contract<DropComponent> for WasmTrampoline {
     type Reply = DropResult;
+    type Sender = aether_actor::Anyone;
     type Index = Here;
 }
 impl Contract<LoadDelivered> for WasmTrampoline {
     type Reply = LoadResult;
+    type Sender = aether_actor::Anyone;
     type Index = There<Here>;
 }
 impl Contract<SpawnDelivered> for WasmTrampoline {
     type Reply = SpawnResult;
+    type Sender = aether_actor::Anyone;
     type Index = There<There<Here>>;
 }
 impl Contract<Prepare> for WasmTrampoline {
     type Reply = Prepared;
+    type Sender = aether_actor::Anyone;
     type Index = There<There<There<Here>>>;
 }
 impl Contract<Commit> for WasmTrampoline {
     type Reply = Committed;
+    type Sender = aether_actor::Anyone;
     type Index = There<There<There<There<Here>>>>;
 }
 impl Contract<Abort> for WasmTrampoline {
     type Reply = Aborted;
+    type Sender = aether_actor::Anyone;
     type Index = There<There<There<There<There<Here>>>>>;
 }

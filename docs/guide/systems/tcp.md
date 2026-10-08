@@ -32,7 +32,8 @@ explicit.
 Bind/connect results carry success or a bounded error. Readiness notifications
 separate actor creation from a socket being usable. A connect timeout or bind
 failure must resolve the initiating request; it must not leave a permanent
-settlement hold.
+settlement hold. Repeating a bind of the same address as the same consumer
+returns the standing listener rather than creating one.
 
 Connect, bind, and unbind answer later than the handler turn that receives
 them, through typed held replies (ADR-0243). Each handler holds its reply as a
@@ -71,7 +72,9 @@ one peer read. Reassembly and full-write loops are native responsibilities.
 
 ## Consumer binding
 
-A consumer covers the `TcpConsumer` protocol (`aether_tcp::TcpConsumer`): it
+Every bind and connect names a consumer; there is no listener or session
+without one. A consumer covers the `TcpConsumer` protocol
+(`aether_tcp::TcpConsumer`): it
 handles `session_data` and `session_closed`, both silently. Each session holds
 its consumer as a `ProtocolRef<TcpConsumer>`, so its fan-out compiles only for
 those two kinds.
@@ -79,15 +82,19 @@ those two kinds.
 A consumer actor binds itself to its sessions with a `_self` kind:
 `ctx.send::<TcpCapability>(&BindListenerSelf { .. })` or
 `ctx.send::<TcpCapability>(&ConnectSelf { .. })`. The capability takes the
-consumer from the proven sender, so the actor never names its own position. It
-casts the sender to `TcpConsumer` once, at receipt (ADR-0231 §4), and replies
-`Err` without binding or dialing when the sender's published rows do not
-cover the protocol, or when the mail has no actor sender. A component that
-binds itself can check its coverage at compile time with
-`TcpConsumer: CoveredBy<Self>`, as the `tcp_load_probe` fixture does.
+consumer from the proven sender, so the actor never names its own position.
+Both handlers require `TcpConsumer` of their sender (ADR-0231 §11), which
+each states as its ctx's sender (`NativeCtx<'_, Self, TcpConsumer>`) and
+reads as the proven `ProtocolRef<TcpConsumer>` from `ctx.sender()`: the send
+builds only for an actor with silent handlers for `session_data` and
+`session_closed`, and an actor that lacks one gets a build error naming it.
+The engine casts the sender before the handler runs, so a `_self` kind that
+arrives another way, such as a call relayed from MCP, is answered
+`Err(Consumer(..))` naming the sender and the handler it lacks, and nothing
+is bound or dialed. Mail with no actor sender is refused with no reply.
 
 An agent, or a capability binding a different actor, names that actor in the
-`consumer` field of `bind_listener` or `connect`. The field is a
+`consumer` field of `bind_listener` or `connect`. The field is required, a
 `ProtocolPath<TcpConsumer>`: in code an `ActorPath<R>` narrowed with
 `.narrow::<TcpConsumer>()`, and over MCP the canonical `path` a component load
 returns. The path must be canonical; a short `root/:key` path is refused. Its decode proves that the route at the path, live or closed,
@@ -120,6 +127,43 @@ Listener/session names live under the engine's lineage. They are not globally
 unique across engines and should be discovered from result/notification data,
 not guessed from hashes.
 
+## Lifetimes
+
+The capability monitors each consumer it has bound a listener or dialed a
+session for (ADR-0079 §8), once per consumer however many it holds for it.
+When the consumer closes, the capability mails `aether.tcp.close` to every
+listener bound to it, the mail an unbind sends, and
+`aether.tcp.session_close` to every session dialed for it. A consumer that
+closes, by whatever exit, therefore leaves nothing bound or connected on its
+behalf, and it need not unbind first.
+
+The engine does not close an actor's children when the actor closes. A
+listener therefore keeps an entry for each session it accepted and mails each
+one `aether.tcp.session_close` as it closes, whether an unbind or its
+consumer's close ended it.
+
+- A listener lives until `aether.tcp.unbind_listener` names it, until the
+  consumer it was bound for closes, or until the engine tears down.
+- An accepted session lives until its peer closes or a read fails, a frame is
+  rejected, a write fails, it is sent `aether.tcp.session_close`, or its
+  listener closes.
+- A dialed session lives until one of the same ends, with its consumer's
+  close in the place of the listener's.
+- A listener told to close while a session birth is still settling waits for
+  that birth, so the session is closed with the rest. Connections that arrive
+  while it waits are dropped.
+- One consumer's close touches only what was bound to it: another consumer's
+  listeners and sessions stay.
+- A republish of the consumer keeps its mailbox, so it closes nothing: the
+  listener and its sessions deliver to the successor.
+- A session closed by `aether.tcp.session_close`, whoever sent it, sends no
+  `session_closed`. Its peer sees the connection close.
+
+A listener that closes because its consumer closed leaves
+`aether.tcp.list_listeners` the way an unbound one does, and an unbind parked
+on it at that moment is answered `Ok`. The capability keeps an entry for each
+dialed session, and no kind lists sessions or closes one by name.
+
 ## Concurrency boundary
 
 Blocking accept/read loops and outbound connect run on sidecar threads. The
@@ -128,8 +172,9 @@ are currently unbounded; frame limits and kernel buffers do not turn those
 handoffs into a general bounded-queue contract. Actors retain state ownership
 and serialize control transitions. Session writes are the current exception to
 the sidecar rule: `session_write` calls the socket's full-write loop on the actor
-dispatcher and can briefly block there under kernel backpressure. Closing must
-make all of these converge:
+dispatcher and can briefly block there under kernel backpressure. Closing, by
+any exit in [Lifetimes](#lifetimes) including the consumer closing, must make
+all of these converge:
 
 - socket shutdown;
 - sidecar exit or detach;

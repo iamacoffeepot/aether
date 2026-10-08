@@ -13,6 +13,8 @@ use crate::actor::native::identity::ActorRuntimeIdentity;
 use crate::actor::native::{ActorProbe, NativeActor};
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::component::ComponentCtx;
+#[cfg(feature = "wasm")]
+use crate::actor::wasm::module::Module;
 use crate::chassis::ctx::ChassisCtx;
 use crate::chassis::inbox::{InboxReceiver, ReplyLineage, SettlingInbox};
 #[cfg(feature = "wasm")]
@@ -22,8 +24,9 @@ use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
 #[cfg(feature = "wasm")]
 use crate::mail::registry::effect::RegistryBatch;
-use crate::mail::registry::{AddressResolutionError, RegistrySubscription, RouteContract};
+use crate::mail::registry::{AddressResolutionError, LineageOrder, RegistrySubscription, RouteContract};
 use crate::mail::{KindId, MailId, MailboxId};
+use crate::memory::{MemoryGauge, MemoryReport};
 use crate::runtime::lifecycle::FatalAborter;
 #[cfg(any(test, feature = "test-support"))]
 use crate::runtime::lifecycle::PanicAborter;
@@ -289,6 +292,19 @@ impl NativeBinding {
         self.mailer.kind_descriptors()
     }
 
+    /// A memory gauge listed under this actor with `label`. The path behind
+    /// [`NativeInitCtx::memory_gauge`](crate::actor::native::NativeInitCtx::memory_gauge),
+    /// and what a hosted guest's ctx counts its linear memory on.
+    pub(crate) fn memory_gauge(&self, label: &'static str) -> MemoryGauge {
+        self.mailer.memory_ledger().gauge(self.self_mailbox(), label)
+    }
+
+    /// What the engine holds right now, by owner. The path behind
+    /// [`NativeCtx::memory_report`](crate::actor::native::ctx::NativeCtx::memory_report).
+    pub(crate) fn memory_report(&self) -> MemoryReport {
+        self.mailer.memory_report()
+    }
+
     /// The origin name of one tagged id. The path behind
     /// [`NativeCtx::tagged_id_name`](crate::actor::native::ctx::NativeCtx::tagged_id_name).
     pub(crate) fn tagged_id_name(&self, tagged: &str) -> Option<String> {
@@ -305,6 +321,22 @@ impl NativeBinding {
     /// [`NativeCtx::actor_path`](crate::actor::native::ctx::NativeCtx::actor_path).
     pub(crate) fn actor_path(&self, reference: ErasedActorRef) -> ErasedActorPath {
         self.mailer.actor_path(reference)
+    }
+
+    /// Where the actor a reference proves stands in the actor tree by
+    /// creation order. The path behind
+    /// [`NativeCtx::lineage_order`](crate::actor::native::ctx::NativeCtx::lineage_order).
+    pub(crate) fn lineage_order(&self, reference: ErasedActorRef) -> LineageOrder {
+        self.mailer.lineage_order(reference)
+    }
+
+    /// The canonical path of the route record at `position`, as
+    /// `Registry::actor_path_at` answers it: the same route-table read
+    /// [`Self::actor_path`] makes, for a position a guest passes. The read
+    /// behind the `actor_path_p32` host fn.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn actor_path_at(&self, position: MailboxId) -> Option<ErasedActorPath> {
+        self.mailer.registry().actor_path_at(position)
     }
 
     /// The reference for a host-stamped position that holds a route record,
@@ -326,6 +358,17 @@ impl NativeBinding {
     #[cfg(feature = "wasm")]
     pub(crate) fn published_rows_at(&self, position: MailboxId) -> Option<Arc<[(KindId, ReplyContract)]>> {
         self.mailer.registry().published_rows_at(position)
+    }
+
+    /// The rows of the `Live` or `Dropped` route standing under exactly
+    /// `path`'s canonical name, as `Registry::route_rows` answers them: the
+    /// read behind a wasm guest's decode of a `ProtocolPath<P>` (ADR-0231
+    /// §3), through the `route_rows_p32` host fn. The same read a native
+    /// decode makes through `impl PublishedRoutes for Registry`, so the two
+    /// proofs cannot drift apart.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn route_rows(&self, path: &ErasedActorPath) -> Option<Arc<[(KindId, ReplyContract)]>> {
+        self.mailer.registry().route_rows(path)
     }
 
     /// The position of the `Live` route standing under exactly `path`'s
@@ -366,9 +409,10 @@ impl NativeBinding {
     /// Build a guest ctx over this binding. The path behind
     /// [`NativeInitCtx::guest_ctx`](crate::actor::native::NativeInitCtx::guest_ctx) and
     /// [`NativeCtx::guest_ctx`](crate::actor::native::ctx::NativeCtx::guest_ctx).
+    /// `module` is the module the guest runs.
     #[cfg(feature = "wasm")]
-    pub(crate) fn guest_ctx(self: &Arc<Self>, outbound: Arc<HubOutbound>) -> ComponentCtx {
-        self.mailer.guest_ctx(Arc::clone(self), outbound)
+    pub(crate) fn guest_ctx(self: &Arc<Self>, outbound: Arc<HubOutbound>, module: Module) -> ComponentCtx {
+        self.mailer.guest_ctx(Arc::clone(self), outbound, module)
     }
 
     /// Make this actor's accept set exactly `guest`, and seed a cost cell for

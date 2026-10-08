@@ -38,6 +38,25 @@ The deployable artifact is a wasm `cdylib`. An accompanying `rlib` can expose
 the kinds and helpers other Rust crates need to talk to it. Runtime code is
 normally feature-gated so a type-only consumer does not link the implementation.
 
+A guest measures elapsed time with `ctx.now()`, on `WasmCtx` (and so `WireCtx`)
+and on `WasmInitCtx`. It returns an `aether_actor::Instant`, and
+`later.since(earlier)` is a `core::time::Duration`. The call is one host import,
+`now_nanos_p32`, answered inside the handler that asks; a module built against it
+is refused at load by a host that lacks the import. `std::time::Instant::now()`
+compiles for `wasm32-unknown-unknown` and traps when called, so a component reads
+`ctx.now()` and never the std clock.
+
+An `Instant` stays in the actor that read it:
+
+- It has no schema and is no kind's field, so it cannot be mailed, saved with
+  `save_state_kind`, or put in a request context. A measurement that spans two
+  handlers keeps its start in actor state.
+- A successor installed by a republish takes its own reading in `init` or
+  `on_rehydrate`; its predecessor's readings do not carry over.
+- A measured duration is not replayable. A bloomery rule must not write one into
+  a journaled result: a restart replays the rule and measures a different
+  duration. Durable time comes from recorded time.
+
 ## Multi-actor modules need an explicit export selector
 
 A wasm module may export several actor identities. Do not infer a selection
@@ -73,6 +92,12 @@ actors. A capability generally has:
 The identity/runtime split keeps public addressing types light while allowing
 native state to hold adapters, devices, threads, and resource handles. See
 [Capability module anatomy](../capability-anatomy.md).
+
+A native actor measures elapsed time with the same call a guest does:
+`ctx.now()` on `NativeCtx` and on `NativeInitCtx`, returning the same
+`aether_actor::Instant`. Both sides read the engine's one actor clock, so a
+guest's and a native actor's readings in one engine are of the same clock, and
+the rules for an `Instant` above hold on both.
 
 ## Capability-local kinds
 

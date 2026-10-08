@@ -157,14 +157,17 @@ the journal back through the same expectations on the `SeededJournal` the engine
 
 For overlay rendering, split structural and raster proof deliberately. Assert exact
 rectangle geometry, clips, texture coordinates, tint, texture identity, projection
-space, and submission order through `committed_overlay_snapshot` (on
+space, and commit order through `committed_overlay_snapshot` (on
 `aether-harness-substrate-capture`'s `RenderHarnessExt`); then use
 `CaptureFrame` reductions for the smaller set of outcomes that need end-to-end proof
 through projection, blending, rasterization, and GPU readback. The typed snapshot
 contains only batches accepted into the recorded draw plan, so missing textures,
 invalid/empty clips, and an over-budget overlay pass cannot masquerade as rendered
 work. It localizes a malformed submission, while the rendered capture proves the
-pipeline actually produced the intended pixels.
+pipeline actually produced the intended pixels. The snapshot lists batches in
+commit order, the painter order the frame was recorded in: lineage order
+between senders and each sender's own send order inside it, never the order the
+mail arrived in. A harness send has no sender, so its batches come first.
 
 Assert what a capability's work produced — a reply, `committed_overlay_snapshot` /
 `committed_shape_snapshot`, or pixels — and never whether a kind was dispatched to it.
@@ -218,7 +221,9 @@ wake, and the wait returns when the roots settle. Boot the actor through
   close tail, a `send_detached` send, a child's `after_init` mail.
   No root the test holds covers it, so the observing actor signals a test
   channel and the test waits with `testing::await_signal`, which names the
-  wait as the signal it is rather than as settlement. A FIFO tracked barrier
+  wait as the signal it is rather than as settlement. When the observed effect
+  carries a value the test asserts on, the test waits with
+  `testing::await_event` on the channel that carries it. A FIFO tracked barrier
   (a tracked send of the same kind to the same inbox) fits only mail already
   in the inbox: an actor's own sends flush onto the pool, so a barrier the
   test delivers directly can overtake them.
@@ -258,13 +263,13 @@ pre-build step runs.
 Without the artifact the gate **fails** the scenario:
 
 ```
-SKIPPED (no wasm for aether_widget): run `cargo xtask build-wasm` — set AETHER_ALLOW_WASM_SKIP=1 to ignore (looked for <checkout>/target/wasm32-unknown-unknown/debug/aether_widget.wasm)
+SKIPPED (no wasm for aether_kit): run `cargo xtask build-wasm` — set AETHER_ALLOW_WASM_SKIP=1 to ignore (looked for <checkout>/target/wasm32-unknown-unknown/debug/aether_kit.wasm)
 ```
 
 That is the whole point of the message. The gate used to return `None` here and let
 each scenario `return` early, which reports `test … ok` — a green suite that ran none
 of the code under test, indistinguishable from a green suite that ran all of it. An
-agent changing a widget, running `cargo test -p aether-widget`, and reporting the
+agent changing a component, running `cargo test -p aether-kit`, and reporting the
 change proven was reading that. If you genuinely cannot cross-build wasm, take the
 skip deliberately with `AETHER_ALLOW_WASM_SKIP=1`, and do not read the result as
 proof of anything the wasm would have exercised.

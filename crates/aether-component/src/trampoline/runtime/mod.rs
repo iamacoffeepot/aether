@@ -35,7 +35,7 @@ pub use std::sync::Arc;
 use super::WasmTrampoline;
 use crate::component::{Abort, Aborted, Commit, Committed, LoadDelivered, Prepare, Prepared, SpawnDelivered};
 pub use aether_actor::Local;
-use aether_actor::{Single, runtime};
+use aether_actor::{Anyone, Single, runtime};
 use aether_kinds::{ComponentCapabilities, SpawnResult};
 pub use aether_kinds::{DropComponent, DropResult, LoadResult};
 use aether_substrate::actor::native::ctx::GuestHost;
@@ -43,7 +43,6 @@ pub use aether_substrate::actor::native::envelope::Envelope;
 pub use aether_substrate::actor::native::{
     Dispatch, NativeActor, NativeCtx, NativeInitCtx, Pending, RegistryBatchResult, TaskDone,
 };
-pub use aether_substrate::actor::wasm::asset_manifest;
 pub use aether_substrate::actor::wasm::component::Component;
 pub use aether_substrate::chassis::error::BootError;
 #[allow(unused_imports, reason = "runtime facade retains its established KindId re-export")]
@@ -79,14 +78,10 @@ impl NativeActor for WasmTrampoline {
     const NAMESPACE: &'static str = super::identity::TRAMPOLINE_LABEL;
 
     fn init(config: WasmTrampolineConfig, ctx: &mut NativeInitCtx<'_>) -> Result<WasmTrampolineState, BootError> {
-        let mut substrate_ctx = ctx.guest_ctx(Arc::clone(&config.outbound));
-        // ADR-0163 §3 (#3984): open an asset load window over the code this
-        // instance's load brought and install it before instantiate, so the
-        // guest's `init` (run inside `instantiate`) and its later `wire` can
-        // pull assets through the `asset_fetch_p32` host fn. The window owns
-        // the code, which the state never keeps, and lets go of it once
-        // `wire` returns (below).
-        substrate_ctx.install_load_window(asset_manifest::LoadWindow::open(&config.module, config.code));
+        // ADR-0250: the ctx is built with the instance's module, so the
+        // guest's `init`, `wire`, handlers, `on_rehydrate`, and `unwire` read
+        // assets from it.
+        let mut substrate_ctx = ctx.guest_ctx(Arc::clone(&config.outbound), config.module.clone());
         // ADR-0231 §4: an inline child the guest spawns publishes its own
         // namespace and rows, read from this module's exported and private
         // groups.
@@ -162,12 +157,34 @@ impl NativeActor for WasmTrampoline {
     /// The guest's `wire` sends inherit this ctx's in-flight root, the
     /// birth's wire root (ADR-0244), so they settle with the rest of the
     /// birth's `wire` mail under one root a test can await.
-    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+    ///
+    /// A guest whose `wire` faults fails this birth (ADR-0247 rule 3), and
+    /// the load or spawn that asked for it answers `Err` with the fault. A
+    /// guest that returned an error is intact and stays in its slot, so the
+    /// close that follows runs its `unwire`. A guest that trapped is
+    /// released here, so the close finds no guest and runs no more of its
+    /// code, as a guest whose `init` trapped is dropped without a further
+    /// call.
+    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         ctx.sync_guest(state);
         let root = ctx.in_flight_root();
-        if let Slot::Live(component) = &mut state.slot {
-            WasmTrampolineState::wire_guest(ctx, component, root);
+        let Slot::Live(component) = &mut state.slot else {
+            return Ok(());
+        };
+        let Err(fault) = WasmTrampolineState::wire_guest(ctx, component, root) else {
+            return Ok(());
+        };
+
+        let trapped = fault.is_trap();
+        if trapped {
+            state.slot = Slot::Released;
         }
+        let outcome = if trapped {
+            "trapped"
+        } else {
+            "failed"
+        };
+        Err(BootError::Other(io::Error::other(format!("wasm guest wire {outcome}: {fault}")).into()))
     }
 
     /// The close hook: release the guest (ADR-0241 §8, ADR-0247 rule 5). A
@@ -176,9 +193,9 @@ impl NativeActor for WasmTrampoline {
     /// §6), and is dropped. Every close of the trampoline runs this: a
     /// `DropComponent`, an engine teardown, and a birth cancelled after
     /// `wire`. Engine teardown answers nothing for the guest, and a prepared
-    /// candidate is discarded without wiring or unwiring the kept guest
-    /// again. A drop request the close was asked for is answered here, once
-    /// the guest is released (see `WasmTrampolineState::close_guest`).
+    /// slot unwires a candidate iff it wired and unwires the kept guest. A
+    /// drop request the close was asked for is answered here, once the guest
+    /// is released (see `WasmTrampolineState::close_guest`).
     fn unwire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
         state.close_guest(ctx);
     }
@@ -247,8 +264,8 @@ impl NativeActor for WasmTrampoline {
     /// Prepare a candidate of this guest's type from `code` beside the
     /// running guest (ADR-0241 §7). Until a commit or an abort, mail for the
     /// guest waits at its inbox gate and nothing the candidate sends leaves.
-    /// A refusal leaves the running guest in place, wired again if its hooks
-    /// had run.
+    /// A refusal leaves the running guest in place, still wired, or closes
+    /// the instance when the guest refuses the state it saved (ADR-0249 §4).
     #[handler::request]
     fn on_prepare(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: Prepare) -> Prepared {
         let Prepare { code, config } = payload;
@@ -260,22 +277,24 @@ impl NativeActor for WasmTrampoline {
         };
 
         let target = ctx.path();
-        state.prepare(ctx, &target, candidate, code, config)
+        state.prepare(ctx, &target, candidate, config)
     }
 
-    /// Install the prepared candidate (ADR-0241 §7): its held mail leaves on
-    /// this commit's chain, and the mail the gate queued is delivered to it
-    /// in order. A commit with nothing prepared is a host bug and aborts the
-    /// substrate.
+    /// Install the prepared candidate (ADR-0241 §7): the old guest unwires
+    /// first, then its held mail leaves on this commit's chain, and the mail
+    /// the gate queued is delivered to the candidate in order. A commit with
+    /// nothing prepared is a host bug and aborts the substrate.
     #[handler::request]
     fn on_commit(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: Commit) -> Committed {
         state.commit(ctx);
         Committed
     }
 
-    /// Discard the prepared candidate and its held mail, and reinstate the
-    /// running guest, wired again, with the mail the gate queued (ADR-0241
-    /// §7). With nothing prepared it answers at once.
+    /// Discard the prepared candidate and its held mail, unwiring it exactly
+    /// when it wired, and reinstate the running guest, still wired, with the
+    /// mail the gate queued (ADR-0241 §7), or close the instance when the
+    /// guest refuses the state it saved (ADR-0249 §4). With nothing prepared
+    /// it answers at once.
     #[handler::request]
     fn on_abort(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: Abort) -> Aborted {
         state.abort(ctx);
@@ -283,8 +302,8 @@ impl NativeActor for WasmTrampoline {
     }
 
     #[handler(task)]
-    fn on_inline_alias_done(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<RegistryBatchResult>) {
-        WasmTrampolineState::finish_inline_aliases(ctx, done);
+    fn on_inline_alias_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<RegistryBatchResult>) {
+        state.finish_inline_aliases(ctx, done);
     }
 
     /// Forward un-handled mail to the wasm guest.
@@ -300,13 +319,14 @@ impl NativeActor for WasmTrampoline {
     /// and waits in order for the commit or abort to deliver it to the guest
     /// that wins. The trampoline's typed rows are never gated.
     #[fallback]
-    fn forward_to_wasm(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Single>, env: &Envelope) -> bool {
+    fn forward_to_wasm(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Anyone, Single>, env: &Envelope) -> bool {
         match &mut state.slot {
             Slot::Live(component) => WasmTrampolineState::deliver_to_guest(ctx, component, env),
             Slot::Prepared(prepared) => prepared.gated.push_back(ctx.take_inbound()),
-            // The slot is empty only inside the close, after the residual
-            // drain, so no mail is forwarded to it; the arm keeps the match
-            // honest.
+            // The slot is empty inside the close, after the residual drain,
+            // and from a reinstatement whose guest refused its own state
+            // until the close that reinstatement asked for (ADR-0249 §4).
+            // Mail drained to it in between is discarded here.
             Slot::Released => tracing::warn!(
                 target: "aether_component",
                 actor = %ctx.path(),

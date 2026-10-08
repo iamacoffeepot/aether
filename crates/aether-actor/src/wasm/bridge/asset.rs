@@ -1,23 +1,21 @@
-//! ADR-0163 §3 (#3984) asset load-window FFI bridge — the guest half of
-//! the `asset_fetch_p32` / `asset_blob_p32` / `asset_catalog_p32` host fns.
+//! ADR-0250 asset FFI bridge — the guest half of the `asset_blob_p32` /
+//! `asset_catalog_p32` host fns.
 //!
-//! `wire` runs guest-side; asset bytes live host-side in the module file.
-//! The bridge is the guest-initiated pull: it hands the host an asset name
-//! (a slice in guest memory), the host looks it up in the load window,
-//! allocates a buffer through the guest's own allocator, writes the bytes,
-//! and returns the packed `(ptr << 32) | len`. The bridge copies that
+//! Asset bytes live host-side in the instance's own module, whose publish
+//! checked each asset in as its own blob. `fetch_asset_blob` is the lookup:
+//! the host holds the asset's own store entry for this instance and hands
+//! back only its hash and length, which the guest's blob backing wraps
+//! (`crate::blob::guest`); the bytes are read through the ordinary blob read.
+//!
+//! `fetch_catalog` is the listing: it hands the host nothing, the host
+//! allocates a buffer through the guest's own allocator, writes the wire
+//! bytes, and returns the packed `(ptr << 32) | len`. The bridge copies that
 //! buffer into an owned `Vec` and frees it symmetrically through the same
 //! allocator — the host allocated it via `realloc_p32` (which routes to
 //! [`realloc_bytes`]), so the guest frees it the same way.
 //!
-//! `fetch_asset_blob` is the other pull: the host leaves the bytes where
-//! the module's code already sits in its store, holds the asset for this
-//! instance, and hands back only its hash and length, which the guest's blob
-//! backing wraps (`crate::blob::guest`).
-//!
-//! This is the transport backing [`crate::AssetWindow`] / [`crate::AssetCatalog`]
-//! on the guest ctxs. A payload access after the window closed traps
-//! host-side, so no reachable guest path silently returns empty.
+//! This is the transport backing [`crate::Assets`] on the guest ctxs, served
+//! from the instance's module in every hook.
 
 // Wire-encode: `usize`/`u64` → `u32` narrowings forward `(ptr, len)` pairs to
 // the wasm32 host-fn ABI (`_p32` convention, ADR-0024), same as `ctx.rs`.
@@ -33,10 +31,6 @@ use alloc::vec::Vec;
 
 use crate::wasm::guest_alloc::realloc_bytes;
 use crate::wasm::raw;
-
-/// The host's "no asset by that name in the open window" sentinel — must
-/// match `host_fns::ASSET_NOT_FOUND`. Distinct from any real `(ptr, len)`.
-const ASSET_NOT_FOUND: u64 = u64::MAX;
 
 /// Alignment the host allocated the delivery buffer with — must match
 /// `host_fns::ASSET_ALLOC_ALIGN`. Byte data needs none, so `1` keeps the
@@ -75,28 +69,11 @@ pub(super) unsafe fn take_delivered(ptr: u32, len: u32) -> Vec<u8> {
     bytes
 }
 
-/// Pull an asset's bytes through the load window (ADR-0163). `None` when
-/// the component carries no asset by that name (the host returns the
-/// not-found sentinel). A call outside the window traps host-side, so this
-/// never silently returns empty for a closed window.
-#[must_use]
-pub fn fetch_asset(name: &str) -> Option<Vec<u8>> {
-    // SAFETY: FFI import; the host copies the name out before returning and
-    // hands back either the not-found sentinel or a live `(ptr, len)`.
-    let packed = unsafe { raw::asset_fetch(name.as_ptr().addr() as u32, name.len() as u32) };
-    if packed == ASSET_NOT_FOUND {
-        return None;
-    }
-    let (ptr, len) = unpack(packed);
-    // SAFETY: a non-sentinel return is a live host-delivered buffer.
-    Some(unsafe { take_delivered(ptr, len) })
-}
-
-/// Take an asset through the load window as a blob the host holds for this
-/// instance (ADR-0163 §3): its hash and length, with one hold on this
+/// Take an asset from the instance's own module as a blob the host holds for
+/// this instance (ADR-0250): its hash and length, with one hold on this
 /// instance's blob table that the caller now owns and must give back through
 /// `blob_drop_p32`. `None`, with nothing held, when the component carries no
-/// asset by that name. A call outside the window traps host-side.
+/// asset by that name.
 ///
 /// wasm32-only, as the blob backing that is its one caller is: it wraps the
 /// hold in a value whose drop releases it.
@@ -113,7 +90,7 @@ pub fn fetch_asset_blob(name: &str) -> Option<(BlobHash, u64)> {
 }
 
 /// The component's asset catalog, decoded from the host's wire-encoded
-/// `Vec<AssetInfo>` (ADR-0163). Empty when the component carries no assets;
+/// `Vec<AssetInfo>` (ADR-0250). Empty when the component carries no assets;
 /// a decode failure yields an empty catalog rather than a trap — the
 /// metadata surface is best-effort, unlike payload access.
 #[must_use]

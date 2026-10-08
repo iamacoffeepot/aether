@@ -18,12 +18,13 @@ use aether_data::ErasedActorPath;
 use crossbeam_channel::Receiver;
 
 use crate::actor::native::local;
+use crate::actor::native::slot::close::close;
 use crate::actor::native::slot::dispatcher::DispatcherSlot;
 use crate::actor::native::spawn::activation::NativeSpawnFinalizer;
 use crate::actor::native::{NativeActor, NativeCtx};
 use crate::mail::cost::CostCells;
 use crate::mail::registry::effect::{EffectBatch, RegistryEffect};
-use crate::mail::registry::{BootAuthority, NameConflict};
+use crate::mail::registry::{BootAuthority, NameConflict, RegisterError};
 use crate::mail::{KindId, MailboxId};
 use crate::runtime::effect_chain::{EffectChain, Uncaused};
 use crate::runtime::wire_root::WireRoot;
@@ -198,7 +199,10 @@ impl Spawner {
         let registered = self.registry.try_register_inbox_with_id(authority, id, full_name.to_string(), relay);
         match registered {
             Ok(returned_id) => debug_assert_eq!(returned_id, id),
-            Err(NameConflict { name }) => return Err(SpawnError::SubnameInUse { full_name: name }),
+            Err(RegisterError::NameConflict(NameConflict { name })) => {
+                return Err(SpawnError::SubnameInUse { full_name: name });
+            }
+            Err(RegisterError::ParentUnknown { name }) => return Err(SpawnError::ParentUnknown { full_name: name }),
         }
 
         // Issue 629 / Phase A: dispatcher takes Box<A> ownership.
@@ -208,7 +212,7 @@ impl Spawner {
 
         // Insert before pre-loading mail: the actor_registry entry is the
         // canonical record that the slot is live.
-        if self.actor_registry.insert_live(id, TypeId::of::<A>()).is_err() {
+        if self.actor_registry().insert_live(id, TypeId::of::<A>()).is_err() {
             // Hash collision against an existing Live entry on the
             // same id but a slot the mailbox registry didn't reject —
             // possible if a singleton + instanced collide on the same
@@ -275,11 +279,19 @@ impl Spawner {
         // Its `wire` runs under the boot's wire root (ADR-0244), which the
         // seal releases, so this birth's `wire` mail settles with boot's.
         transport.hold_outbound_for_activation();
-        local::with_stamped(&slots, || {
+        let wired = local::with_stamped(&slots, || {
             let mut wire_ctx =
                 NativeCtx::for_wire(&transport, EffectChain::Uncaused(Uncaused::ChassisBoot), self.boot_wire_root());
-            A::wire(actor.as_mut(), &mut wire_ctx);
+            A::wire(actor.as_mut(), &mut wire_ctx)
         });
+        // ADR-0247 rule 3: a `wire` that failed fails the birth. The hook was
+        // entered, so the actor closes: the one close runs its `unwire`,
+        // discards what both hooks sent behind the hold, and ends the name
+        // this commit published above, which is therefore spent.
+        if let Err(error) = wired {
+            close::<A>(actor, &transport, &slots, self.actor_registry(), || transport.try_recv());
+            return Err(SpawnError::WireFailed(error));
+        }
         if let Err(error) = self.registry.publish_contract(authority, id, transport.route_contract::<A>()) {
             tracing::warn!(
                 target: "aether_substrate::spawn",
@@ -301,7 +313,8 @@ impl Spawner {
         // chassis worker pool. No per-actor thread. The wake hook on the
         // closure pushes the slot to the ready queue when an envelope
         // lands.
-        let slot = DispatcherSlot::<A>::new(actor, Arc::clone(&transport), slots, Arc::clone(&self.actor_registry), id);
+        let slot =
+            DispatcherSlot::<A>::new(actor, Arc::clone(&transport), slots, Arc::clone(self.actor_registry()), id);
         let slot_dyn: Arc<dyn Drainable> = slot.clone();
         let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
         // iamacoffeepot/aether#1135: surface the seize handle on this

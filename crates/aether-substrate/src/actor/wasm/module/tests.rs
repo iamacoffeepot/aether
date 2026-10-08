@@ -1,4 +1,5 @@
 use std::fmt::Write as _;
+use std::ptr;
 use std::sync::Arc;
 
 use aether_data::{Blob, CONTENT_ADDRESSED_SECTION, INPUTS_SECTION, INPUTS_SECTION_VERSION, InputsRecord, wire};
@@ -98,13 +99,13 @@ fn a_module_leaves_the_map_once_its_last_holder_drops() {
     assert!(alpha_again.compiled().get_export("alpha").is_some(), "a dead entry compiles again rather than failing");
 }
 
-/// The module holds neither its code nor any asset's payload: once the
-/// caller drops the code blob, nothing of the module is resident in the
-/// store, while the manifest still catalogues the asset. It catches a module
-/// entry that keeps a bundle's payload (or its wasm bytes) resident for as
-/// long as any instance or publication holds the module.
+/// A held module keeps each asset once as its own blob and lets the file
+/// bytes go: once the caller drops the code blob, the store holds exactly the
+/// distinct asset payload bytes, while the manifest still catalogues the
+/// asset. It catches a module entry that keeps the whole file resident, or
+/// that lets an asset's payload go with it.
 #[test]
-fn a_module_holds_neither_its_code_nor_its_asset_payloads() {
+fn a_module_holds_each_asset_once_and_lets_the_file_go() {
     let store = store();
     let (cache, blobs) = (cache(), BlobCheckIn::new(store.clone()));
     let code = blobs.check_in(wasm(
@@ -114,12 +115,58 @@ fn a_module_holds_neither_its_code_nor_its_asset_payloads() {
     let module = cache.check_in(&blobs, &code).expect("check the module in");
     drop(code);
 
-    assert_eq!(store.resident_bytes(), 0, "a held module keeps no bytes resident");
+    assert_eq!(
+        store.resident_bytes(),
+        b"slime-sprite-bytes".len(),
+        "a held module keeps exactly its asset payload bytes resident"
+    );
     let [asset] = module.manifest().asset_catalog() else {
         panic!("one asset section is one catalog entry");
     };
     assert_eq!(asset.name, "sprites/slime.png");
     assert_eq!(asset.len, b"slime-sprite-bytes".len() as u64);
+}
+
+/// Two modules carrying the same asset bytes share one store entry between
+/// them: dropping one module leaves the bytes, dropping both frees them. It
+/// catches a per-module copy that content dedup was supposed to share.
+#[test]
+fn two_modules_sharing_asset_bytes_hold_one_store_entry() {
+    let store = store();
+    let (cache, blobs) = (cache(), BlobCheckIn::new(store.clone()));
+    let module_for = |export: &str| {
+        let wat = format!(r#"(module (@custom "aether.asset.sprite" "shared-bytes") (func (export "{export}")))"#);
+        check_in(&cache, &blobs, &wat)
+    };
+
+    let alpha = module_for("alpha");
+    let beta = module_for("beta");
+    assert_ne!(alpha.hash(), beta.hash(), "different code is different modules");
+
+    assert_eq!(store.resident_bytes(), b"shared-bytes".len(), "one shared asset is resident once");
+
+    drop(alpha);
+    assert_eq!(store.resident_bytes(), b"shared-bytes".len(), "the remaining module still holds the shared asset");
+
+    drop(beta);
+    assert_eq!(store.resident_bytes(), 0, "the bytes leave with the last module over them");
+}
+
+/// Each indexed section serves its own exact payload bytes. It catches a
+/// range-slicing regression in the check-in loop that mixes assets up.
+#[test]
+fn each_section_serves_its_own_exact_payload_bytes() {
+    let (cache, blobs) = (cache(), BlobCheckIn::new(store()));
+    let module = check_in(
+        &cache,
+        &blobs,
+        r#"(module (@custom "aether.asset.a" "one") (@custom "aether.asset.b" "two-longer") (func (export "noop")))"#,
+    );
+
+    for (name, expected) in [("a", b"one".as_slice()), ("b", b"two-longer".as_slice())] {
+        let section = module.manifest().assets().section(name).expect("the asset is indexed");
+        assert_eq!(section.blob.contiguous(), Some(expected), "the section serves its own bytes");
+    }
 }
 
 /// `Owned` code bytes and the same bytes already checked in must answer one
@@ -228,6 +275,57 @@ fn a_bundle_shares_the_compile_of_its_assetless_build() {
     let bundled = check_in(&cache, &blobs, &bundle("slime"));
 
     assert!(same_compile(&bare, &bundled), "a bundle's code is the build it was packed from");
+    assert!(
+        ptr::eq(bare.manifest().kind_ids(), bundled.manifest().kind_ids()),
+        "the borrowed-code-hash path shares one code-derived manifest, not a second allocation"
+    );
+    assert!(
+        ptr::eq(bare.manifest().actors(), bundled.manifest().actors()),
+        "the bare module and its bundle share one group parse"
+    );
+}
+
+/// Two bundles over one code share their code-derived manifest, not just
+/// their compile: one compile, two entries with distinct hashes and catalogs,
+/// and pointer-shared kind and group state over distinct asset indexes. It
+/// catches a change that shares the compile but still clones kind descriptors
+/// per file, which the compile-sharing test above passes.
+#[test]
+fn bundles_over_one_code_share_the_code_derived_manifest() {
+    let (cache, blobs) = (cache(), BlobCheckIn::new(store()));
+
+    let slime = check_in(&cache, &blobs, &bundle("slime"));
+    let dragon = check_in(&cache, &blobs, &bundle("a-much-longer-dragon"));
+
+    assert!(same_compile(&slime, &dragon), "one code is one compile");
+    assert_eq!(cache.compiled_len(), 1);
+    assert!(!same_entry(&slime, &dragon), "two files are two modules");
+    assert_ne!(slime.hash(), dragon.hash());
+    assert_eq!(slime.manifest().asset_catalog()[0].len, 5);
+    assert_eq!(dragon.manifest().asset_catalog()[0].len, 20);
+
+    assert!(ptr::eq(slime.manifest().kinds(), dragon.manifest().kinds()), "one code is one kind parse");
+    assert!(ptr::eq(slime.manifest().kind_ids(), dragon.manifest().kind_ids()), "one code is one kind-id set");
+    assert!(ptr::eq(slime.manifest().actors(), dragon.manifest().actors()), "one code is one group parse");
+    assert!(!Arc::ptr_eq(slime.manifest().assets(), dragon.manifest().assets()), "each file keeps its own asset index");
+}
+
+/// A file whose code is already shared still fails when its own asset
+/// sections are malformed: the hit path indexes each file's assets. It
+/// catches a hit path that skips per-file asset parsing and returns the
+/// sibling's catalog instead of refusing the duplicate.
+#[test]
+fn a_shared_code_hit_still_refuses_its_files_duplicate_asset() {
+    let (cache, blobs) = (cache(), BlobCheckIn::new(store()));
+
+    let _slime = check_in(&cache, &blobs, &bundle("slime"));
+
+    let wat = r#"(module (@custom "aether.asset.sprite" "slime") (@custom "aether.asset.sprite" "other") (func (export "noop")))"#;
+    let error =
+        cache.check_in(&blobs, &blobs.check_in(wasm(wat))).map(drop).expect_err("a duplicate asset fails its file");
+
+    assert!(error.contains("more than once"), "the refusal names the duplication: {error}");
+    assert!(error.contains("sprite"), "the refusal names the asset: {error}");
 }
 
 /// Modules whose code differs must not share a compile, whatever assets they

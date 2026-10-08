@@ -16,6 +16,7 @@
 use aether_data::ActorMail;
 use aether_kinds::{
     CaptureFrameResult, DropResult, LoadResult, MeshLoadResult, PublishResult, SpawnEngineResult, SpawnResult,
+    UnpublishResult,
 };
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -52,6 +53,14 @@ impl HeldReply for PublishResult {
 
 /// A spawn the component host holds until the instance's birth settles.
 impl HeldReply for SpawnResult {
+    fn unanswered() -> Self {
+        Self::Err { error: "component host closed before answering".into() }
+    }
+}
+
+/// An unpublish the component host holds until its withdrawal batch settles
+/// (ADR-0250 §5).
+impl HeldReply for UnpublishResult {
     fn unanswered() -> Self {
         Self::Err { error: "component host closed before answering".into() }
     }

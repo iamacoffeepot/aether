@@ -14,9 +14,8 @@ publish = false
 # Its own crate per `docs/guide/capability-anatomy.md`, so a chassis composes
 # the cap without carrying the `aether-harness-substrate` test crate.
 #
-# The `-cap` suffix disambiguates: the bare `aether-substrate-harness` name the
-# `aether-<cap>` convention would pick is already the harness chassis binary
-# (`aether-chassis-harness`'s `[[bin]]`).
+# The `-cap` suffix disambiguates: the bare name the `aether-<cap>` convention
+# would pick reads as the harness itself, not as the cap it hosts.
 
 # ADR-0122 identity/runtime split: the wasm-safe identity and its
 # `HandlesKind` markers compile always-on; the `aether_substrate`-typed runtime

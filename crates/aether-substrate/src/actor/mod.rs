@@ -17,4 +17,4 @@ pub mod registry;
 pub mod wasm;
 
 pub use monitor::MonitorHandle;
-pub use registry::{ActorEntry, ActorRegistry, MonitorEntry, MonitorError};
+pub use registry::{ActorEntry, ActorRegistry, MonitorEntry};

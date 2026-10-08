@@ -26,7 +26,7 @@
 // `init`'s signature, `HttpServerCapability` is the impl's `Self` type, and
 // `HttpServerHandle` is the boot artifact `init` publishes.
 use super::{HttpDispatchShard, HttpInboundReady, HttpServerCapability, HttpServerConfig, HttpServerHandle};
-use aether_actor::{ActorRef, ErasedActorRef, PathRefused, ProtocolRef, ReplyMode, Single, runtime};
+use aether_actor::{ActorRef, Anyone, ErasedActorRef, PathRefused, ProtocolRef, ReplyMode, Single, runtime};
 
 pub use std::collections::{HashMap, HashSet, VecDeque};
 pub use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -47,7 +47,7 @@ pub use aether_substrate::chassis::error::BootError;
 pub use crate::kinds::{
     HttpHeader, HttpMethod, HttpRequestChunk, HttpRequestCredit, HttpRequestStreamEnd, HttpRequestStreamOpen,
     HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen, HttpServerRequest, HttpServerResponse,
-    HttpStreamCredit, WebSocketAccept, WebSocketClose, WebSocketMessage,
+    HttpStreamCredit, MethodFilter, WebSocketAccept, WebSocketClose, WebSocketMessage,
 };
 use crate::kinds::{
     HttpRouter, RegisterRoute, RegisterRouteResult, RegisterRouteSelf, RequestStreamRouter, StreamCreditRouter,
@@ -187,13 +187,12 @@ impl NativeActor for HttpServerCapability {
             live_connections: Arc::new(AtomicUsize::new(0)),
             listener_port: port,
             accept_shutdown,
-            accept_thread: Some(accept_thread),
+            accept_thread: AcceptThread::Running(accept_thread),
             inbound_rx,
             wake_dirty,
             shard_startup: ShardStartup::Idle,
             next_stream_id: Arc::new(AtomicU64::new(0)),
             monitors: HashMap::new(),
-            unmonitorable: HashSet::new(),
         })
     }
 
@@ -218,8 +217,11 @@ impl NativeActor for HttpServerCapability {
                 "http server teardown wake self-connect failed; accept-thread join may stall",
             );
         }
-        if let Some(thread) = state.accept_thread.take() {
-            let _ = thread.join();
+        match mem::replace(&mut state.accept_thread, AcceptThread::Joined) {
+            AcceptThread::Running(thread) => {
+                let _ = thread.join();
+            }
+            AcceptThread::Disabled | AcceptThread::Joined => {}
         }
         tracing::info!(
             target: "aether_http::server",
@@ -236,7 +238,11 @@ impl NativeActor for HttpServerCapability {
     /// accept sidecar fires this; the handler drains the mpsc and assigns
     /// per item.
     #[handler::tell]
-    fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Single>, _mail: HttpInboundReady) {
+    fn on_inbound_ready(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Self, Anyone, Single>,
+        _mail: HttpInboundReady,
+    ) {
         WakeSink::arm_for_drain(&state.wake_dirty);
         // One deterministic child per handler turn keeps each birth in its
         // own transactional owner batch. A canonical-name conflict can then
@@ -281,8 +287,8 @@ impl NativeActor for HttpServerCapability {
         let Ok(index) = usize::try_from(index) else {
             return;
         };
-        let sink = match done.into_output().result {
-            Ok(shard) => state.staged_sink(index, shard),
+        let outcome = match done.into_output().result {
+            Ok(shard) => state.staged_sink(index, shard).map_or(ShardSpawnOutcome::Failed, ShardSpawnOutcome::Ready),
             Err(error) => {
                 tracing::warn!(
                     target: "aether_http::server",
@@ -290,11 +296,11 @@ impl NativeActor for HttpServerCapability {
                     error = ?error,
                     "http dispatch shard activation failed",
                 );
-                None
+                ShardSpawnOutcome::Failed
             }
         };
 
-        let settlement = state.finish_shard_spawn(index, sink);
+        let settlement = state.finish_shard_spawn(index, outcome);
         state.apply_shard_settlement(ctx, settlement);
     }
 

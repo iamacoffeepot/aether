@@ -30,7 +30,10 @@ pub mod slot;
 
 use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, with_tag};
 
-pub use self::contract::{Contract, Contracts, ReplyShape, Silent, SilentRow, Undeclared};
+pub(crate) use self::contract::WatchedRef;
+pub use self::contract::{
+    Contract, Contracts, ReplyShape, Silent, SilentRow, Undeclared, WatchTarget, Watchable, Watches,
+};
 pub use self::declared::{
     AllHandle, Declared, DependencyLink, DependencyList, Gap, Here, ListIndex, RowIndex, There, declared_dependencies,
 };
@@ -38,9 +41,11 @@ pub use self::declared::{
 pub use self::declared::{dependency_records_len, write_dependency_records};
 #[doc(hidden)]
 pub use self::protocol::ProtocolCast;
-pub use self::protocol::{At, CastTarget, CoveredBy, CoversRows, Protocol, Row, RowAt, RowReply, RowSet};
+pub use self::protocol::{
+    Anyone, At, CastTarget, CoveredBy, CoversRows, Protocol, Row, RowAt, RowReply, RowSet, SenderRequirement,
+};
 pub use self::publish::{Publisher, Publishes, Subscriber};
-pub use self::sendable::SendableTo;
+pub use self::sendable::{SendableTo, SentBy};
 
 /// A resolution strategy (ADR-0119): given a caller's lineage carry, the
 /// actor's own `NAMESPACE`, and whatever args the strategy needs, produce
@@ -471,8 +476,9 @@ pub trait Lifecycle<S> {
     /// composer input pays nothing.
     type Params: Send + 'static;
 
-    /// The error [`Self::init`] returns when the actor cannot start. Pinned
-    /// to the concrete boot error on each transport subtrait.
+    /// The error either birth hook, [`Self::init`] or [`Self::wire`], returns
+    /// when the actor cannot start. Pinned to the concrete boot error on each
+    /// transport subtrait. Whoever asked for the birth is told it.
     type InitError;
 
     /// The per-target init ctx (`WasmInitCtx<'a>` / `NativeInitCtx<'a>`),
@@ -493,13 +499,25 @@ pub trait Lifecycle<S> {
 
     /// Post-init, mail-allowed hook (ADR-0079). Runs after `init` returned
     /// `Ok` and the mailbox is published, before the first envelope.
-    /// Default no-op; override to register subscriptions or announce.
-    fn wire(state: &mut S, ctx: &mut Self::Ctx<'_>) {
+    /// Defaults to `Ok(())`; override to register subscriptions or announce.
+    ///
+    /// An `Err` fails the birth as an `Err` from [`Self::init`] does
+    /// (ADR-0247 rule 3): whoever asked for the actor is answered with the
+    /// error and the actor never goes live. The hook was entered, so
+    /// [`Self::unwire`] still runs before the actor drops, and no mail the
+    /// hook sent leaves a birth that holds its outbound mail.
+    ///
+    /// # Errors
+    /// Whatever the actor could not set up, as its transport's
+    /// [`InitError`](Self::InitError).
+    fn wire(state: &mut S, ctx: &mut Self::Ctx<'_>) -> Result<(), Self::InitError> {
         let _ = (state, ctx);
+        Ok(())
     }
 
     /// Pre-shutdown, mail-allowed hook (ADR-0079). Runs after the inbox
-    /// drain, before the actor value drops. Default no-op.
+    /// drain, before the actor value drops. Default no-op. It returns
+    /// nothing: a close has no asker to tell and runs to its end.
     fn unwire(state: &mut S, ctx: &mut Self::Ctx<'_>) {
         let _ = (state, ctx);
     }
@@ -639,7 +657,9 @@ pub fn validate_namespace_segment(s: &str) -> Result<(), NamespaceError> {
 /// Per-handler-kind marker: `R: HandlesKind<K>` means actor `R` has a
 /// `#[handler]` method accepting kind `K`. Auto-emitted by the
 /// `#[actor]` proc-macro alongside the dispatch table — one impl per
-/// handler kind. Authors never write these by hand.
+/// handler kind. An actor's author never writes one by hand; a hand-written
+/// impl is test or harness scaffolding for a target with no `#[actor]` block,
+/// and it names [`Anyone`] as its [`Sender`](HandlesKind::Sender).
 ///
 /// Gates [`SendableTo<R>`] on the flat typed send verbs (`ctx.send::<R>`)
 /// and [`Target<K>`](crate::Target) on [`ActorRef<R>`](crate::ActorRef)
@@ -658,7 +678,25 @@ pub fn validate_namespace_segment(s: &str) -> Result<(), NamespaceError> {
     label = "`{Self}` does not handle `{K}`",
     note = "a `#[fallback]` does not count as handling a kind"
 )]
-pub trait HandlesKind<K: Kind>: Addressable {}
+pub trait HandlesKind<K: Kind>: Addressable {
+    /// What the handler requires of the actor that sends it `K`
+    /// (ADR-0231 §11): the protocol the sender must cover, or [`Anyone`] when
+    /// it asks nothing.
+    ///
+    /// `#[actor]` reads it from the handler's ctx type, whose type arguments
+    /// are receiver, sender, mode. A `#[handler::tell]` or
+    /// `#[handler::request]` whose ctx names a protocol `P` as its sender
+    /// (`NativeCtx<'_, Self, P>`) requires `P`, and every other handler
+    /// requires [`Anyone`]. That one type argument drives two checks, so they
+    /// cannot drift. Every typed send verb bounds the sending actor against
+    /// this type ([`SentBy`]), so an actor that lacks one of `P`'s handlers
+    /// cannot build the send. And the handler's dispatch arm casts the mail's
+    /// sender to `P` before the handler runs and hands it the ctx typed by
+    /// `P`, whose `sender()` is the proven reference, so mail from a route
+    /// the build cannot see, such as a relayed call or mail with no sender,
+    /// is refused and never reaches the handler.
+    type Sender: Protocol;
+}
 
 /// Per-handler reply marker: `R: Replies<K, Reply = O>` means actor `R`
 /// accepts `K` and its single-reply handler returns kind `O`.

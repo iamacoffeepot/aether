@@ -14,7 +14,7 @@
 #![allow(clippy::needless_pass_by_value)]
 
 // Handler-signature kinds must be importable at file root because
-// `#[actor]` emits `impl HandlesKind<K> for X {}` markers against the
+// `#[actor]` emits `impl HandlesKind<K> for X { type Sender = aether_actor::Anyone; }` markers against the
 // identity always-on, outside the `feature = "runtime"` gate.
 use aether_kinds::Advance;
 
@@ -82,14 +82,14 @@ impl NativeActor for SubstrateHarnessCapability {
     /// back and the handler replies `Err` through the recovered guard so the
     /// caller doesn't hang.
     #[handler::unchecked(reason = "answers from the embedder thread (ADR-0243 §5)")]
-    fn on_advance(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Unchecked>, mail: Advance) {
+    fn on_advance(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Anyone, Unchecked>, mail: Advance) {
         let event = ChassisEvent::Advance {
             reply: Box::new(ctx.take_inbound()),
             ticks: mail.ticks,
             delta_micros: mail.delta_micros,
         };
         // The handler sends only `Advance`, so a refused send hands back that
-        // variant; `RenderMail` cannot come back and needs no arm.
+        // variant and the pattern needs no other arm.
         if let Err(mpsc::SendError(ChassisEvent::Advance { reply, .. })) = state.events.send(event) {
             reply.reply(&AdvanceResult::Err {
                 error: "substrate-harness chassis shutting down — advance aborted".to_owned(),
@@ -107,7 +107,7 @@ mod runtime {
     use super::EventSender;
 
     pub use crate::events::ChassisEvent;
-    pub use aether_actor::Unchecked;
+    pub use aether_actor::{Anyone, Unchecked};
     pub use aether_kinds::AdvanceResult;
     pub use aether_substrate::Erased;
     pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};

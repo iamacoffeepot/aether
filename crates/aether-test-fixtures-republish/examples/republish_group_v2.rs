@@ -15,7 +15,8 @@ use std::process;
 
 use aether_actor::{ActorInitError, PriorState, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, WireCtx, actor};
 use aether_test_fixtures_kinds::{
-    Bump, CountQuery, CountReport, PeerConfig, PeerState, SubstrateHarnessObserver, TickObserved, WireObserved,
+    Bump, CountQuery, CountReport, PeerConfig, PeerState, SubstrateHarnessObserver, TickObserved, UnwireObserved,
+    WireObserved,
 };
 use aether_test_fixtures_republish::ProbeGate;
 
@@ -34,20 +35,26 @@ impl WasmActor for Peer {
     }
 
     /// Report each run of the hook, so a test can count it.
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.send::<SubstrateHarnessObserver>(&WireObserved);
+        Ok(())
+    }
+
+    /// Report each run of the hook, so a commit/abort test can count it.
+    fn unwire(&mut self, ctx: &mut WasmCtx<'_>) {
+        ctx.send::<SubstrateHarnessObserver>(&UnwireObserved);
     }
 
     /// Hand-written, where v1 generates it from `type State`, because the
     /// rehydrate side must be able to trap.
-    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
-        ctx.save_state_kind::<PeerState>(0, &PeerState { count: self.count });
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
+        ctx.save_state_kind::<PeerState>(0, &PeerState { count: self.count })
     }
 
     /// Restore v1's count, or, with `trap_on_rehydrate` set, report
     /// `TickObserved` and trap: `abort` lowers to `unreachable`, which the
     /// host reports as an `on_rehydrate` failure.
-    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
+    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) -> Result<(), ActorInitError> {
         if self.trap_on_rehydrate {
             ctx.send::<SubstrateHarnessObserver>(&TickObserved { count: u64::from(self.count) });
             process::abort();
@@ -55,6 +62,7 @@ impl WasmActor for Peer {
         if let Some(saved) = prior.decode_kind::<PeerState>() {
             self.count = saved.count;
         }
+        Ok(())
     }
 
     #[handler::tell]

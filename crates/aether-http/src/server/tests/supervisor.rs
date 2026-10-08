@@ -27,6 +27,10 @@ fn shard_canonical_name(index: usize) -> String {
     )
 }
 
+/// Stand a route at shard `index`'s canonical name so the shard's own spawn
+/// collides. Called once the server is live: the registry refuses a name
+/// nested beneath a parent that holds no record (ADR-0248 §5), and the
+/// shards are spawned by the first connection, after this.
 fn register_shard_collision(registry: &Registry, index: usize) -> ErasedActorRef {
     registered_ref(registry, &shard_canonical_name(index), Arc::new(|dispatch: OwnedDispatch| dispatch.discharge()))
 }
@@ -179,7 +183,6 @@ fn connections_distribute_across_shards() {
 #[test]
 fn cold_first_request_survives_partial_shard_activation_failure() {
     let (registry, mailer) = fresh_substrate();
-    let collision = register_shard_collision(&registry, 0);
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<EchoHttpHandler>(())
         .with_actor_configured::<HttpServerCapability>(
@@ -193,8 +196,9 @@ fn cold_first_request_survives_partial_shard_activation_failure() {
             },
         )
         .build_passive()
-        .expect("http server boots with test-only shard collision");
+        .expect("http server boots ahead of the test-only shard collision");
     chassis.await_boot_settled();
+    let collision = register_shard_collision(&registry, 0);
 
     let response = round_trip(port_of(&chassis), b"GET /cold HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(response.starts_with("HTTP/1.1 200 "), "surviving shard serves the cold peer: {response:?}");
@@ -216,7 +220,6 @@ fn cold_first_request_survives_partial_shard_activation_failure() {
 #[test]
 fn all_shard_activation_failures_refuse_without_implicit_retry() {
     let (registry, mailer) = fresh_substrate();
-    let collisions = [register_shard_collision(&registry, 0), register_shard_collision(&registry, 1)];
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<EchoHttpHandler>(())
         .with_actor_configured::<HttpServerCapability>(
@@ -230,7 +233,8 @@ fn all_shard_activation_failures_refuse_without_implicit_retry() {
             },
         )
         .build_passive()
-        .expect("http server boots with test-only shard collisions");
+        .expect("http server boots ahead of the test-only shard collisions");
+    let collisions = [register_shard_collision(&registry, 0), register_shard_collision(&registry, 1)];
     let port = port_of(&chassis);
 
     let first = round_trip(port, b"GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n");

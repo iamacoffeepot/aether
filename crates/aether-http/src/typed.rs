@@ -13,7 +13,7 @@
 
 use core::ops::{Deref, DerefMut};
 
-use super::kinds::{HttpMethod, HttpServerRequest, HttpServerResponse};
+use super::kinds::{HttpMethod, HttpServerRequest, HttpServerResponse, MethodFilter};
 
 /// Parse a value out of an inbound [`HttpServerRequest`]. The `Ok` value
 /// is threaded to a routed method as a parameter; the `Err` is the
@@ -121,21 +121,27 @@ pub fn route_matches(prefix: &str, path: &str) -> bool {
 /// group by it, so the router answers from the group whose key the server
 /// chose.
 #[must_use]
-pub fn route_rank(prefix: &str, filter: Option<HttpMethod>, path: &str, method: HttpMethod) -> Option<(usize, bool)> {
-    (filter.is_none_or(|filter| filter == method) && route_matches(prefix, path))
-        .then_some((prefix.len(), filter.is_some()))
+pub fn route_rank(prefix: &str, filter: MethodFilter, path: &str, method: HttpMethod) -> Option<(usize, bool)> {
+    let method_matches = match filter {
+        MethodFilter::Any => true,
+        MethodFilter::Only(filtered) => filtered == method,
+    };
+    let is_specific = matches!(filter, MethodFilter::Only(_));
+    let prefix_matches = route_matches(prefix, path);
+    let matches = method_matches && prefix_matches;
+    matches.then_some((prefix.len(), is_specific))
 }
 
 /// The route a glue handler serves — compile-time constants the
 /// `#[http::route]` macro stamps in, surfaced through [`Ctx::route`].
 /// `prefix` is the claimed path prefix; `method` is the method filter
-/// (`None` for a method-agnostic route).
+/// (`MethodFilter::Any` for a method-agnostic route).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Route {
     /// The path prefix this route claimed.
     pub prefix: &'static str,
-    /// The HTTP method filter, or `None` for a method-agnostic route.
-    pub method: Option<HttpMethod>,
+    /// The HTTP method filter, `MethodFilter::Any` for a method-agnostic route.
+    pub method: MethodFilter,
 }
 
 /// The routing ctx handed to a routed method: the transport ctx (`C` —

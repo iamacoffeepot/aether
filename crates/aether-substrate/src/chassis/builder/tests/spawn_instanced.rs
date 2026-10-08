@@ -58,7 +58,9 @@ fn instanced_can_spawn_grandchild() {
         const NAMESPACE: &'static str = "test.recursive.grandchild";
         type Resolver = aether_actor::Many;
     }
-    impl HandlesKind<Ping> for Grandchild {}
+    impl HandlesKind<Ping> for Grandchild {
+        type Sender = aether_actor::Anyone;
+    }
     impl aether_actor::Lifecycle<Self> for Grandchild {
         type Config = ();
         type Params = (Arc<AtomicU32>, Sender<()>);
@@ -80,7 +82,7 @@ fn instanced_can_spawn_grandchild() {
     impl Dispatch<Self> for Grandchild {
         fn dispatch(
             state: &mut Self,
-            _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -104,8 +106,12 @@ fn instanced_can_spawn_grandchild() {
         type Resolver = aether_actor::Many;
     }
     impl aether_actor::Root for Parent {}
-    impl HandlesKind<Hatch> for Parent {}
-    impl HandlesKind<Quit> for Parent {}
+    impl HandlesKind<Hatch> for Parent {
+        type Sender = aether_actor::Anyone;
+    }
+    impl HandlesKind<Quit> for Parent {
+        type Sender = aether_actor::Anyone;
+    }
     impl aether_actor::Lifecycle<Self> for Parent {
         type Config = ();
         type Params = (Arc<AtomicU32>, Sender<()>, Arc<Mutex<Option<String>>>);
@@ -134,7 +140,7 @@ fn instanced_can_spawn_grandchild() {
     impl Dispatch<Self> for Parent {
         fn dispatch(
             state: &mut Self,
-            ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+            ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -285,7 +291,7 @@ fn spawn_finish_with_name_returns_the_registered_top_level_name() {
     impl Dispatch<Self> for NamedReturn {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -343,7 +349,7 @@ impl NativeActor for KeyedUnit {
 impl Dispatch<Self> for KeyedUnit {
     fn dispatch(
         _state: &mut Self,
-        _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+        _ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
         _kind: KindId,
         _payload: &[u8],
     ) -> Option<()> {

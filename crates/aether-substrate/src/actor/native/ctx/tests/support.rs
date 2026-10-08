@@ -9,7 +9,7 @@
 use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, mpsc};
 
-use aether_actor::{ActorRef, Addressable, ErasedActorRef, HandlesKind, HeldReply, Unchecked};
+use aether_actor::{ActorRef, Addressable, Anyone, ErasedActorRef, HandlesKind, HeldReply, Unchecked};
 use aether_data::{ErasedActorPath, Kind, KindId, MailId};
 
 use crate::actor::native::envelope::Envelope;
@@ -50,7 +50,7 @@ impl aether_actor::Lifecycle<Self> for StubActor {
 impl Dispatch<Self> for StubActor {
     fn dispatch(
         _state: &mut Self,
-        _ctx: &mut NativeCtx<'_, Self, Unchecked>,
+        _ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>,
         _kind: KindId,
         _payload: &[u8],
     ) -> Option<()> {
@@ -95,7 +95,9 @@ impl Kind for CastOnly {
 impl aether_data::ActorMail for CastOnly {}
 impl aether_data::CrossesActors for CastOnly {}
 
-impl HandlesKind<CastOnly> for StubActor {}
+impl HandlesKind<CastOnly> for StubActor {
+    type Sender = Anyone;
+}
 
 #[aether_data::kind(name = "test.native_request_context", partial_eq)]
 pub(super) struct NativeRequestContext {

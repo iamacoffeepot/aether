@@ -17,7 +17,7 @@
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
-use aether_actor::{ActorRef, ErasedActorRef, HandlesKind, ProtocolRef, Unchecked};
+use aether_actor::{ActorRef, Anyone, ErasedActorRef, HandlesKind, ProtocolRef, Unchecked};
 use aether_data::{Blob, BlobReader, Kind, KindDescriptor, Schema, SessionToken, Uuid};
 
 use crate::actor::native::envelope::Envelope;
@@ -183,7 +183,9 @@ impl NativeActor for Sink {
     fn on_note(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Note) {}
 }
 
-impl HandlesKind<CastOnly> for Sink {}
+impl HandlesKind<CastOnly> for Sink {
+    type Sender = Anyone;
+}
 
 /// Sends a [`Carrier`] of the courier's blob to each recipient.
 #[aether_data::kind(name = "test.blob_mail.send_carrier")]
@@ -268,7 +270,7 @@ impl Courier {
 
     /// Raw-forward the configured bytes, or this turn's own, as a [`Carrier`]
     /// envelope to the turn's caller, then close the deferred reply.
-    fn forward_raw(&self, ctx: &mut NativeCtx<'_, Self, Unchecked>) {
+    fn forward_raw(&self, ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>) {
         let Some(raw) = &self.routes.raw else {
             return;
         };
@@ -335,23 +337,23 @@ impl NativeActor for Courier {
     }
 
     #[handler::unchecked(reason = "test: forwards itself the carrier, reply target pinned to the caller")]
-    fn on_relay_carrier(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, _trigger: RelayCarrier) {
+    fn on_relay_carrier(&mut self, ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, _trigger: RelayCarrier) {
         ctx.forward_to(self.me(), &Carrier { blob: self.blob() });
     }
 
     #[handler::unchecked(reason = "test: forwards itself the note, reply target pinned to the caller")]
-    fn on_relay_note(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, _trigger: RelayNote) {
+    fn on_relay_note(&mut self, ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, _trigger: RelayNote) {
         ctx.forward_to(self.me(), &Note { text: "no blobs here".into() });
     }
 
     #[handler::unchecked(reason = "test: relays its bytes to the caller as a deferred reply envelope")]
-    fn on_carrier(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, mail: Carrier) {
+    fn on_carrier(&mut self, ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, mail: Carrier) {
         self.forward_raw(ctx);
         self.kept.push(mail.blob);
     }
 
     #[handler::unchecked(reason = "test: relays its bytes to the caller as a deferred reply envelope")]
-    fn on_note(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, _mail: Note) {
+    fn on_note(&mut self, ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, _mail: Note) {
         self.forward_raw(ctx);
     }
 }

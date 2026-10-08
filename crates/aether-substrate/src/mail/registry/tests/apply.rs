@@ -4,7 +4,6 @@
 use std::any::Any;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 use aether_data::ReplyContract;
 use aether_kinds::{ComponentCapabilities, FallbackCapability, HandlerCapability};
@@ -54,7 +53,7 @@ fn direct_and_owner_paths_share_the_transitional_writer() {
     barrier.wait();
     owner.run_once();
 
-    let owner_result = completion.wait_timeout(Duration::from_millis(100)).expect("owner completes");
+    let owner_result = completion.try_take().expect("owner completes");
     let direct_result = direct.join().expect("direct writer does not panic");
     assert_ne!(owner_result.is_ok(), direct_result.is_ok(), "exactly one serialized writer claims the route");
     assert_eq!(registry.list_mailbox_descriptors().iter().filter(|entry| entry.name == "shared-writer").count(), 1);

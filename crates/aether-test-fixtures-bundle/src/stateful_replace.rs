@@ -47,8 +47,9 @@ impl WasmActor for Counter {
     }
 
     /// Report each run of the hook, so a test can count it.
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.send::<SubstrateHarnessObserver>(&WireObserved);
+        Ok(())
     }
 
     /// Increment the in-memory counter.
@@ -66,17 +67,18 @@ impl WasmActor for Counter {
     /// Save-side hot-swap hook: serialize the live counter so the
     /// replacement instance can pick it up. `CountReport` doubles as the
     /// wire shape of the saved bundle.
-    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
-        ctx.save_state_kind::<CountReport>(0, &CountReport { count: self.count });
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
+        ctx.save_state_kind::<CountReport>(0, &CountReport { count: self.count })
     }
 
     /// Restore-side hot-swap hook: recover the counter the predecessor
     /// saved. A fresh load (no prior bundle) never reaches here, so the
     /// counter stays at its `init` zero.
-    fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
+    fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) -> Result<(), ActorInitError> {
         if let Some(saved) = prior.decode_kind::<CountReport>() {
             self.count = saved.count;
         }
+        Ok(())
     }
 }
 
@@ -129,7 +131,7 @@ impl WasmActor for RehydrateTrap {
     /// Report `TickObserved`, which the host must hold and discard, then
     /// trap the wasm instance: `abort` lowers to `unreachable`, which the
     /// host reports as an `on_rehydrate` failure.
-    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) {
+    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) -> Result<(), ActorInitError> {
         ctx.send::<SubstrateHarnessObserver>(&TickObserved { count: 1 });
         process::abort();
     }

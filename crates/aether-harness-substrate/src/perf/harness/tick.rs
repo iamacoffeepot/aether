@@ -39,8 +39,15 @@ impl aether_actor::Addressable for TickSource {
     type Resolver = aether_actor::Many;
 }
 impl aether_actor::Root for TickSource {}
-impl aether_actor::HandlesKind<Tick> for TickSource {}
-impl aether_actor::HandlesKind<CountQuery> for TickSource {}
+impl aether_actor::HandlesKind<Tick> for TickSource {
+    type Sender = aether_actor::Anyone;
+}
+impl aether_actor::HandlesKind<CountQuery> for TickSource {
+    type Sender = aether_actor::Anyone;
+}
+impl aether_actor::HandlesKind<LifecycleSubscribeResult> for TickSource {
+    type Sender = aether_actor::Anyone;
+}
 /// The type-level mirror of [`Dispatch::capabilities`], row for row and in the
 /// same order, so a [`TickSource`] reference narrows to the protocols its
 /// dispatch answers, such as [`PerfParticipant`](super::PerfParticipant).
@@ -54,14 +61,17 @@ impl aether_actor::Contracts for TickSource {
 }
 impl aether_actor::Contract<Tick> for TickSource {
     type Reply = Silent;
+    type Sender = aether_actor::Anyone;
     type Index = Here;
 }
 impl aether_actor::Contract<CountQuery> for TickSource {
     type Reply = CountReport;
+    type Sender = aether_actor::Anyone;
     type Index = There<Here>;
 }
 impl aether_actor::Contract<LifecycleSubscribeResult> for TickSource {
     type Reply = Silent;
+    type Sender = aether_actor::Anyone;
     type Index = There<There<Here>>;
 }
 impl aether_actor::Lifecycle<Self> for TickSource {
@@ -82,8 +92,9 @@ impl aether_actor::Lifecycle<Self> for TickSource {
     /// Subscribe this source to the `Tick` stage as itself (ADR-0082 §7): the
     /// cap reads the subscriber off the host-stamped sender, so no position
     /// crosses the wire.
-    fn wire(state: &mut Self, ctx: &mut NativeCtx<'_, Self>) {
+    fn wire(state: &mut Self, ctx: &mut NativeCtx<'_, Self>) -> Result<(), BootError> {
         ctx.send_to(state.lifecycle, &LifecycleCapability::subscribe_request::<Tick>());
+        Ok(())
     }
 }
 impl aether_actor::Declared for TickSource {
@@ -129,7 +140,7 @@ impl Dispatch<Self> for TickSource {
 
     fn dispatch(
         state: &mut Self,
-        ctx: &mut NativeCtx<'_, Self, aether_substrate::Unchecked>,
+        ctx: &mut NativeCtx<'_, Self, aether_substrate::Anyone, aether_substrate::Unchecked>,
         kind: KindId,
         payload: &[u8],
     ) -> Option<()> {

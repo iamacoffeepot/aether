@@ -17,13 +17,13 @@ use crate::mail::registry::effect::{
 use crate::mail::registry::owner::RegistryOwnerLease;
 use crate::mail::registry::relay::RouteRelayLease;
 use crate::mail::registry::{
-    DropError, InboxHandler, MailboxEntry, OwnedDispatch, Registry, RouteContract, canonical_mailbox_id,
-    lineage_mailbox_id, noop_handler,
+    DropError, InboxHandler, MailboxEntry, OwnedDispatch, Registry, RouteContract, canonical_mailbox_id, noop_handler,
 };
 use crate::mail::{KindId, Mail, MailRef};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 use crate::scheduler::{Pool, PoolConfig, SeizeHandle, WakeSink};
 use crate::testing::boot_authority as auth;
+use crate::testing::canonical_id;
 
 use super::support::{
     activation_barrier, inventory_subscription_fixture, prepared_test_spawn, starting_token, traced_unknown_mail,
@@ -64,7 +64,7 @@ fn prepared_births_publish_together_then_promote_independently_with_exact_cost_c
     );
     let completion = registry.submit(EffectBatch::new(vec![first, second])).unwrap();
     owner.run_once();
-    let applied = completion.wait_timeout(Duration::from_millis(100)).unwrap().unwrap();
+    let applied = completion.try_take().unwrap().unwrap();
     let [RegistryApplied::Starting { token: first_token, .. }, RegistryApplied::Starting { token: second_token, .. }] =
         applied.as_slice()
     else {
@@ -110,7 +110,7 @@ fn rejected_batch_does_not_cancel_an_existing_prepared_birth() {
     );
     let completion = registry.submit(EffectBatch::new(vec![effect])).unwrap();
     owner.run_once();
-    let token = starting_token(&completion.wait_timeout(Duration::from_millis(100)).unwrap().unwrap());
+    let token = starting_token(&completion.try_take().unwrap().unwrap());
     registry.register_inbox(&auth(), "prepared-cancel-conflict", noop_handler());
     let rejected = registry
         .submit(EffectBatch::new(vec![
@@ -123,7 +123,7 @@ fn rejected_batch_does_not_cancel_an_existing_prepared_birth() {
         .unwrap();
     owner.run_once();
 
-    assert!(matches!(rejected.wait_timeout(Duration::from_millis(100)).unwrap(), Err(RegistryEffectError::Name(_))));
+    assert!(matches!(rejected.try_take().unwrap(), Err(RegistryEffectError::Name(_))));
     assert_eq!(cancelled.load(Ordering::SeqCst), 0, "rejected transaction invokes no cancellation side effect");
     mailer.push(activation_barrier(id, token, 1));
     owner.run_once();
@@ -148,7 +148,7 @@ fn bootstrap_then_parked_then_live_mail_is_deterministic_and_stale_barrier_is_co
         prepared_test_spawn(&registry, &mailer, "prepared-fifo", Arc::clone(&deliveries), scheduled, vec![id], 1);
     let completion = registry.submit(EffectBatch::new(vec![effect])).unwrap();
     owner.run_once();
-    let token = starting_token(&completion.wait_timeout(Duration::from_millis(100)).unwrap().unwrap());
+    let token = starting_token(&completion.try_take().unwrap().unwrap());
 
     mailer.push(Mail::new(id, KindId(7), vec![2], 1));
     owner.run_once();
@@ -238,7 +238,7 @@ fn starting_is_keyed_only_and_excluded_from_every_live_surface() {
 
     let (registry, mailer, wakes, target) = inventory_subscription_fixture();
     let subscription = registry.subscribe_inventory(target, Arc::clone(&mailer));
-    wakes.recv_timeout(Duration::from_millis(100)).expect("initial inventory wake");
+    wakes.try_recv().expect("initial inventory wake");
     let acknowledged = registry.inventory();
     subscription.acknowledge(acknowledged.mailbox_generation, acknowledged.kind_generation);
     let owner = RegistryOwnerLease::attach(
@@ -251,13 +251,13 @@ fn starting_is_keyed_only_and_excluded_from_every_live_surface() {
     let initial_route_generation = registry.route_generation();
     let initial_mailbox_generation = registry.mailbox_generation();
     let name = "test.birth.starting_only";
-    let id = lineage_mailbox_id(name);
+    let id = canonical_id(name);
     let completion = registry
         .submit(EffectBatch::new(vec![RegistryEffect::reserve_with_id(id, name.to_owned())]))
         .expect("owner accepts Starting reservation");
 
     owner.run_once();
-    let _token = starting_token(&completion.wait_timeout(Duration::from_millis(100)).unwrap().unwrap());
+    let _token = starting_token(&completion.try_take().unwrap().unwrap());
 
     assert_eq!(registry.lookup(name), Some(id), "exact-name keyed lookup sees Starting");
     assert_eq!(registry.mailbox_name(id).as_deref(), Some(name), "keyed reverse lookup sees Starting");
@@ -297,7 +297,7 @@ fn starting_tokens_are_unique_stale_safe_and_transactional() {
         ]))
         .unwrap();
     owner.run_once();
-    assert!(matches!(rolled_back.wait_timeout(Duration::from_millis(100)).unwrap(), Err(RegistryEffectError::Name(_))));
+    assert!(matches!(rolled_back.try_take().unwrap(), Err(RegistryEffectError::Name(_))));
     assert!(registry.lookup("must-rollback-starting").is_none());
     assert_eq!(registry.route_generation(), before_rollback, "rejected transaction publishes no partial Starting");
 
@@ -305,25 +305,25 @@ fn starting_tokens_are_unique_stale_safe_and_transactional() {
     let id = canonical_mailbox_id(name);
     let first = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(name.to_owned())])).unwrap();
     owner.run_once();
-    let first_token = starting_token(&first.wait_timeout(Duration::from_millis(100)).unwrap().unwrap());
+    let first_token = starting_token(&first.try_take().unwrap().unwrap());
     let cancelled =
         registry.submit(EffectBatch::new(vec![RegistryEffect::CancelStarting { id, token: first_token }])).unwrap();
     owner.run_once();
     assert_eq!(
-        cancelled.wait_timeout(Duration::from_millis(100)).unwrap().unwrap(),
+        cancelled.try_take().unwrap().unwrap(),
         [RegistryApplied::StartingCancellation(StartingCancellation::Cancelled(id))]
     );
 
     let second = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_with_id(id, name.to_owned())])).unwrap();
     owner.run_once();
-    let second_token = starting_token(&second.wait_timeout(Duration::from_millis(100)).unwrap().unwrap());
+    let second_token = starting_token(&second.try_take().unwrap().unwrap());
     assert_ne!(first_token, second_token, "a reused key receives a fresh activation token");
 
     let stale =
         registry.submit(EffectBatch::new(vec![RegistryEffect::CancelStarting { id, token: first_token }])).unwrap();
     owner.run_once();
     assert_eq!(
-        stale.wait_timeout(Duration::from_millis(100)).unwrap().unwrap(),
+        stale.try_take().unwrap().unwrap(),
         [RegistryApplied::StartingCancellation(StartingCancellation::TokenMismatch(id))]
     );
     assert_eq!(registry.lookup(name), Some(id), "stale cancellation cannot consume the newer reservation");
@@ -349,7 +349,7 @@ fn reserving_over_a_dropped_route_of_the_same_name_is_refused() {
     let reserved = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(name.to_owned())])).unwrap();
     owner.run_once();
 
-    assert!(matches!(reserved.wait_timeout(Duration::from_millis(100)).unwrap(), Err(RegistryEffectError::Name(_))));
+    assert!(matches!(reserved.try_take().unwrap(), Err(RegistryEffectError::Name(_))));
     assert!(matches!(registry.entry_at(id), Some(MailboxEntry::Dropped)), "the tombstone stays");
 }
 
@@ -372,7 +372,7 @@ fn starting_parks_fifo_and_owner_close_routes_every_accepted_mail_once() {
     let id = canonical_mailbox_id(name);
     let reserved = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(name.to_owned())])).unwrap();
     owner.run_once();
-    let _token = starting_token(&reserved.wait_timeout(Duration::from_millis(100)).unwrap().unwrap());
+    let _token = starting_token(&reserved.try_take().unwrap().unwrap());
 
     let (first, first_settled) = traced_unknown_mail(&mailer, &settlement, id, 1, vec![1]);
     mailer.push(first);
@@ -387,13 +387,9 @@ fn starting_parks_fifo_and_owner_close_routes_every_accepted_mail_once() {
     assert!(outbound_rx.try_recv().is_err(), "owner close only transfers accepted mail to the relay");
 
     drop(relay);
-    assert!(first_settled.recv_timeout(Duration::from_millis(100)).is_ok());
-    assert!(second_settled.recv_timeout(Duration::from_millis(100)).is_ok());
-    let payloads = [
-        outbound_rx.recv_timeout(Duration::from_millis(100)).unwrap(),
-        outbound_rx.recv_timeout(Duration::from_millis(100)).unwrap(),
-    ]
-    .map(|event| match event {
+    assert!(first_settled.try_recv().is_ok());
+    assert!(second_settled.try_recv().is_ok());
+    let payloads = [outbound_rx.try_recv().unwrap(), outbound_rx.try_recv().unwrap()].map(|event| match event {
         EgressEvent::UnresolvedMail { payload, .. } => payload,
         other => panic!("expected unresolved continuation, got {other:?}"),
     });

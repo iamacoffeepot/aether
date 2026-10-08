@@ -71,7 +71,7 @@ impl Spawner {
             Some(WireSettled::Unrooted) => panic!(
                 "{gate}: {id}'s wire ran under the boot's wire root, not one of its own; await PassiveChassis::await_boot_settled"
             ),
-            None if self.actor_registry.is_closed_at(id) => panic!(
+            None if self.actor_registry().is_closed_at(id) => panic!(
                 "{gate}: {id} closed before the wait, and its wire root subscription was released with its slot; await_wire_settled covers an actor that is still open"
             ),
             None => panic!("{gate}: {id} is not a pooled instanced actor; await_wire_settled covers only those"),

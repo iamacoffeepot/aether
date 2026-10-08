@@ -2,12 +2,11 @@
 //! `WasmActor::init` is handed. Mail is forbidden here; addressing and
 //! sending begin at `wire`.
 
-use core::cell::OnceCell;
-use core::marker::PhantomData;
-
-use crate::asset::{AssetCatalog, AssetInfo, AssetWindow};
+use crate::asset::{AssetInfo, Assets};
 use crate::blob::guest;
-use crate::wasm::bridge::asset;
+use crate::instant::Instant;
+use crate::wasm::bridge::clock;
+use crate::wasm::inline::Registry;
 use aether_data::Blob;
 use alloc::vec::Vec;
 
@@ -17,19 +16,30 @@ use alloc::vec::Vec;
 // The `Wasm` prefix carries the native/wasm split signal; bare `InitCtx` loses that.
 #[allow(clippy::module_name_repetitions)]
 pub struct WasmInitCtx<'a> {
-    /// ADR-0163 §3 asset catalog, fetched lazily on the first
-    /// [`AssetCatalog::assets`] call and cached for the ctx's life —
-    /// `init` is inside the load window, so asset access is live here.
-    catalog: OnceCell<Vec<AssetInfo>>,
-    _borrow: PhantomData<&'a ()>,
+    /// The instance's inline registry, which holds the asset list the first
+    /// [`Assets::assets`] call fetches (ADR-0250).
+    inline: &'a Registry,
 }
 
-impl WasmInitCtx<'_> {
-    /// Not part of the public API; called only by [`crate::export!`].
+impl<'a> WasmInitCtx<'a> {
+    /// Not part of the public API; called only by [`crate::export!`] and the
+    /// inline spawn and rebuild paths, with the registry of the instance whose
+    /// actor is being built.
     #[doc(hidden)]
     #[must_use]
-    pub fn __new() -> Self {
-        Self { catalog: OnceCell::new(), _borrow: PhantomData }
+    pub fn __new(inline: &'a Registry) -> Self {
+        Self { inline }
+    }
+
+    /// A reading of the engine's actor clock, for an actor that keeps an
+    /// [`Instant`] in its state and so needs one to build that state with.
+    /// It is the same clock [`WasmCtx::now`](super::WasmCtx::now) reads.
+    ///
+    /// The native twin is
+    /// `aether_substrate::actor::native::NativeInitCtx::now`.
+    #[must_use]
+    pub fn now(&self) -> Instant {
+        Instant::new(clock::now_nanos())
     }
 
     // Issue 1987: the init ctx exposes no send verbs. Every send routes
@@ -39,15 +49,13 @@ impl WasmInitCtx<'_> {
     // `WasmCtx` carries the registry.
 }
 
-impl AssetCatalog for WasmInitCtx<'_> {
+impl Assets for WasmInitCtx<'_> {
     fn assets(&self) -> &[AssetInfo] {
-        self.catalog.get_or_init(asset::fetch_catalog).as_slice()
+        self.inline.assets()
     }
-}
 
-impl AssetWindow for WasmInitCtx<'_> {
     fn asset(&mut self, name: &str) -> Option<Vec<u8>> {
-        asset::fetch_asset(name)
+        guest::asset(name)
     }
 
     fn asset_blob(&mut self, name: &str) -> Option<Blob> {

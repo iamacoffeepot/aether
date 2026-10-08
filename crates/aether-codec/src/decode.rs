@@ -180,7 +180,7 @@ impl error::Error for DecodeError {}
 /// Every node except the zero-wire-byte class consumes at least one input
 /// byte, so valid decodes sit near one value per byte; the linear term
 /// keeps frame-scale payloads decodable (a `Bytes` field decodes one
-/// value per byte, so a default-config 64 MiB frame legitimately produces
+/// value per byte, so a default-config 128 MiB frame legitimately produces
 /// tens of millions of values), and the base term absorbs small
 /// zero-byte-element collections (the proptest generator's depth-≤4 /
 /// width-≤4 trees peak at a few hundred values). What it rejects is the

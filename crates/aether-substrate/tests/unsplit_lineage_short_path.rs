@@ -77,6 +77,7 @@ impl NativeActor for UnsplitChild {
 fn an_unsplit_declaration_is_not_gated_out_of_its_cardinality_fact() {
     let registry = Registry::new();
     let canonical = format!("{}/{}:one", UnsplitRoot::NAMESPACE, UnsplitChild::NAMESPACE);
+    registered_ref(&registry, UnsplitRoot::NAMESPACE, noop_handler());
     registered_ref(&registry, &canonical, noop_handler());
 
     let path =

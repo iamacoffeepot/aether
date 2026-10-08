@@ -156,12 +156,20 @@ retry the same base or invent mailbox ids.
 Replacement uses a stable mailbox binding on success, but recovery must trust
 observation rather than intent. The splice is structural, so there is no drain
 argument to lengthen or retry. Validation and instantiation
-errors preserve the old guest untouched; a later state-save, carried-context or
-rehydrate failure reinstalls the old guest after its `unwire` and `on_dehydrate`
-hooks ran. The old guest gets back the state its `on_dehydrate` saved, through
-its `on_rehydrate`, and runs its `wire` again; only teardown outside that saved
-state and outside what `wire` rebuilds stays gone. Nothing the failed candidate
-sent leaves.
+errors preserve the old guest untouched, still wired; a later state-save,
+carried-context, rehydrate, or wire failure reinstalls the old guest, still
+wired, after its `on_dehydrate` hook ran. The old guest gets back the state its
+`on_dehydrate` saved, through its `on_rehydrate`, with no second `wire`; only
+teardown outside that saved state and outside what `wire` built stays gone.
+Nothing the failed candidate sent leaves.
+
+One reinstatement ends differently (ADR-0249 §4). An old guest whose
+`on_rehydrate` returns an error for the state it saved has refused its own
+state, so that instance closes: each reply it held is answered `unanswered`,
+the mail queued for it is dropped, and its name is spent. Read its log for the
+error, and load the component again under a new name or key. A guest trap in
+`on_dehydrate` reinstates nothing: it aborts the engine, whose exit reason
+names the component and the hook.
 
 The phase table and stale-introspection limits are in
 [Replacement failure states](components/replacement-failure-states.md).

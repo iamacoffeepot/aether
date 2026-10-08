@@ -1,17 +1,17 @@
-//! Instanced asset-window fixture (issue #7461).
+//! Instanced asset fixture (issue #7461).
 //!
 //! `AssetInstance` is the bundle's one instanced type that reads an asset:
-//! `wire` pulls `asset_fixture.txt` through its load window and keeps a
-//! fingerprint, which an `AssetProbe` reads back after the window closed.
-//! Each instance has its own load window (ADR-0163 §4), so two instances of
-//! it prove that every spawn of a replicated boot entry brought the module's
-//! bytes, where the singleton `QuietProbe` can prove only one.
+//! `wire` pulls `asset_fixture.txt` from its own module and keeps a
+//! fingerprint, which an `AssetProbe` reads back. Each instance reads its own
+//! module, so two instances of it prove that every spawn of a replicated boot
+//! entry reads its assets, where the singleton `QuietProbe` can prove only
+//! one.
 
-use aether_actor::{ActorInitError, AssetWindow, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
+use aether_actor::{ActorInitError, Assets, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
 use aether_test_fixtures_kinds::{AssetProbe, AssetProbeResult};
 
 pub struct AssetInstance {
-    /// What `wire` pulled from this instance's load window.
+    /// What `wire` pulled from this instance's module.
     asset: AssetProbeResult,
 }
 
@@ -23,18 +23,19 @@ impl WasmActor for AssetInstance {
         Ok(AssetInstance { asset: AssetProbeResult::default() })
     }
 
-    /// Pull the bundle's asset through the load window, which is open
-    /// during `wire`, and keep the fingerprint `QuietProbe` computes: the
-    /// length and a wrapping-sum checksum of the bytes.
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_, Self>) {
+    /// Pull the bundle's asset from the instance's own module and keep the
+    /// fingerprint `QuietProbe` computes: the length and a wrapping-sum
+    /// checksum of the bytes.
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_, Self>) -> Result<(), ActorInitError> {
         if let Some(bytes) = ctx.asset("asset_fixture.txt") {
             let checksum = bytes.iter().fold(0u64, |sum, &byte| sum.wrapping_add(u64::from(byte)));
             self.asset = AssetProbeResult { pulled: true, len: bytes.len() as u64, checksum };
         }
+        Ok(())
     }
 
-    /// Reply with the fingerprint of the asset this instance pulled from
-    /// its own load window during `wire`.
+    /// Reply with the fingerprint of the asset this instance pulled from its
+    /// own module during `wire`.
     ///
     /// # Agent
     /// Send `aether.test_fixtures.asset_probe`; the reply

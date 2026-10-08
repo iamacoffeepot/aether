@@ -1,6 +1,6 @@
 //! Tests for the native ctx surface, one sibling per production module.
 //!
-//! [`address`], [`handles`], [`inbound`], [`registry`], [`send`] and [`store`] are named for the
+//! [`address`], [`handles`], [`inbound`], [`lifecycle`], [`registry`], [`send`] and [`store`] are named for the
 //! module whose behaviour they exercise; [`mode`] covers the layout
 //! invariant the `mod.rs` coercions rest on and the per-mode reachability of
 //! the reply / emit surfaces. [`blob_mail`] follows a `Blob` field through
@@ -13,6 +13,7 @@ mod address;
 mod blob_mail;
 mod handles;
 mod inbound;
+mod lifecycle;
 mod mode;
 mod protocol_path_mail;
 mod registry;

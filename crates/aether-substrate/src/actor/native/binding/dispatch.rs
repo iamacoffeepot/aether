@@ -113,11 +113,23 @@ impl NativeBinding {
 
     /// Push one already-encoded mail to this actor's own mailbox as an
     /// unchained loopback wake: no parent, no root, the default reply
-    /// target. The deferred-completion tail wakes through it, and so does
-    /// [`SelfWake`](super::offload::self_wake::SelfWake), the handle an
-    /// off-thread helper holds in place of a position plus a mailer.
+    /// target. Only the deferred-completion tail wakes through it: that mail
+    /// is the engine's own, so its completion reads no sender. A wake a
+    /// capability's helper thread sends goes through [`Self::wake_as_self`].
     pub(crate) fn wake_self(&self, kind: KindId, bytes: Vec<u8>) {
         self.mailer.push(Mail::new(self.self_mailbox(), kind, bytes, 1));
+    }
+
+    /// Push one already-encoded mail to this actor's own mailbox as an
+    /// unchained loopback wake that names the actor as its sender. A
+    /// [`SelfWake`](super::offload::self_wake::SelfWake), the handle an
+    /// off-thread helper holds in place of a position plus a mailer, wakes
+    /// through it: the helper acts for its actor, so the actor is the sender.
+    /// The stamp carries no correlation, so it is no reply and settlement
+    /// counts the wake as it counts any unchained push.
+    pub(crate) fn wake_as_self(&self, kind: KindId, bytes: Vec<u8>) {
+        let sender = Source::to(SourceAddr::Component(self.self_mailbox()));
+        self.mailer.push(Mail::new(self.self_mailbox(), kind, bytes, 1).with_reply_to(sender));
     }
 
     /// Remove the named dispatch entry and rebuild its [`TaskDone`]. Called

@@ -24,12 +24,11 @@ use aether_substrate::chassis::BootableChassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot};
-use aether_text::TextCapability;
 use winit::event_loop::EventLoop;
 
 use aether_chassis::{WindowConfig, apply_manifest_window_settings};
 
-use super::driver::DesktopDriverCapability;
+use super::driver::{DesktopDriverCapability, DesktopDriverConfig};
 use aether_chassis::boot::{
     ChassisBase, CommonEnv, boot_standard, chassis_residual_knobs, with_full_stack_caps, with_rpc_server,
 };
@@ -107,6 +106,9 @@ impl Chassis for DesktopChassis {
             // an operator's `AETHER_RENDER_CLEAR_COLOR` still wins.
             apply_manifest_clear_color(&mut env.base.sources, package_settings.clear_color.as_deref())?;
             let render_config = env.base.sources.resolve::<RenderTuningConfig>()?;
+            // The driver's own knob: the most game time one frame adds. A
+            // zero is refused here, before the event loop runs.
+            let frame_delta_limit = env.base.sources.resolve::<DesktopDriverConfig>()?.lower()?;
             // The `assets` root threads into the pumped render actor's params
             // for `capture_frame` similarity references.
             let assets_dir = env.namespace_roots.assets.clone();
@@ -130,6 +132,7 @@ impl Chassis for DesktopChassis {
                 window,
                 render_config,
                 assets_dir,
+                frame_delta_limit,
             })
         })
     }
@@ -186,8 +189,7 @@ impl BootableChassis for DesktopChassis {
 
         // Boot order is declaration order — `with_full_stack_caps` runs the base
         // app caps first, render last so it claims its mailboxes after every
-        // other chassis cap. Text composes here, beside the render the driver
-        // reserves at the Claim stage, because only desktop serves render.
+        // other chassis cap.
         // `into_common_boot` reads the env-sourced `CommonBoot` fields off the
         // shared env in one place; the aborter and source stack are supplied
         // earlier by `composed` / `ChassisBase` (the base + autoload were lifted
@@ -199,7 +201,6 @@ impl BootableChassis for DesktopChassis {
         // in-flight frame before shutting down (see the driver's
         // `CloseRequested` → `Quit` bridge and terminal-reached exit).
         let builder = with_full_stack_caps(builder, common)
-            .with_actor::<TextCapability>(())
             .with_actor::<AudioCapability>(())
             .with_actor::<ClipboardCapability>(ClipboardParams::System)
             .with_actor::<LifecycleCapability>(frame_lifecycle_params());
@@ -225,5 +226,9 @@ mod config_manifest_tests {
         assert!(known.contains("AETHER_WINDOW_MODE"), "desktop must claim its window-driver knob");
         assert!(known.contains("AETHER_AUDIO_OUTPUT"), "desktop must claim the composed audio cap knob");
         assert!(known.contains("AETHER_RENDER_VERTEX_BUFFER_BYTES"), "desktop must claim the composed render cap knob");
+        assert!(
+            known.contains("AETHER_DESKTOP_MAX_FRAME_DELTA_MICROS"),
+            "desktop must claim its driver's frame delta limit, or the unknown-key sweep refuses the operator's setting"
+        );
     }
 }

@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-05-09
+- **Revised:** 2026-10-06 (#7554) — §6: the heading and the "Spurious `Settled` fires" consequence are marked superseded by §6's 2026-05-20 resolution; settlement is exact under the hold contract and is not a hint.
 - **Revised:** 2026-09-24 (#6613) — §12: the spawn primitives give their worker no ctx, so a spawned worker sends no mail. `spawn_inherit` holds the spawning chain for the worker's life; `spawn_detached` holds nothing. A thread that must reach its actor wakes it through `SelfWake`, and work that replies in a later turn uses ADR-0093's hold-until-resolve dispatch.
 - **Revised:** 2026-09-23 (#6401) — §7: a request the running chain did not cause may be sent detached with a stored reply context.
 - **Revised:** 2026-06-12 (iamacoffeepot/aether#1695) — §5/§6 reply-lineage conformance. A component-addressed reply joins the caller's causal chain: `Mailer::send_reply_with_lineage` (the `NativeBinding::send_reply_for_handler` path) mints the reply's `MailId` in the replier's id space, inherits the handled mail's `root`/`parent`, and records the reply's `Sent` against that root before pushing it. §6's synchronous-reply exactness ("their `Sent` precedes their `Finished`") and §5's `root = parent.root` inheritance therefore hold for the native reply path as they already did for guest replies, so a request → sub-request → deferred reply chain stays open until the reply's `Finished` rather than settling at the first reply boundary. The deferred (ADR-0093) path stamps the root carried by its `SettlementHold`. No event vocabulary or wire change.
@@ -109,6 +110,8 @@ Per-actor `correlation_id` allocators (§1) cover the entire `MailId` space — 
 The chassis is not an actor but is an addressable mail endpoint at `MailboxId(0)`, the existing `MailboxId::NONE` sentinel (`crates/aether-data/src/ids.rs:153`). The "no origin" semantic generalises naturally to "chassis-originated, no actor sender": chassis-dispatched mail (Tick, lifecycle, hub-bridged, MCP-bridged) has no actor sender, so one sentinel covers both cases. The mailbox-name registration guard already rejects names whose FNV-1a hash collides with 0 (collision probability ~2⁻⁶⁴), so the sentinel never collides with a real cap mailbox. The symbolic `CHASSIS_MAILBOX_ID` constant aliases `MailboxId::NONE` for code that wants the chassis-specific framing at the call site. The dispatcher loop has a small switch on `recipient == CHASSIS_MAILBOX_ID` ahead of the registry lookup; settlement reply mail (`Settled { root }`) routes through that switch into the chassis's gate-site notification logic. The chassis-as-sentinel framing also gives the causal graph a labelled root — every chain whose root mail's `sender == CHASSIS_MAILBOX_ID` is chassis-originated, and `RootState.lifecycle` (§4) names the specific cause (`Tick(frame_no) | Wire(actor) | Init(actor) | Drop(actor) | Replace(actor) | McpRequest(...) | HubBridge(...)`) so query output names the cause of every causal chain.
 
 ### 6. Settlement is a hint, not a guarantee — consumers are idempotent
+
+**Amended (2026-10-06, #7554):** the heading and the text down to the Resolution are the original framing. The Resolution below supersedes them: settlement is exact under the hold contract and is not a hint.
 
 The trace queue and the recipient mpsc are independent paths. Cross-producer event ordering at the observer is therefore not strictly preserved (per-producer FIFO holds for any reasonable MPSC, but B's `Finished` for a child can in principle reach the observer before A's `Sent` for that same child). A naive counter would briefly hit zero, fire `Settled`, then bounce back up.
 
@@ -257,6 +260,7 @@ For the no-actor-context case (`Drop` impls, signal handlers, panic hooks) where
 - **One always-running drainer thread per chassis.** Plus the `TraceObserver` cap's dispatcher thread. Two more OS threads per substrate, joining the existing chassis infrastructure threads.
 - **Observer memory grows with in-flight + recent roots.** `RootState` and `MailNode` retained until the chain settles + a retention window (per §11). At baseline ~10 k retained nodes; bounded by load.
 - **Spurious `Settled` fires are possible.** Consumers must be idempotent. None of the v1 consumers destroy state on first `Settled`, but future consumers must respect the contract.
+  - **Amended (2026-10-06, #7554):** superseded by §6's Resolution. Under the hold contract `Settled` fires once, and a spurious fire is a defect in the handler that failed to hold.
 - **Unbounded trace queue under pathological load.** Memory grows if drainer falls behind. v1 ships with a `trace_queue_depth` metric and no policy; bounded variants deferred.
 
 ### Neutral

@@ -1,5 +1,6 @@
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_kinds::{Key, Tick};
+use aether_kinds::Tick;
+use aether_window::Key;
 use aether_lifecycle::LifecycleCapability;
 
 struct Subscriber;

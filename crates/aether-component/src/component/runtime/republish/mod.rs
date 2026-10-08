@@ -163,14 +163,15 @@ impl ComponentHostCapabilityState {
         }
     }
 
-    /// Run a publish's pre-checks and route it, or queue it while a spawn or
-    /// a first publish of its namespaces is in flight: an unchanged module
-    /// is bound already, a first publish binds it, and a successor
-    /// republishes its group.
+    /// Run a publish's pre-checks and route it, or queue it while a spawn, a
+    /// first publish, or a staged unpublish of its namespaces is in flight:
+    /// an unchanged module is bound already, a first publish binds it, and a
+    /// successor republishes its group.
     pub(super) fn publish_or_queue<M: ReplyMode>(&mut self, ctx: &mut HostCtx<'_, M>, queued: QueuedPublish) {
         let busy = queued.module.published_groups().any(|(namespace, _)| {
             self.loads.values().any(|load| load.published() == namespace)
                 || self.publishes.values().any(|publish| publish.publishes(&namespace))
+                || self.unpublishes.values().any(|unpublish| unpublish.publishes(&namespace))
         });
         if busy {
             self.queued_publishes.push(queued);
@@ -180,7 +181,7 @@ impl ComponentHostCapabilityState {
         let QueuedPublish { publisher, code, module, configs } = queued;
         match self.plan_republish(ctx, &module, configs) {
             Ok(Plan::Unchanged) => self.conclude_publish(ctx, publisher, &module),
-            Ok(Plan::Publish) => self.first_publish(ctx, publisher, code, module),
+            Ok(Plan::Publish) => self.first_publish(ctx, publisher, module),
             Ok(Plan::Group(members)) => self.start_republish(ctx, publisher, code, module, members),
             Err(error) => publisher.refuse(ctx, &error),
         }
@@ -454,7 +455,7 @@ impl ComponentHostCapabilityState {
     /// the ctx's in-flight root: a request a committing candidate held and
     /// its commit flushed. Such a request runs at once rather than waiting
     /// for the republish it would otherwise hold open (see the module docs).
-    pub(super) fn committing_republish<A, M: ReplyMode>(&self, ctx: &NativeCtx<'_, A, M>) -> Option<RepublishId> {
+    pub(super) fn committing_republish<A, S, M: ReplyMode>(&self, ctx: &NativeCtx<'_, A, S, M>) -> Option<RepublishId> {
         ctx.in_flight_root().and_then(|root| self.commit_roots.get(&root)).map(|commit| commit.republish)
     }
 }

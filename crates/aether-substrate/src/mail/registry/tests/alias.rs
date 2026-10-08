@@ -4,18 +4,16 @@
 use std::panic;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use crate::config::RegistryQueueCapacities;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::{EffectBatch, PreparedAliasRoute, RegistryEffect, RegistryEffectError};
 use crate::mail::registry::owner::RegistryOwnerLease;
-use crate::mail::registry::{
-    MailboxEntry, Registry, RouteContract, canonical_mailbox_id, lineage_mailbox_id, noop_handler,
-};
+use crate::mail::registry::{MailboxEntry, Registry, RouteContract, canonical_mailbox_id, noop_handler};
 use crate::mail::{KindId, Mail};
 use crate::scheduler::WakeSink;
 use crate::testing::boot_authority as auth;
+use crate::testing::canonical_id;
 
 use super::support::{activation_barrier, prepared_test_spawn, starting_token};
 
@@ -43,11 +41,11 @@ fn manual_owner_cycles_alias_to_starting_parent_parks_until_parent_promotes() {
         prepared_test_spawn(&registry, &mailer, parent_name, Arc::clone(&deliveries), scheduled, vec![parent_id], 1);
     let birth_completion = registry.submit(EffectBatch::new(vec![birth])).unwrap();
     owner.run_once();
-    let token = starting_token(&birth_completion.wait_timeout(Duration::from_millis(100)).unwrap().unwrap());
+    let token = starting_token(&birth_completion.try_take().unwrap().unwrap());
     let starting_inventory_generation = registry.inventory().mailbox_generation;
 
     let alias_name = format!("{parent_name}/test.inline.child:widget");
-    let alias_id = lineage_mailbox_id(&alias_name);
+    let alias_id = canonical_id(&alias_name);
     let alias_completion = registry
         .submit(EffectBatch::new(vec![RegistryEffect::PublishAlias(PreparedAliasRoute::new(
             alias_id,
@@ -57,7 +55,7 @@ fn manual_owner_cycles_alias_to_starting_parent_parks_until_parent_promotes() {
         ))]))
         .unwrap();
     owner.run_once();
-    assert!(alias_completion.wait_timeout(Duration::from_millis(100)).unwrap().is_ok());
+    assert!(alias_completion.try_take().unwrap().is_ok());
     assert!(registry.route_lookup(KindId(7), alias_id).is_starting());
     assert!(registry.entry_at(alias_id).is_none(), "compatibility projection does not expose the Starting parent");
     assert!(
@@ -100,7 +98,7 @@ fn logical_alias_repeat_is_idempotent_and_conflicting_target_is_rejected() {
         RegistryQueueCapacities::default(),
     );
     let alias_name = "alias-parent-first/test.inline.child:widget";
-    let alias_id = lineage_mailbox_id(alias_name);
+    let alias_id = canonical_id(alias_name);
     let submit = |target_parent| {
         registry
             .submit(EffectBatch::new(vec![RegistryEffect::PublishAlias(PreparedAliasRoute::new(
@@ -114,17 +112,17 @@ fn logical_alias_repeat_is_idempotent_and_conflicting_target_is_rejected() {
 
     let first = submit(first_parent);
     owner.run_once();
-    assert!(first.wait_timeout(Duration::from_millis(100)).unwrap().is_ok());
+    assert!(first.try_take().unwrap().is_ok());
     let published_generation = registry.inventory().mailbox_generation;
 
     let repeat = submit(first_parent);
     owner.run_once();
-    assert!(repeat.wait_timeout(Duration::from_millis(100)).unwrap().is_ok());
+    assert!(repeat.try_take().unwrap().is_ok());
     assert_eq!(registry.inventory().mailbox_generation, published_generation, "an exact repeat publishes nothing");
 
     let conflict = submit(second_parent);
     owner.run_once();
-    assert!(matches!(conflict.wait_timeout(Duration::from_millis(100)).unwrap(), Err(RegistryEffectError::Name(_))));
+    assert!(matches!(conflict.try_take().unwrap(), Err(RegistryEffectError::Name(_))));
     let Some(MailboxEntry::Inbox { handler, .. }) = registry.entry_at(alias_id) else {
         panic!("accepted alias still projects its target inbox")
     };

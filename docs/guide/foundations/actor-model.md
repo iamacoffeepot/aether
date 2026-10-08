@@ -55,7 +55,7 @@ contract: it's exactly what you're permitted to do at that point.
 | stage | when | ctx allows | use it for |
 |---|---|---|---|
 | **`init`** | once, at boot | resolve only — **no mail** | build and return the initial state |
-| **`wire`** | after `init`, mailbox now published | full send + resolve | subscribe to input, announce yourself, kick off a self-poll |
+| **`wire`** | after `init`, mailbox now published | full send + resolve | subscribe to input, announce yourself, kick off a self-poll; return `Err` to fail the birth |
 | handlers | steady state, one call per inbound kind | full send + resolve + reply | the actor's actual behavior |
 | **`unwire`** | on every exit, after the inbox drains and before drop | full send + resolve | final broadcast, signal monitors, flush state |
 
@@ -76,6 +76,18 @@ subscribing to the tick or input streams, announcing yourself to a peer, startin
 poll loop by mailing yourself. An actor that needs to subscribe at startup would have
 nowhere safe to do it if `init` were the only hook.
 
+`wire` returns the same result type `init` does, `Result<(), ActorInitError>` for a
+component and `Result<(), BootError>` for a native actor, and a hook that fails fails
+the birth ([ADR-0247](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0247-six-invariants-where-actors-meet-the-engine.md)
+rule 3). Whoever asked for the actor is told: a load or spawn answers `Err` with the
+hook's message, a boot manifest entry fails the build, a parent's staged spawn
+completes with `SpawnError::WireFailed`, and a composed capability fails the chassis
+build. The actor never goes live. Because the hook was entered, `unwire` still runs
+before the actor drops, and mail the hook sent from a birth that holds its outbound
+mail is discarded with it. A guest that traps in `wire` fails its birth the same way,
+except that no more of its code runs, `unwire` included. Every hook is written with
+the return type and ends in `Ok(())`; `#[actor]` refuses one without it.
+
 `unwire` is the mirror at the other end, and it exists for the same reason in
 reverse — teardown often needs to send, whether that's a closing broadcast, a signal
 to monitors, or a final flush to a peer, and Rust's `Drop` can't reach cleanly into
@@ -93,8 +105,8 @@ Only a process that is killed or aborts skips it. At teardown the engine settles
 closing actor's held replies without answering them, since every requester is
 closing too.
 
-Both `wire` and `unwire` default to no-ops; override them only when you have
-mail-driven setup or teardown to do.
+Both hooks are optional: `wire` defaults to `Ok(())` and `unwire` to a no-op.
+Override them only when you have mail-driven setup or teardown to do.
 
 ## The context
 
@@ -142,8 +154,9 @@ impl WasmActor for Hello {
         Ok(Hello)
     }
 
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.subscribe::<LifecycleCapability, Tick>();
+        Ok(())
     }
 
     #[handler::event]
@@ -275,8 +288,8 @@ publishes a module, and a module's facts about a native namespace are ignored,
 so a module never changes a native short path.
 
 A loaded component needs no short path to reach it: it is named by its own
-namespace, so its canonical address is already short (`aether.kit.camera`, or
-`aether.widget:panel` for an instanced one). Its children are reached by a hole
+namespace, so its canonical address is already short (`aether.kit.mesh`, or
+`aether.kit.camera:main` for an instanced one). Its children are reached by a hole
 beneath it: `game.world/:north/:gate` for an inline child and its own inline
 child, or `game.world/:k` for a guest a `Spawn` with `parent` placed at
 `game.world/NS:k`. A parent that several instanced child types list in their
@@ -352,6 +365,44 @@ handler runs either way and receives the take as it is. A `response` with no
 fourth parameter may still call `ctx.take_context` itself, for example to try
 several context kinds in turn.
 
+A `tell` or a `request` states what its sender must handle in its ctx type,
+as the ctx's sender: the ctx's type arguments are receiver, sender, mode
+([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md) §11).
+A receiver that mails its sender back later, such as a session that delivers
+frames to whoever dialed it, needs the sender to handle those kinds, and this
+is where it says so:
+
+```rust
+#[handler::tell]
+fn on_take_focus(&mut self, ctx: &mut WasmCtx<'_, Self, FocusHolder>, _take: TakeFocus) {
+    let holder = ctx.sender(); // ProtocolRef<FocusHolder>
+    self.holder = Some(holder);
+    ctx.send_to(holder, &FocusGained);
+}
+```
+
+The one type argument drives two checks. At build time, an actor sends this kind
+with the plain `ctx.send::<Window>(&TakeFocus)` only when it has a handler for
+each of `FocusHolder`'s kinds; one that lacks a handler gets an error naming
+it, and nothing is added at the call site. At receipt, the engine casts the
+sender to `FocusHolder` before the handler runs, and `ctx.sender()` is then
+the proven `ProtocolRef<FocusHolder>`, with no `Option` and no `ctx.cast`. Mail the build cannot see,
+such as a call relayed from MCP or mail with no sender, fails that cast and
+never reaches the handler: the refusal is logged in the receiver's log, a tell
+relayed by `aether.rpc.server` ends its call with the refusal, and a request
+is answered with its own reply, built from a `PathRefused` naming the sender,
+so a request that states a sender replies a kind that is `From<PathRefused>`.
+A kind whose handler requires something of its sender is not sent through a
+`ProtocolRef`: a protocol's rows are covered only by handlers that ask
+nothing. A handler that states nothing keeps `Anyone`, whose `ctx.sender()`
+is an `Option<ErasedActorRef>`. A helper that a stating handler passes its
+ctx to takes the sender as a type parameter, as it takes the actor:
+`fn dial<A, S>(ctx: &mut NativeCtx<'_, A, S>, ..)`. A sender is refused on an
+`event`, a `response`, an unchecked handler, a `Departed<W>` handler, a
+batched `&[K]` handler, a handler in a set, a `#[fallback]`, a task
+completion, and a lifecycle hook, and a reply mode written in the sender's
+position is refused with the corrected spelling.
+
 The **unchecked** class (`#[handler::unchecked(reason = "…")]`) takes an `Unchecked`
 ctx and issues its own replies by hand (`ctx.reply` / `ctx.reply_to`), which the
 engine does not check. It gives up the reply check, so it is only for a handler
@@ -373,9 +424,10 @@ trace, and cost tails do. Incremental or unbounded delivery publishes to
 subscribers (`Publishes<K>` / `subscribe`).
 
 `#[actor]` records each handler's answer as a type-level **contract row**,
-`impl Contract<K> for A { type Reply = …; type Index = … }`: the reply kind `O`
-for `-> O` or `-> Pending<O>`, `Silent` for `-> ()`, and `Undeclared` for an
-unchecked handler. Each row names its position in the actor's one type-level
+`impl Contract<K> for A { type Reply = …; type Sender = …; type Index = … }`:
+the reply kind `O` for `-> O` or `-> Pending<O>`, `Silent` for `-> ()`, and
+`Undeclared` for an unchecked handler, and as `Sender` the protocol its
+`sender` parameter names, or `Anyone` when it takes none. Each row names its position in the actor's one type-level
 row list, `Contracts::Rows`, so a row exists only where a handler does: a
 hand-written row for a kind the actor does not handle does not compile, and a
 handled kind of a public actor is declared `pub` (ADR-0231 §10). It also emits
@@ -394,8 +446,8 @@ declares one: each method is a row, `-> O` single and no return silent, and the
 explicit return `-> Undeclared` unchecked. The trait becomes a unit struct whose
 `impl Protocol` lists the rows as
 `type Rows = (Row<K, O>, …)`. `MeshLoader: CoveredBy<R>` holds when the target
-`R` has a contract row for every kind with the exact reply. Rows match by kind,
-never by method name; a `#[fallback]` has no row and an unchecked handler's
+`R` has a contract row for every kind with the exact reply, from a handler
+that asks nothing of its sender. Rows match by kind, never by method name; a `#[fallback]` has no row and an unchecked handler's
 `Undeclared` row covers only an explicit unchecked protocol row. That row promises
 the target handles the kind without imposing a reply-handler obligation on the
 sender. Coverage is sealed: `aether-actor` computes it
@@ -454,9 +506,10 @@ prove is still answered: its reply kind implements `From<PathRefused>`, and the
 dispatch answers `O::from(refused)` naming the path and why, while a silent or
 unchecked row drops the refusal with a warn. A request kind carrying a path
 whose reply lacks `From<PathRefused>` does not compile. Native dispatch decodes
-with the registry; a guest's decode has none, so a guest refuses a
-`ProtocolPath<P>` as `Unchecked` until
-[ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md).
+with the registry, and a guest's decode asks it through one host call per path
+field (`route_rows_p32`), so a guest proves and refuses a `ProtocolPath<P>` as
+a native receiver does, in mail, in its config, and in saved state. A kind
+with no protocol path makes no host call.
 Neither path grants a send: a closed actor's path decodes, since names are
 never reused, and the route can leave after the decode, so its receiver's
 `resolve` proves that a live actor stands at the path and the handler answers
@@ -487,8 +540,12 @@ match ctx.resolve(&run.source) {
 }
 ```
 
-The guest arm is `WasmCtx::resolve` over an `ActorPath<R>` (#7205); the
-Bloomery bootstrap proves its journal and driver peers with it.
+The guest arm is `WasmCtx::resolve`, which takes either typed path and mints
+the reference its type names (#7205, #7501): the Bloomery bootstrap proves
+its journal and driver peers from `ActorPath<R>` fields with it, and a guest
+whose config names a peer by protocol resolves the `ProtocolPath<P>` in
+`wire`
+([Naming a peer by protocol](../systems/components.md#naming-a-peer-by-protocol)).
 
 A kind or config field naming an actor its receiver will later send to, such
 as a subscriber, a handler, a callback, or a source, is a typed path, never an
@@ -506,10 +563,12 @@ MCP and RPC boundary.
 
 The class marker rides on the context type — a `request`, `tell`, `event`, or
 `response` handler's `WasmCtx<'_>`
-is `WasmCtx<'_, Self, Single>` and an unchecked handler holds
-`WasmCtx<'_, Self, Unchecked>` — which is what makes a stray `ctx.reply` in
-any of the four a compile error. The actor is the first parameter, the reply
-mode the second, and a ctx that omits its actor is typed by it: `#[actor]`
+is `WasmCtx<'_, Self, Anyone, Single>` and an unchecked handler holds
+`WasmCtx<'_, Self, Anyone, Unchecked>` — which is what makes a stray `ctx.reply` in
+any of the four a compile error. The ctx's type arguments are receiver,
+sender, mode: the actor is the first, the sender the handler requires
+(`Anyone` when it states none) the second, and the reply mode the third. A
+ctx that omits its actor is typed by it: `#[actor]`
 fills in `Self`, so the ctx reaches only the actors the handler's actor
 declares with `depends(R)`. Spelling `Erased` in that slot
 (`WasmCtx<'_, Erased>`) asks for the untyped view. One call deeper the class
@@ -537,14 +596,14 @@ fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _t: Tick) {
 }
 
 #[handler::unchecked(reason = "example: the same helper from the unchecked class")]
-fn on_redraw(&mut self, ctx: &mut WasmCtx<'_, Self, Unchecked>, _r: Redraw) {
+fn on_redraw(&mut self, ctx: &mut WasmCtx<'_, Self, Anyone, Unchecked>, _r: Redraw) {
     announce(&mut ctx.sends(), self.renderer, &self.frame);        // Unchecked — same helper
     ctx.reply(&Acknowledged);                       // reply stays on the ctx
 }
 ```
 
 `reply` / `reply_to` / `emit` — and `send_with_context`, whose stashed context
-is recovered on the reply — stay on `WasmCtx<'_, A, M>`, so a helper that needs
+is recovered on the reply — stay on `WasmCtx<'_, A, S, M>`, so a helper that needs
 those still states which class it belongs to. That's the line: the reply class
 is load-bearing exactly where the reply is.
 
@@ -612,10 +671,9 @@ dispatch arm, one manifest record. Re-declaring the same kind as a local
 A set member's ctx is typed by the adopting actor: `WasmCtx<'_>` in a set reads
 as `WasmCtx<'_, Self>`, where `Self` is whichever actor adopts the set. A
 default body that reaches another actor therefore states that reach on the
-trait, as a supertrait — the real `WidgetDefaults` is
-`pub trait WidgetDefaults: WidgetChrome + DependsOn<TextCapability>`, because
-its theme handler measures fonts through the text capability — and every
-adopter must declare the dependency. `#[handler_set]` adds `Sized` to the
+trait, as a supertrait — `pub trait SoundDefaults: DependsOn<AudioCapability>`
+for a set whose handlers play notes through the audio capability — and
+every adopter must declare the dependency. `#[handler_set]` adds `Sized` to the
 supertraits as well. An override is a plain trait-method impl that no macro
 rewrites, so it spells the typed signature itself: `WasmCtx<'_, Self>`.
 
@@ -696,9 +754,14 @@ handler the others do not, declare it locally in that adopter's own `#[actor]`
 block, where `#[cfg]` already means the adopter's configuration.
 
 Put in a set only what is genuinely uniform. When bodies disagree on something
-load-bearing — the widgets' `SetWidgetState` handlers disagree about which
-predicate cancels an activation — a shared body has to pick one reading and
-silently change the rest, which is worse than the repetition it removes.
+load-bearing — which predicate cancels an activation, say — a shared body has
+to pick one reading and silently change the rest, which is worse than the
+repetition it removes.
+
+The example above is illustrative. The in-tree wasm adopter is the
+`HandlerSetAdopter` fixture in
+`crates/aether-test-fixtures-bundle/src/handler_set.rs`, which
+`crates/aether-component/tests/harness_handler_set.rs` loads and mails.
 
 ## Configuring an actor
 
@@ -777,8 +840,8 @@ the MCP, RPC, and harness boundary, is the one place an `ErasedActorPath` become
 position
 ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)).
 The reply carries no position. A successful load reply is sent by the loaded
-actor itself, so a native requester keeps `ctx.sender()` as its reference and
-an embedder types the reply event's stamped sender.
+actor itself, so a requester, native or guest, keeps `ctx.sender()` from the
+reply as its reference and an embedder types the reply event's stamped sender.
 
 Because the lineage is the address, two actors collide exactly when they would
 occupy the same position — same parent, same name. The substrate enforces one
@@ -790,13 +853,43 @@ surfaces when the second one tries to register. For an instanced actor (below)
 the colliding unit is the full `NAMESPACE:subname` under one parent, not the
 shared prefix.
 
+The tree is ordered, and the order is creation order
+([ADR-0248](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0248-lineage-is-an-ordered-tree.md)).
+A parent's children stand in the order they were created, and so do the root
+actors: the chassis composition chain as written, then the boot list as
+written, then whatever is loaded later. Nothing else orders actors. There is
+no reorder verb, rank, or ordering declaration, and an actor never states
+where it stands. The registry stamps each route with a birth serial when the
+route is first reserved, before `init` runs, so the order is the order the
+registry saw the requests and does not depend on how long each `init` takes.
+The serial stays with the route through a republish and after the actor
+closes, and a closed actor's name is never registered again, so a place is
+for life.
+
+A native actor reads where another stands with
+`ctx.lineage_order(reference)`, which answers an opaque `LineageOrder` to
+compare with others: a parent sorts before its children, a child between its
+parent and its parent's next sibling, and siblings in creation order. The
+value names no mailbox and is never mailed. Each reader gives the one order
+its own meaning; the renderer paints overlay draws by it
+([Rendering](../systems/rendering.md)). A parent that needs control over
+where things stand creates empty children first, in the order it wants, and
+creates its content beneath them.
+
+So that the read has no failure to report, a birth names a parent that holds
+a route record. Every production birth already does, because a child's name
+is built from its parent's. A name nested beneath a parent the registry has
+never seen is refused where the birth is applied: `SpawnError::ParentUnknown`
+for a spawn, `RegistryEffectError::ParentUnknown` for a staged effect. A test
+fixture that stands a route at `a/b:k` registers `a` first.
+
 A dash in a namespace is a naming convention, not addressing grammar. Use it
 only for a genuine adjacent sibling of an existing bare base:
 `aether.kit.camera-controller` is the controller actor beside the bare
 `aether.kit.camera` actor. The dash has no addressing semantics — it makes neither actor a child of the other, and the full
 `NAMESPACE` still yields the `ActorId` before lineage yields the `MailboxId`. Do
 not use a dash merely to spell a multi-word segment; that is what an underscore
-is for, as in `aether.widget.menu_bar` and `aether.widget.text_field`.
+is for, as in `aether.substrate_harness.observer`.
 
 `ctx.actor_ref::<Camera>()` returns an `ActorRef<Camera>` for the physical
 trampoline mailbox: the trampoline and its loaded guest share one mailbox, while
@@ -833,8 +926,8 @@ type, and can spawn an `Instanced` native actor when that child declares
 `ChildOf<Parent>` for the actor doing the spawning:
 `ctx.spawn_child::<TcpSessionActor>(subname, config, params)`. The parent comes
 from the ctx. A handler opts into the call by naming its own actor in its ctx
-signature — `ctx: &mut NativeCtx<'_, Self, Single>`, or
-`NativeCtx<'_, Self, Unchecked>` for an unchecked handler — and the `#[actor]`
+signature — `ctx: &mut NativeCtx<'_, Self, Anyone, Single>`, or
+`NativeCtx<'_, Self, Anyone, Unchecked>` for an unchecked handler — and the `#[actor]`
 macro hands such a handler a ctx typed by the actor being dispatched. Every
 other handler keeps the plain `NativeCtx<'_>` and reaches no spawn surface, so
 a birth cannot be placed under a parent other than the one running.
@@ -876,6 +969,11 @@ at the spawner through the ordinary task-completion path as
 ([ADR-0243](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0243-typed-held-replies.md)
 §9) — so an apply-time conflict (a name another actor won
 first, say) surfaces as one typed failure rather than a silent half-spawn. A
+handler that stages several births in one turn gets one outcome per birth, and
+those births commit or fail together: if the owner refuses one, that one's
+outcome carries the reason, every other outcome of the turn is
+`SpawnError::ActivationRejected`, none of them is born, and each name can be
+staged again on a later turn. A
 `SpawnOutcome` names itself on both arms:
 
 ```rust
@@ -981,10 +1079,22 @@ An inline child ends by closing, as any actor does
 ([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md) §8):
 `ctx.despawn_inline_child(child)` closes it, and so does its parent's close.
 Each watcher gets a `MonitorNotice` sent from the child, and the child's name
-tombstones. The name is spent: a later `monitor` of it is refused with
-`TargetTombstoned`, and spawning the same key beneath the same parent fails with
+tombstones. The name is spent: a later `monitor` of it returns its handle and
+the watcher is sent the child's `MonitorNotice` at once, as for any actor that
+has already closed, and spawning the same key beneath the same parent fails with
 `SpawnError::AliasAllocationFailed`. A parent that wants a fresh child after a
 despawn spawns it under a new key, such as `Subname::Counter`.
+
+A close runs `unwire` on what wired
+([ADR-0249](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0249-a-republish-wires-the-successor-and-unwires-the-old-guest-at-commit.md)
+§4, §6). A parent's close runs each inline child's `unwire` before the
+parent's own, deepest first. A child that despawns itself runs `unwire` when the
+handler that asked returns, and is dropped after it. Each child runs `unwire`
+once, and only if its `wire` returned `Ok`. Spawning a name whose child is
+standing is not a second birth: the spawn answers the child that stands,
+wiring it first when it never wired, initialising nothing, and ignoring the
+config it was passed, so a `wire` that spawns a child is safe to run again
+(§5).
 
 A component can also run as several instances of one type: an `instanced` type
 loaded under different keys is an independent actor at each `NS:key`. The loader

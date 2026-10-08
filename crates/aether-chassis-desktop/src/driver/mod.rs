@@ -19,11 +19,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use aether_actor::Addressable;
-use aether_data::{ErasedActorPath, Kind};
+use aether_actor::{ActorPath, Addressable};
+use aether_data::Kind;
 use aether_kinds::{LifecycleAdvance, Quit, Tick};
 use aether_lifecycle::LifecycleCapability;
-use aether_render::{Frame, Occluded, RenderCapability, RenderCapabilityState, RenderParams, RenderTuningConfig};
+use aether_render::{
+    Frame, Occluded, RenderCapability, RenderCapabilityState, RenderParams, RenderTuningConfig, SurfacePresent,
+};
 use aether_substrate::actor::native::PumpedSlot;
 use aether_substrate::chassis::builder::{
     DriverCapability, DriverCtx, DriverRunning, PumpedRoots, RootPusher, RunError,
@@ -37,16 +39,22 @@ use aether_substrate::runtime::lifecycle as runtime_lifecycle;
 use aether_substrate::{ChassisCtx, HubOutbound, SettlingInbox, SubstrateBoot, chassis::frame_loop, mail::MailId};
 use aether_window::{
     DesktopWindowApplication, DesktopWindowIntegration, DesktopWindowSlot, INITIAL_WINDOW_NAME, WindowCapability,
-    WindowSizeRequest, WindowSpec,
+    WindowInstance, WindowPresentation, WindowSizeRequest, WindowSpec,
 };
 use crossbeam_channel::{Receiver, Sender};
 use winit::event_loop::EventLoop;
 use winit::window::Window;
 
 use super::chassis::UserEvent;
+use frame_time::STALL_WARN_COOLDOWN;
 use lifecycle::{LifecycleReplyOutcome, consume_lifecycle_reply};
 use shutdown::install_shutdown_handler;
 
+pub use config::{DEFAULT_MAX_FRAME_DELTA_MICROS, DesktopDriverConfig, DesktopDriverConfigLayer, DesktopDriverOverlay};
+pub use frame_time::{FrameDelta, FrameDeltaLimit};
+
+mod config;
+mod frame_time;
 mod lifecycle;
 mod shutdown;
 
@@ -115,6 +123,13 @@ pub struct DesktopRenderIntegration {
     /// Start instant of the previous Tick stage. The desktop cadence is
     /// frame-driven, so this is the source of Tick's elapsed-time payload.
     last_tick: Option<Instant>,
+    /// The most game time one frame adds. The interval measured from
+    /// [`Self::last_tick`] is held to it before the frame's advances state
+    /// it, so a stall slows game time and skips no step.
+    frame_delta_limit: FrameDeltaLimit,
+    /// Last time a frame's uncounted time was warned of, for the
+    /// [`STALL_WARN_COOLDOWN`] rate limit.
+    last_stall_warn: Option<Instant>,
     frame: u64,
     /// True once graceful lifecycle shutdown has been requested.
     quit_requested: bool,
@@ -125,13 +140,15 @@ pub struct DesktopRenderIntegration {
 impl DesktopRenderIntegration {
     /// Begin graceful shutdown exactly once. The window application drives a
     /// frame immediately after this request and exits only after the lifecycle
-    /// reports its terminal.
+    /// reports its terminal. The quit is sent from the driver's claimed
+    /// [`Self::lifecycle_reply_inbox`], so the lifecycle capability reads that
+    /// mailbox as its sender.
     fn request_quit(&mut self) {
         if self.quit_requested {
             return;
         }
         self.quit_requested = true;
-        self.lifecycle.push_root(&Quit, None);
+        self.lifecycle.push_root(&Quit, Some(&self.lifecycle_reply_inbox));
     }
 
     /// Push a chassis-root `LifecycleAdvance` to the `aether.lifecycle` cap
@@ -221,16 +238,53 @@ impl DesktopRenderIntegration {
         }
     }
 
+    /// Warn that a frame ran `uncounted_micros` past the frame delta limit,
+    /// at most once per [`STALL_WARN_COOLDOWN`]. `now` is the instant the
+    /// frame already read.
+    fn warn_of_uncounted(&mut self, now: Instant, uncounted_micros: u64) {
+        if uncounted_micros == 0 {
+            return;
+        }
+        let cooling_down = self.last_stall_warn.is_some_and(|last| now.duration_since(last) < STALL_WARN_COOLDOWN);
+        if cooling_down {
+            return;
+        }
+
+        self.last_stall_warn = Some(now);
+        tracing::warn!(
+            target: "aether_substrate::frame_loop",
+            uncounted_micros,
+            "a frame ran past the frame delta limit; game time did not count the rest and no step was skipped \
+             (AETHER_DESKTOP_MAX_FRAME_DELTA_MICROS)"
+        );
+    }
+
     fn metrics(&self) -> (Option<Instant>, u64, u64) {
         (self.started, self.frame, self.render_slot.read_state(RenderCapabilityState::triangles_rendered).unwrap_or(0))
     }
 }
 
+/// What a window's presentation asks of its surface. Only `Display` waits
+/// for the display: an uncapped window is paced by nothing and a capped one
+/// by the window event loop, so the surface of either presents at once.
+fn surface_present(presentation: WindowPresentation) -> SurfacePresent {
+    match presentation {
+        WindowPresentation::Display => SurfacePresent::InStep,
+        WindowPresentation::Uncapped | WindowPresentation::Capped { .. } => SurfacePresent::Unsynced,
+    }
+}
+
 impl DesktopWindowIntegration for DesktopRenderIntegration {
-    fn attach_window(&mut self, path: ErasedActorPath, window: Arc<Window>) -> Result<(), String> {
+    fn attach_window(
+        &mut self,
+        path: &ActorPath<WindowInstance>,
+        window: Arc<Window>,
+        presentation: WindowPresentation,
+    ) -> Result<(), String> {
+        let present = surface_present(presentation);
         let attachment = self
             .render_slot
-            .host_turn(|state, ctx| state.attach_window(ctx, path, window))
+            .host_turn(|state, ctx| state.attach_window(ctx, path.as_erased().clone(), window, present))
             .ok_or_else(|| "render actor is unavailable during window attachment".to_owned())?;
         attachment?;
         let attached = Instant::now();
@@ -239,8 +293,19 @@ impl DesktopWindowIntegration for DesktopRenderIntegration {
         Ok(())
     }
 
-    fn detach_window(&mut self, path: &ErasedActorPath) {
-        if self.render_slot.host_turn(|state, ctx| state.detach_window(ctx, path)) == Some(false) {
+    fn set_presentation(
+        &mut self,
+        path: &ActorPath<WindowInstance>,
+        presentation: WindowPresentation,
+    ) -> Result<(), String> {
+        let present = surface_present(presentation);
+        self.render_slot
+            .host_turn(|state, _ctx| state.set_window_present(path.as_erased(), present))
+            .ok_or_else(|| "render actor is unavailable during a presentation change".to_owned())?
+    }
+
+    fn detach_window(&mut self, path: &ActorPath<WindowInstance>) {
+        if self.render_slot.host_turn(|state, ctx| state.detach_window(ctx, path.as_erased())) == Some(false) {
             tracing::warn!(
                 target: "aether_substrate::render",
                 window = %path,
@@ -249,22 +314,22 @@ impl DesktopWindowIntegration for DesktopRenderIntegration {
         }
     }
 
-    fn windows_dirty(&mut self, windows: &[ErasedActorPath]) {
+    fn windows_dirty(&mut self, windows: &[ActorPath<WindowInstance>]) {
         if self.terminal_reached {
             return;
         }
         let now = Instant::now();
-        let delta_micros = self
-            .last_tick
-            .replace(now)
-            .map_or(0, |last_tick| u32::try_from(now.duration_since(last_tick).as_micros()).unwrap_or(u32::MAX));
-        self.terminal_reached = self.run_frame_advance(delta_micros);
-        self.send_render_and_drain(&Frame { replay_cache_when_idle: false, windows: windows.to_vec() });
+        let measured = self.last_tick.replace(now).map_or(Duration::ZERO, |last_tick| now.duration_since(last_tick));
+        let delta = self.frame_delta_limit.limit(measured);
+        self.warn_of_uncounted(now, delta.uncounted_micros);
+        self.terminal_reached = self.run_frame_advance(delta.counted_micros);
+        let windows = windows.iter().map(|window| window.as_erased().clone()).collect();
+        self.send_render_and_drain(&Frame { replay_cache_when_idle: false, windows });
         self.frame += 1;
     }
 
-    fn window_occluded(&mut self, path: &ErasedActorPath, occluded: bool) {
-        self.send_render_and_drain(&Occluded { window: path.clone(), occluded });
+    fn window_occluded(&mut self, path: &ActorPath<WindowInstance>, occluded: bool) {
+        self.send_render_and_drain(&Occluded { window: path.as_erased().clone(), occluded });
     }
 
     fn request_shutdown(&mut self) {
@@ -322,6 +387,10 @@ pub struct DesktopDriverCapability {
     /// actor's params so its `capture_frame` handler can read similarity
     /// reference images off the hot path (iamacoffeepot/aether#1780).
     pub assets_dir: PathBuf,
+    /// The most game time one frame adds, lowered from
+    /// [`DesktopDriverConfig`] in the desktop `Chassis::build` and handed to
+    /// the render integration, which measures the time between frames.
+    pub frame_delta_limit: FrameDeltaLimit,
 }
 
 pub struct DesktopDriverRunning {
@@ -367,9 +436,11 @@ impl DriverCapability for DesktopDriverCapability {
         // (`AETHER_RENDER_VERTEX_BUFFER_BYTES`): ADR-0161 R3 moved render off
         // the pooled `with_actor` compose on desktop, so the driver — which
         // now boots the render actor — declares its `Config` member for the
-        // manifest / `--print-config` / unknown-env sweep.
+        // manifest / `--print-config` / unknown-env sweep. The driver's own
+        // knob, the frame delta limit, is its third member.
         let mut members = <aether_chassis::WindowConfig as ConfigMember>::members();
         members.extend(<RenderTuningConfig as ConfigMember>::members());
+        members.extend(<DesktopDriverConfig as ConfigMember>::members());
         members
     }
 
@@ -377,13 +448,14 @@ impl DriverCapability for DesktopDriverCapability {
     // thread through a single flat sequence.
     #[allow(clippy::too_many_lines)]
     fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
-        let Self { event_loop, boot, window, render_config, assets_dir } = self;
+        let Self { event_loop, boot, window, render_config, assets_dir, frame_delta_limit } = self;
         let aether_chassis::WindowSettings { mode, size, title, app_name, wireframe } = window;
         let initial_window = WindowSpec {
             name: INITIAL_WINDOW_NAME.to_owned(),
             title,
             mode,
             size: size.map(|(width, height)| WindowSizeRequest { width, height }),
+            presentation: WindowPresentation::Display,
         };
 
         // ADR-0161: the desktop driver boots the pumped `aether.render` actor
@@ -432,7 +504,8 @@ impl DriverCapability for DesktopDriverCapability {
         }));
 
         // The chassis-root doors for the per-frame `Frame` request and the
-        // `Occluded` forward, and for each `LifecycleAdvance` and the `Quit`.
+        // `Occluded` forward, and for each `LifecycleAdvance` and the `Quit`. Both
+        // are sent from the driver's claimed lifecycle reply inbox.
         let render = ctx.root_pusher::<RenderCapability>();
         let lifecycle = ctx.root_pusher::<LifecycleCapability>();
 
@@ -458,6 +531,8 @@ impl DriverCapability for DesktopDriverCapability {
             render_pump_rx,
             started: None,
             last_tick: None,
+            frame_delta_limit,
+            last_stall_warn: None,
             frame: 0,
             quit_requested: false,
             terminal_reached: false,

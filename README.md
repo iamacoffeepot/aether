@@ -162,7 +162,7 @@ the several thousand hits a grep finds are test assertions. Errors cross
 boundaries as typed enums. A trap inside the native runtime aborts the process
 on purpose (ADR-0063) rather than continuing on corrupted state.
 
-Working today: the desktop, headless, hub, and substrate-harness chassis; the
+Working today: the desktop, headless, and hub chassis and the in-process substrate harness; the
 mail scheduler and settlement tracking; wasm component load, drop,
 and in-place replace with state carried across the swap; rendering (world
 triangles, textured quads, GPU shapes, text) with a depth-tested camera; audio
@@ -171,8 +171,8 @@ native menus; input subscriptions; file, HTTP, TCP, subprocess, and clipboard
 capabilities; per-actor logs, traces, and cost tables; frame capture; the
 package depot; and the two in-repo test harnesses.
 
-Not here yet: no scene or asset editor application (the widget crate composes
-UI, but nothing ships as an editor); no replication or netcode layer, only the
+Not here yet: no scene or asset editor application and no control set (a
+screen is drawn from render shapes and text draws); no replication or netcode layer, only the
 framed RPC the hub and its engines speak plus the HTTP and TCP capabilities; no
 asset pipeline beyond the mesh DSL, OBJ import, WAV and SFZ audio, and TTF
 fonts, so there is no importer, no texture format past raw RGBA pixels, and no
@@ -256,7 +256,7 @@ See [Writing a component](docs/guide/recipes/writing-a-component.md) and
 | Runtime | `aether-substrate` | registry, mail, scheduler, native/wasm hosts, settlement |
 | Native services | `aether-render`, `aether-audio`, `aether-fs` and the rest of `aether-<cap>` | one crate per capability mailbox: render, text, audio, clipboard, window, FS, HTTP, TCP, process, RPC, component, lifecycle, fleet, inventory, trace |
 | Chassis and harnesses | `aether-chassis` + `aether-chassis-*` | per-chassis crates over a shared composition layer; harnesses in `aether-harness-*` |
-| Guest actors | `aether-kit`, `aether-widget`, `aether-mesh`, `aether-demo` | camera and mesh viewer; the widget tree; the geometry DSL library; the release demo's bring-up component |
+| Guest actors | `aether-kit`, `aether-mesh`, `aether-demo` | camera and mesh viewer; the geometry DSL library; the release demo's bring-up component |
 | Operator bridge | `aether-mcp` | MCP tools, live schemas, RPC and bounded evidence projection |
 | Tooling | `xtask`, fixture crates, excluded `fuzz/` | dist/bundle discovery, compatibility artifacts, nightly fuzz targets |
 
@@ -303,8 +303,8 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 GitHub Actions owns the expensive build/test matrix; `CI pass` and `Lint title`
 are the checks a head must pass before it lands (`main` has no branch
-protection, so nothing enforces them). The draft's current head must also have direct-review
-acceptance, resolved threads, and declared-surface containment. Landing is an
+protection, so nothing enforces them). The draft's current head must also have no active change
+request, resolved threads, and declared-surface containment. Landing is an
 explicit separate operation. Keep PRs focused, preserve unrelated user changes,
 and do not push directly to `main` or merge
 without that authority. The full lifecycle is written up in

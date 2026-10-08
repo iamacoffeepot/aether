@@ -250,23 +250,21 @@ impl BlobStore {
     }
 
     /// The total length of every owned entry's bytes plus every live slab,
-    /// each counted once. Read only by tests until the gauge has a reader
-    /// outside the store.
-    #[cfg(test)]
+    /// each counted once. Read by the engine's memory report.
     #[must_use]
     pub fn resident_bytes(&self) -> usize {
         self.shared.resident_bytes.load(Ordering::Relaxed)
     }
 
-    /// The total length of every live slab. Read only by tests.
-    #[cfg(test)]
+    /// The total length of every live slab. Read by the engine's memory
+    /// report.
     #[must_use]
     pub fn slab_bytes(&self) -> usize {
         self.shared.slab_bytes.load(Ordering::Relaxed)
     }
 
-    /// The total length of every live slab entry's region. Read only by tests.
-    #[cfg(test)]
+    /// The total length of every live slab entry's region. Read by the
+    /// engine's memory report.
     #[must_use]
     pub fn slab_member_bytes(&self) -> usize {
         self.shared.slab_member_bytes.load(Ordering::Relaxed)

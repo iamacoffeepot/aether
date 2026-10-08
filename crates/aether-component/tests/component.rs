@@ -16,7 +16,7 @@ use std::path::Path;
 use aether_component::ComponentHostCapability;
 use aether_data::ErasedActorPath;
 use aether_harness_substrate::test_helpers::require_wasm;
-use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate::{HarnessOp, SubstrateHarness, SubstrateHarnessError};
 use aether_kinds::{DropComponent, DropResult, ListComponents, ListComponentsResult, LoadComponent, LoadResult};
 use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_bundle::Counter;
@@ -520,18 +520,18 @@ fn replace_preserves_state_via_typed_state_kind() {
     );
 }
 
-/// ADR-0113: when a replacement is compiled against a reshaped `type
-/// State` kind (a different `Kind::ID`), the generated `on_rehydrate`
-/// sees `PriorState::decode_kind` miss the decode and boots fresh. Loads the
-/// `stateful_replace_typed` fixture, bumps to 3, then replaces it with
-/// `stateful_replace_reshaped` (same `NAMESPACE`, a `CounterState` that
-/// gained a field). The recovered count is 0 — the fresh-`init` value —
-/// because the saved bundle's leading id no longer matches. The warn the
-/// generated hook emits on the decode-miss is covered host-side by
-/// `aether-actor`'s `state_framing_roundtrip` test (the harness does not
-/// route `aether.log` mail through its observed sinks).
+/// ADR-0249 §1: when a replacement is compiled against a reshaped `type
+/// State` kind (a different `Kind::ID`), the generated `on_rehydrate` sees
+/// `PriorState::decode_kind` miss the decode and returns an error, which
+/// refuses the republish. Loads the `stateful_replace_typed` fixture, bumps
+/// to 3, then republishes it with `stateful_replace_reshaped` (same
+/// `NAMESPACE`, a `CounterState` that gained a field). The publish is refused
+/// and the count read afterwards is 3, the reinstated guest's.
+///
+/// Catches a reshaped state kind silently discarding state: the successor
+/// installed with a fresh count behind a publish that answered `Ok`.
 #[test]
-fn typed_state_decode_miss_boots_fresh() {
+fn a_reshaped_state_kind_refuses_the_republish() {
     let Some(typed_path) = require_wasm("aether_test_fixtures_stateful_typed") else {
         return;
     };
@@ -561,20 +561,24 @@ fn typed_state_decode_miss_boots_fresh() {
         "three bumps should leave the counter at 3 before the replace",
     );
 
-    // Replace with the reshaped wasm: the saved bundle's leading id no
-    // longer matches the new `CounterState::ID`, so rehydrate misses.
+    // Republish with the reshaped wasm: the saved bundle's leading id no
+    // longer matches the new `CounterState::ID`, so the successor's rehydrate
+    // returns an error.
     let reshaped_wasm = fs::read(&reshaped_path).expect("read reshaped fixture wasm");
-    harness.publish(reshaped_wasm).unwrap_or_else(|error| panic!("publish the successor: {error}"));
+    let Err(SubstrateHarnessError::Publish(refusal)) = harness.publish(reshaped_wasm) else {
+        panic!("a successor whose state kind was reshaped was accepted");
+    };
+    assert!(refusal.contains("on_rehydrate failed"), "the refusal names the hook: {refusal}");
+    assert!(refusal.contains("does not decode"), "the refusal says the prior state does not decode: {refusal}");
 
     let post = harness
         .execute(vec![("query", HarnessOp::send_and_await_reply(&counter, &CountQuery))])
-        .expect("post-replace query sequence");
-    let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
+        .expect("post-republish query sequence");
+    let post_count = post.reply::<CountReport>("query").expect("decode post-republish CountReport");
     assert_eq!(
         post_count,
-        CountReport { count: 0 },
-        "a reshaped state kind must boot fresh on rehydrate (decode-miss); \
-         got {post_count:?} (3 would mean the stale bundle decoded against the new shape)",
+        CountReport { count: 3 },
+        "the reinstated guest keeps its count; got {post_count:?} (0 means a successor that started fresh was installed)",
     );
 }
 

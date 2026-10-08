@@ -14,7 +14,7 @@ use super::{AdapterRegistry, FsFoldError, FsTransformError};
 // `HandlesKind<K>` markers through `pub use kinds::*`.
 use super::{
     Copy, CopyResult, Delete, DeleteResult, FileAdapter, FsCapability, FsError, FsFetch, FsFetchError, FsFetchResult,
-    List, ListResult, Load, Loaded, NamespaceAddr, NamespaceRoots, Read, ReadResult, Write, WriteResult,
+    List, ListResult, Load, Loaded, NamespaceAddr, NamespaceRoots, ObjectSource, Read, ReadResult, Write, WriteResult,
     build_registry,
 };
 use aether_actor::runtime;
@@ -121,21 +121,35 @@ impl NativeActor for FsCapability {
     /// for tests) and pass to `with_actor::<FsCapability>(roots)`.
     type Config = NamespaceRoots;
 
+    /// How the `objects` namespace finds an object's file: composer-supplied
+    /// wiring, a package's table of named objects or the plain directory at
+    /// `NamespaceRoots.objects`.
+    type Params = ObjectSource;
+
     /// ADR-0041 + ADR-0074 Phase 5 chassis-owned mailbox.
     const NAMESPACE: &'static str = "aether.fs";
 
-    /// Build the adapter registry from the resolved roots. Adapter
-    /// init failure surfaces as `BootError::Other(io::Error)` so
-    /// chassis mains propagate via `?` to abort startup (ADR-0063
-    /// fail-fast).
-    fn init(roots: NamespaceRoots, _ctx: &mut NativeInitCtx<'_>) -> Result<FsCapabilityState, BootError> {
-        let (registry, roots) = build_registry(roots).map_err(|e| BootError::Other(Box::new(e)))?;
+    /// Build the adapter registry from the resolved roots and the object
+    /// source. An unusable root, or a package's named object that is absent
+    /// or the wrong length, surfaces as `BootError::Other` so chassis mains
+    /// propagate via `?` to abort startup (ADR-0063 fail-fast).
+    fn init(
+        roots: NamespaceRoots,
+        objects: ObjectSource,
+        _ctx: &mut NativeInitCtx<'_>,
+    ) -> Result<FsCapabilityState, BootError> {
+        let object_source = match &objects {
+            ObjectSource::Directory => format!("directory {}", roots.objects.display()),
+            ObjectSource::Package { root, named } => format!("{} named in package {}", named.len(), root.display()),
+        };
+        let (registry, roots) = build_registry(roots, objects).map_err(|e| BootError::Other(Box::new(e)))?;
         let transforms = TransformRegistry::from_inventory();
         tracing::info!(
             target: "aether_substrate::fs",
             save = %roots.save.display(),
             assets = %roots.assets.display(),
             config = %roots.config.display(),
+            objects = %object_source,
             transforms = transforms.len(),
             "adapters registered",
         );
@@ -342,7 +356,7 @@ mod tests {
     use super::super::FsCapability;
     use super::super::{
         Access, Copy, CopyResult, FileAdapter, FsError, FsFetch, FsFetchError, FsFetchResult, FsFoldError,
-        LocalFileAdapter, NamespaceAddr, NamespaceRoots, Read, ReadResult, Write, WriteResult,
+        LocalFileAdapter, NamespaceAddr, NamespaceRoots, ObjectSource, Read, ReadResult, Write, WriteResult,
     };
     use aether_actor::{Addressable, HandlesKind};
     use aether_data::{Kind, SessionToken, Uuid, transform};
@@ -363,7 +377,12 @@ mod tests {
     }
 
     fn roots_under(root: &Path) -> NamespaceRoots {
-        let r = NamespaceRoots { save: root.join("save"), assets: root.join("assets"), config: root.join("config") };
+        let r = NamespaceRoots {
+            save: root.join("save"),
+            assets: root.join("assets"),
+            config: root.join("config"),
+            objects: root.join("objects"),
+        };
         fs::create_dir_all(&r.save).expect("test setup: save root creates");
         fs::create_dir_all(&r.assets).expect("test setup: assets root creates");
         fs::create_dir_all(&r.config).expect("test setup: config root creates");
@@ -520,7 +539,7 @@ mod tests {
         let root = scratch_root("boots");
         let (registry, mailer) = fresh_substrate();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor_configured::<FsCapability>((), roots_under(&root))
+            .with_actor_configured::<FsCapability>(ObjectSource::Directory, roots_under(&root))
             .build_passive()
             .expect("io capability boots");
         assert!(registry.lookup(FsCapability::NAMESPACE).is_some(), "io mailbox registered");
@@ -537,13 +556,18 @@ mod tests {
         let root = scratch_root("init-fails");
         let save_path = root.join("save_is_actually_a_file");
         fs::write(&save_path, b"not a dir").expect("test setup: write save_path as a regular file");
-        let roots = NamespaceRoots { save: save_path, assets: root.join("assets"), config: root.join("config") };
+        let roots = NamespaceRoots {
+            save: save_path,
+            assets: root.join("assets"),
+            config: root.join("config"),
+            objects: root.join("objects"),
+        };
         fs::create_dir_all(&roots.assets).expect("test setup: assets root creates");
         fs::create_dir_all(&roots.config).expect("test setup: config root creates");
 
         let (registry, mailer) = fresh_substrate();
         let result = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor_configured::<FsCapability>((), roots)
+            .with_actor_configured::<FsCapability>(ObjectSource::Directory, roots)
             .build_passive();
         assert!(result.is_err(), "save root being a file must fail cap init");
         cleanup(&root);
@@ -568,7 +592,7 @@ mod tests {
             let roots = roots_under(&root);
             let (registry, mailer, rx) = fresh_substrate_and_rx();
             let chassis = boot_bare_test_chassis(&registry, &mailer);
-            let driver = PumpedDriver::boot(chassis, roots.clone(), ());
+            let driver = PumpedDriver::boot(chassis, roots.clone(), ObjectSource::Directory);
 
             Self { root, roots, rx, driver }
         }

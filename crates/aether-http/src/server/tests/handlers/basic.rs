@@ -4,7 +4,7 @@
 //! `502` path), and one that holds its reply and forwards to a peer that never
 //! answers (the request-timeout `504` path).
 
-use aether_actor::{Unchecked, actor};
+use aether_actor::{Anyone, Unchecked, actor};
 use aether_substrate::actor::native::{Erased, Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
 use aether_substrate::chassis::error::BootError;
 
@@ -32,8 +32,9 @@ impl NativeActor for EchoHttpHandler {
         Ok(EchoHttpHandlerState)
     }
 
-    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         bind_catch_all(ctx);
+        Ok(())
     }
 
     #[handler::request]
@@ -68,8 +69,9 @@ impl NativeActor for FixedBodyHttpHandler {
         Ok(FixedBodyHttpHandlerState)
     }
 
-    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         bind_catch_all(ctx);
+        Ok(())
     }
 
     #[handler::request]
@@ -103,8 +105,9 @@ impl NativeActor for ClosingHttpHandler {
         Ok(ClosingHttpHandlerState { parked: None })
     }
 
-    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         bind_catch_all(ctx);
+        Ok(())
     }
 
     #[handler::request]
@@ -150,7 +153,7 @@ impl NativeActor for SilentPeer {
     // Unchecked and never answered: the forwarding handler's held reply keeps the
     // request's chain open, so the server answers `504` at its timeout.
     #[handler::unchecked(reason = "test: holds the reply unanswered so the server times out")]
-    fn on_ask(_state: &mut SilentPeerState, _ctx: &mut NativeCtx<'_, Erased, Unchecked>, _ask: Ask) {}
+    fn on_ask(_state: &mut SilentPeerState, _ctx: &mut NativeCtx<'_, Erased, Anyone, Unchecked>, _ask: Ask) {}
 }
 
 /// Holds the request's reply and forwards an [`Ask`] to [`SilentPeer`] with
@@ -173,8 +176,9 @@ impl NativeActor for HeldForwardHttpHandler {
         Ok(HeldForwardHttpHandlerState)
     }
 
-    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         bind_catch_all(ctx);
+        Ok(())
     }
 
     #[handler::request]

@@ -320,6 +320,28 @@ impl<C: Chassis> PassiveChassis<C> {
         self.booted.spawner.registry().kind_label(kind)
     }
 
+    /// The reason of the first fatal abort this chassis took, or `None`
+    /// while it is healthy (issue 4193). An abort unwinds the thread it
+    /// fired on, usually a pool worker, so a reply that thread owed never
+    /// arrives; a driver that waits on one reads this to end the wait with
+    /// the abort's reason.
+    ///
+    /// Consumer: `SubstrateHarness`'s reply pump.
+    #[must_use]
+    pub fn fatal_abort_reason(&self) -> Option<String> {
+        self.booted.abort_record().reason()
+    }
+
+    /// A receiver that never yields a value and disconnects on this
+    /// chassis's first fatal abort: the wake a driver selects on beside its
+    /// own, so an abort ends its wait without a budget running out.
+    ///
+    /// Consumer: `SubstrateHarness`'s reply pump.
+    #[must_use]
+    pub fn fatal_abort_tripwire(&self) -> Receiver<()> {
+        self.booted.abort_record().tripwire()
+    }
+
     /// Every root the settlement table still counts as pending, as
     /// `(root, in_flight, held_open)` (ADR-0080 §6) — the dump a wedged
     /// settlement gate reports.
@@ -364,7 +386,7 @@ impl<C: Chassis> PassiveChassis<C> {
     /// [`install_pump_wake`](crate::chassis::settlement::install_pump_wake)
     /// for a wait that only drains, as the test-support
     /// `testing::PumpedDriver` does, or a hook that also turns the embedder's
-    /// own loop, as the desktop driver and the harness chassis binary install.
+    /// own loop, as the desktop driver installs.
     /// A slot with no wake drains only when its owner calls
     /// [`PumpedSlot::drain_available`], so no wait on it can be woken by mail.
     ///

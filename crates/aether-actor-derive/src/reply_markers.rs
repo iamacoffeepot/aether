@@ -127,22 +127,53 @@ pub fn refusal_answer(class: HandlerClass, reply: &HandlerReply, kind_ty: &Type)
     })
 }
 
+/// The type a handler's `HandlesKind<K>` marker and `Contract<K>` row name as
+/// `Sender` (ADR-0231 §11): the protocol `P` its ctx names as its sender, or
+/// `Anyone` for a handler whose ctx names none. Every emitter reads
+/// this one mapping, so the marker the typed sends bound against and the row
+/// a protocol's coverage reads cannot name different requirements.
+pub fn sender_requirement_ty(sender: Option<&Type>) -> TokenStream2 {
+    sender.map_or_else(|| quote! { ::aether_actor::Anyone }, |protocol| quote! { #protocol })
+}
+
+/// Emit one handler's `HandlesKind<K>` marker onto the site's impl header,
+/// gated by the site's `#[cfg]`s, naming what the handler requires of its
+/// sender.
+pub fn handles_kind_impl(kind_ty: &Type, sender: Option<&Type>, site: &ReplyMarkerSite<'_>) -> TokenStream2 {
+    let ReplyMarkerSite { impl_generics, self_ty, where_clause, cfgs } = site;
+    let sender_ty = sender_requirement_ty(sender);
+    quote! {
+        #(#cfgs)*
+        impl #impl_generics ::aether_actor::HandlesKind<#kind_ty> for #self_ty #where_clause {
+            type Sender = #sender_ty;
+        }
+    }
+}
+
+/// One handler's row as its `Contract<K>` impl states it: the reply class and
+/// return type its reply is read from, its kind, and what it requires of its
+/// sender.
+#[derive(Clone, Copy)]
+pub struct ContractRow<'a> {
+    pub class: HandlerClass,
+    pub reply: &'a HandlerReply,
+    pub kind_ty: &'a Type,
+    pub sender: Option<&'a Type>,
+}
+
 /// Emit one handler's `Contract<K>` row onto the site's impl header, gated by
 /// the site's `#[cfg]`s, naming `index` as the row's position in the actor's
 /// `Contracts::Rows` list (ADR-0231 §10).
-pub fn contract_row_impl(
-    class: HandlerClass,
-    reply: &HandlerReply,
-    kind_ty: &Type,
-    index: &TokenStream2,
-    site: &ReplyMarkerSite<'_>,
-) -> TokenStream2 {
+pub fn contract_row_impl(row: ContractRow<'_>, index: &TokenStream2, site: &ReplyMarkerSite<'_>) -> TokenStream2 {
     let ReplyMarkerSite { impl_generics, self_ty, where_clause, cfgs } = site;
+    let ContractRow { class, reply, kind_ty, sender } = row;
     let reply_ty = contract_reply_ty(class, reply);
+    let sender_ty = sender_requirement_ty(sender);
     quote! {
         #(#cfgs)*
         impl #impl_generics ::aether_actor::Contract<#kind_ty> for #self_ty #where_clause {
             type Reply = #reply_ty;
+            type Sender = #sender_ty;
             type Index = #index;
         }
     }
@@ -373,4 +404,19 @@ pub struct DeclaredLists<'a> {
     pub depends: &'a [syn::TypePath],
     pub spawns: &'a [syn::TypePath],
     pub parents: &'a [syn::TypePath],
+}
+
+/// Emit an actor type's `Watchable` impl (ADR-0079 §8), beside its
+/// `Addressable` impl on both transports: an actor is watched through an
+/// `ActorRef` to it.
+pub fn watchable_actor_impl(
+    impl_generics: &TokenStream2,
+    self_ty: &TokenStream2,
+    where_clause: &TokenStream2,
+) -> TokenStream2 {
+    quote! {
+        impl #impl_generics ::aether_actor::Watchable for #self_ty #where_clause {
+            type Ref = ::aether_actor::ActorRef<Self>;
+        }
+    }
 }

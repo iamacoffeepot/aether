@@ -15,11 +15,11 @@ help: the trait `HandlesKind<Unhandled>` is not implemented for `Peer`
    | ^^^^^^^^
    = help: for that trait implementation, expected `Handled`, found `Unhandled`
    = note: required for `Unhandled` to implement `SendableTo<Peer>`
-note: required by a bound in `aether_actor::wasm::ctx::send::<impl WasmCtx<'_, A, M>>::send`
+note: required by a bound in `aether_actor::wasm::ctx::send::<impl WasmCtx<'_, A, S, M>>::send`
   --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/send.rs
    |
-   |     pub fn send<R: Singleton + CallerAddressable>(&mut self, payload: &impl SendableTo<R>)
-   |                                                                             ^^^^^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::send::<impl WasmCtx<'_, A, M>>::send`
+   |     pub fn send<R: Singleton + CallerAddressable>(&mut self, payload: &(impl SendableTo<R> + SentBy<A, R>))
+   |                                                                              ^^^^^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::send::<impl WasmCtx<'_, A, S, M>>::send`
    = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: `Sender` does not declare a dependency on `Stranger`
@@ -36,12 +36,12 @@ help: the trait `DependsOn<Stranger>` is not implemented for `Sender`
 60 | #[actor(depends(Peer))]
    | ^^^^^^^^^^^^^^^^^^^^^^^
    = help: for that trait implementation, expected `Peer`, found `Stranger`
-note: required by a bound in `aether_actor::wasm::ctx::send::<impl WasmCtx<'_, A, M>>::send`
+note: required by a bound in `aether_actor::wasm::ctx::send::<impl WasmCtx<'_, A, S, M>>::send`
   --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/send.rs
    |
-   |     pub fn send<R: Singleton + CallerAddressable>(&mut self, payload: &impl SendableTo<R>)
+   |     pub fn send<R: Singleton + CallerAddressable>(&mut self, payload: &(impl SendableTo<R> + SentBy<A, R>))
    |            ---- required by a bound in this associated function
    |     where
    |         A: DependsOn<R>,
-   |            ^^^^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::send::<impl WasmCtx<'_, A, M>>::send`
+   |            ^^^^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::send::<impl WasmCtx<'_, A, S, M>>::send`
    = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)

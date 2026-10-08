@@ -54,7 +54,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, Weak};
 use std::thread;
 
-use aether_actor::{ActorRef, HandlesKind, ReplyMode, Single};
+use aether_actor::{ActorRef, Anyone, HandlesKind, ReplyMode, Single};
 use aether_data::name_inventory::EngineOnlyKind;
 use aether_data::{ActorMail, Kind, KindId, MailId, RequestId, wire};
 
@@ -130,7 +130,7 @@ impl<R: ActorMail> Pending<R> {
     }
 
     /// Accept the receipt as returned from its handler. Reachable only from
-    /// `NativeCtx::<A, Unchecked>::__accept_pending`, which the `#[actor]` and
+    /// `NativeCtx::<A, S, Unchecked>::__accept_pending`, which the `#[actor]` and
     /// `#[handler_set]` native dispatch arms call on the value a
     /// `-> Pending<R>` handler returns; a single handler never holds that
     /// view, so it cannot disarm its own receipt and declare a false row.
@@ -510,13 +510,13 @@ impl DeferredReply {
     /// Its consumer is the fleet proxy, which relays each reply event a
     /// remote engine streams for a forwarded call before the call's
     /// terminal settles the debt.
-    pub fn reply_envelope<M: ReplyMode, A>(&self, ctx: &mut NativeCtx<'_, A, M>, kind: KindId, bytes: &[u8]) {
+    pub fn reply_envelope<M: ReplyMode, A, S>(&self, ctx: &mut NativeCtx<'_, A, S, M>, kind: KindId, bytes: &[u8]) {
         ctx.reply_envelope_to_target(self.reply_to, kind, bytes, self.hold.as_ref().map(SettlementHold::root), None);
     }
 
     /// Send the terminal reply through the original target and then release
     /// the continuously-held settlement root.
-    pub fn reply<M, R, A>(mut self, ctx: &mut NativeCtx<'_, A, M>, reply: &R)
+    pub fn reply<M, R, A, S>(mut self, ctx: &mut NativeCtx<'_, A, S, M>, reply: &R)
     where
         M: ReplyMode,
         R: ActorMail,
@@ -672,7 +672,7 @@ impl<O, C> TaskDone<O, C> {
     /// # Panics
     /// Panics on a staged task's completion, which owes no reply (ADR-0243
     /// §9).
-    pub fn resolve<A>(mut self, ctx: &mut NativeCtx<'_, A, Single>)
+    pub fn resolve<A>(mut self, ctx: &mut NativeCtx<'_, A, Anyone, Single>)
     where
         O: ActorMail,
     {
@@ -688,7 +688,7 @@ impl<O, C> TaskDone<O, C> {
     /// # Panics
     /// Panics on a staged task's completion, which owes no reply (ADR-0243
     /// §9).
-    pub fn resolve_with<R, F, A>(mut self, ctx: &mut NativeCtx<'_, A, Single>, f: F)
+    pub fn resolve_with<R, F, A>(mut self, ctx: &mut NativeCtx<'_, A, Anyone, Single>, f: F)
     where
         R: ActorMail,
         F: FnOnce(&O, &C) -> R,
@@ -711,7 +711,7 @@ impl<O, C> TaskDone<O, C> {
     /// # Panics
     /// Panics on a staged task's completion, which owes no reply (ADR-0243
     /// §9).
-    pub fn resolve_value<R, A>(mut self, ctx: &mut NativeCtx<'_, A, Single>, reply: &R)
+    pub fn resolve_value<R, A>(mut self, ctx: &mut NativeCtx<'_, A, Anyone, Single>, reply: &R)
     where
         R: ActorMail,
     {
@@ -737,7 +737,7 @@ impl<O, C> TaskDone<O, C> {
     /// # Panics
     /// Panics on a staged task's completion, which owes no reply to hand
     /// off (ADR-0243 §9).
-    pub fn hand_off<R, K, A, M>(mut self, ctx: &mut NativeCtx<'_, A, M>, target: &ActorRef<R>, payload: &K)
+    pub fn hand_off<R, K, A, S, M>(mut self, ctx: &mut NativeCtx<'_, A, S, M>, target: &ActorRef<R>, payload: &K)
     where
         R: HandlesKind<K>,
         K: ActorMail,
@@ -766,7 +766,7 @@ impl<O, C> TaskDone<O, C> {
     /// # Panics
     /// Panics on a staged task's completion, which owes no reply (ADR-0243
     /// §9).
-    pub fn resolve_err<E, A>(mut self, ctx: &mut NativeCtx<'_, A, Single>, err: &E)
+    pub fn resolve_err<E, A>(mut self, ctx: &mut NativeCtx<'_, A, Anyone, Single>, err: &E)
     where
         E: ActorMail,
     {
@@ -1426,7 +1426,7 @@ mod tests {
         }
 
         #[handler::unchecked(reason = "test: buffers the reply target past the handler")]
-        fn on_accept(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, _accept: Accept) {
+        fn on_accept(&mut self, ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, _accept: Accept) {
             self.buffered = Some((ctx.acquire_settlement_hold(), ctx.reply_target()));
         }
 
@@ -1511,7 +1511,7 @@ mod tests {
         }
 
         #[handler::unchecked(reason = "test: dispatches blocking work without replying")]
-        fn on_count(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, _count: Count) {
+        fn on_count(&mut self, ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, _count: Count) {
             let _id = ctx.dispatch_blocking_with(self.offset, move || 7u64);
         }
 
@@ -1897,17 +1897,17 @@ mod tests {
         }
 
         #[handler::unchecked(reason = "test: relays the request and replies from the relay")]
-        fn on_relay(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, relay: Relay) {
+        fn on_relay(&mut self, ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, relay: Relay) {
             let root = ctx.in_flight_root().expect("the relay runs on a tracked root");
             let owed = ctx.defer_reply_to(ctx.reply_target());
             if relay.engine_only {
                 owed.reply_envelope(ctx, MonitorNotice::ID, &MonitorNotice.encode_into_bytes());
             } else {
-                owed.reply_envelope(ctx, Tick::ID, &Tick { delta_micros: 1 }.encode_into_bytes());
-                owed.reply_envelope(ctx, Tick::ID, &Tick { delta_micros: 2 }.encode_into_bytes());
+                owed.reply_envelope(ctx, Tick::ID, &Tick { delta_micros: 1, elapsed_micros: 1 }.encode_into_bytes());
+                owed.reply_envelope(ctx, Tick::ID, &Tick { delta_micros: 2, elapsed_micros: 2 }.encode_into_bytes());
             }
             self.held_after_forwards = Some(self.counter.held_open(root));
-            owed.reply(ctx, &Tick { delta_micros: 3 });
+            owed.reply(ctx, &Tick { delta_micros: 3, elapsed_micros: 3 });
         }
     }
 
@@ -1933,7 +1933,7 @@ mod tests {
     }
 
     fn tick(delta_micros: u32) -> (String, Vec<u8>) {
-        (Tick::NAME.to_owned(), Tick { delta_micros }.encode_into_bytes())
+        (Tick::NAME.to_owned(), Tick { delta_micros, elapsed_micros: u64::from(delta_micros) }.encode_into_bytes())
     }
 
     /// `reply_envelope` forwards each already-encoded reply to the debt's

@@ -8,7 +8,7 @@
 //! [`crate::model::ctx`]; these structs are concrete impls that route
 //! outbound calls through the per-concern bridge functions in
 //! `crate::wasm::bridge::mail` and `crate::wasm::bridge::persist`.
-//! Ctxs hold per-stage state only (the asset catalog at init; reply target
+//! Ctxs hold per-stage state only (reply target
 //! at receive), and dispatch goes through the bridge functions directly.
 //!
 //! The submodules follow the lifecycle a component author meets in order —
@@ -20,7 +20,9 @@
 //! single handler holds past its return), `parent` (the typed parent door
 //! a declared `child_of(..)` list opens), `child` (typed child and sibling
 //! lookup) and `spawn` (detached and inline child creation), `address` (proving an actor path that arrived
-//! in config or mail), and `cast` (typing a held reference as a protocol).
+//! in config or mail), `cast` (typing a held reference as a protocol), and
+//! `watch` (watching an actor a reference is held to, and the departure event
+//! its handler takes).
 
 mod address;
 mod cast;
@@ -31,9 +33,11 @@ mod init;
 mod parent;
 mod receive;
 mod send;
+mod sender;
 mod sends;
 mod spawn;
 mod subscribe;
+mod watch;
 mod wire;
 
 #[cfg(test)]
@@ -48,6 +52,7 @@ pub use parent::{HasParent, InlineParent};
 pub use receive::{NO_INBOUND_SOURCE, WasmCtx};
 pub use sends::Sends;
 pub use spawn::{ActorTypeTag, SpawnError};
+pub use watch::Departed;
 pub use wire::WireCtx;
 
 pub(crate) use drop::CapturedState;

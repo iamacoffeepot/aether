@@ -3,10 +3,11 @@
 //!
 //! Each concern lives in a sibling: [`route`] the record itself,
 //! [`resolve`] the lookup walk, [`alias`] the inline-child addresses,
-//! [`birth`] the reservation a `Starting` route stands on, [`kinds`] the
-//! kind table, [`register`] the public claim surface, [`apply`] and
-//! [`staged`] the effect fold, [`commands`] the owner drain, and
-//! [`publish`] / [`inventory`] what a write publishes outward.
+//! [`birth`] the reservation a `Starting` route stands on,
+//! [`lineage`] where an actor stands in the tree by creation order,
+//! [`kinds`] the kind table, [`register`] the public claim surface,
+//! [`apply`] and [`staged`] the effect fold, [`commands`] the owner drain,
+//! and [`publish`] / [`inventory`] what a write publishes outward.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -14,6 +15,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use aether_actor::Addressable;
 use rustc_hash::FxHashMap;
 
+use crate::actor::registry::ActorRegistry;
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::module::Module;
 use crate::mail::registry::address::{AddressIndex, AddressTable};
@@ -39,6 +41,7 @@ mod commands;
 mod dependency;
 mod inventory;
 mod kinds;
+mod lineage;
 mod proven;
 mod publish;
 mod register;
@@ -47,6 +50,7 @@ mod route;
 mod staged;
 
 pub use birth::{CapturedDisposition, RouteContinuation};
+pub use lineage::LineageOrder;
 pub use proven::{AdoptRefused, ChildRefused, ResolveLiveError};
 pub use resolve::RouteResolution;
 pub use route::RouteEndpoint;
@@ -144,6 +148,12 @@ pub struct Registry {
     addresses: View<AddressTable>,
     subscribers: Mutex<Vec<Weak<ChangeSubscriber>>>,
     owner: OnceLock<RegistryOwnerHandle>,
+    /// The actor-lifecycle table: slots, tombstones, and the monitor
+    /// indices (ADR-0079). It lives here so that everything holding the
+    /// routes holds it too. A binding reaches it through its mailer, with
+    /// or without a spawner, so a binding built for a test registers its
+    /// monitors in the table the chassis beside it closes against.
+    lifecycle: Arc<ActorRegistry>,
 }
 
 struct Inner {
@@ -155,6 +165,10 @@ struct Inner {
     mailboxes: FxHashMap<MailboxId, RouteRecord>,
     pending_births: FxHashMap<MailboxId, PendingBirth>,
     next_activation_token: u64,
+    /// The last birth serial drawn (ADR-0248 §5). A batch stages its draws
+    /// and writes the counter back only when it commits, as it does
+    /// `next_activation_token`, so a refused batch draws nothing.
+    next_birth_serial: u64,
     /// Sparse, keyed on the `kind_id_from_parts(name, schema)` hash
     /// (ADR-0030 Phase 2). Every descriptor registered with a given
     /// (name, schema) maps to the same id everywhere it's ever
@@ -170,8 +184,9 @@ struct Inner {
     /// Which code implements each published namespace (ADR-0241 §3): every
     /// native namespace the binary links from construction, and each module
     /// the owner's publish arm admitted. Module publications are written
-    /// only by that arm's commit; a native namespace's hold is written by
-    /// each native birth ([`Registry::hold_native`]).
+    /// only by that arm's commit, and so is the hold of an owner-applied
+    /// native birth; [`Registry::hold_native`] is the direct write the boot
+    /// paths take.
     publications: PublicationTable,
     route_publisher: DoubleBuffer<MailboxId, RouteRecord>,
     kind_publisher: ViewPublisher<KindTable>,
@@ -203,6 +218,7 @@ impl Registry {
                 mailboxes: FxHashMap::default(),
                 pending_births: FxHashMap::default(),
                 next_activation_token: 0,
+                next_birth_serial: 0,
                 kinds: FxHashMap::default(),
                 name_index: HashMap::default(),
                 publications,
@@ -219,7 +235,15 @@ impl Registry {
             addresses,
             subscribers: Mutex::new(Vec::new()),
             owner: OnceLock::new(),
+            lifecycle: Arc::new(ActorRegistry::new()),
         }
+    }
+
+    /// The actor-lifecycle table this registry owns: the one table every
+    /// spawner, slot, and binding over these routes closes and monitors
+    /// against.
+    pub(crate) fn actor_registry(&self) -> &Arc<ActorRegistry> {
+        &self.lifecycle
     }
 
     /// Number of registered mailbox entries (live + `Dropped`).
@@ -259,8 +283,8 @@ impl Registry {
     /// Hold `A`'s namespace for `A` in the publication table (ADR-0241 §3):
     /// admitted when the namespace is unheld or already held by `A`, refused
     /// when another type sharing it was born first. One read-modify under the
-    /// `Inner` lock. The prepared-spawn arm the owner applies holds through
-    /// the same table under the lock it already holds.
+    /// `Inner` lock. The prepared-spawn arm the owner applies stages its hold
+    /// in the batch's publication table, installed when the batch commits.
     pub(crate) fn hold_native<A: Addressable + 'static>(&self) -> Result<(), NativeHoldRefusal> {
         self.inner
             .lock()

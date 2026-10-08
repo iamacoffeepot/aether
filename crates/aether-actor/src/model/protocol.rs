@@ -7,7 +7,7 @@
 //! manifest's [`ReplyContract`] vocabulary, [`CoversRows`] decides whether a
 //! target has every row, [`CoveredBy`] is the protocol-side name of that
 //! answer, and [`RowAt`] finds a kind's row for a send through a
-//! [`ProtocolRef`](crate::ProtocolRef). A hand-written [`Protocol`] impl only
+//! [`ProtocolRef`]. A hand-written [`Protocol`] impl only
 //! declares rows, so no impl can state a list, a coverage claim, or a sendable
 //! kind that disagrees with them.
 //!
@@ -35,9 +35,10 @@
 
 use core::marker::PhantomData;
 
-use aether_data::{ActorMail, Kind, KindId, ReplyContract};
+use aether_data::{ActorMail, Kind, KindId, MailboxId, ReplyContract};
 
 use super::contract::{Contract, ReplyShape, Silent, Undeclared};
+use crate::reference::{ErasedActorRef, ProtocolRef};
 
 /// One protocol row: kind `K`, answered with reply shape `O`: a reply kind,
 /// [`Silent`], or [`Undeclared`].
@@ -91,6 +92,11 @@ pub trait RowSet: rows_sealed::Sealed {
     /// [`Contracts::CONTRACTS`](crate::Contracts::CONTRACTS), so the two lists
     /// compare directly.
     const CONTRACTS: &'static [(KindId, ReplyContract)];
+
+    /// Each row's kind name, in tuple order beside [`CONTRACTS`](Self::CONTRACTS):
+    /// what a refused sender's log line and answer name the row it lacks by
+    /// (ADR-0231 §11).
+    const KIND_NAMES: &'static [&'static str];
 }
 
 mod covers_sealed {
@@ -112,7 +118,7 @@ mod row_at_sealed {
 
 /// The zero-sized index of a row in a protocol's [`Rows`](Protocol::Rows)
 /// tuple: `At<0>` is the first row. The compiler infers it at a send through
-/// a [`ProtocolRef`](crate::ProtocolRef) and no one writes it.
+/// a [`ProtocolRef`] and no one writes it.
 pub struct At<const N: usize>;
 
 /// `Rows: RowAt<K, I>` holds when the row tuple `Rows` has a row for the kind
@@ -120,7 +126,7 @@ pub struct At<const N: usize>;
 /// Sealed, and implemented once per tuple arity and position as
 /// `RowAt<K_j, At<j>, Reply = O_j>`.
 ///
-/// A send through a [`ProtocolRef<P>`](crate::ProtocolRef) is bounded
+/// A send through a [`ProtocolRef<P>`] is bounded
 /// `P::Rows: RowAt<K, I>`, so it compiles only for a kind `P` lists, and the
 /// compiler infers `I`. A protocol lists each kind once (`#[protocol]` refuses
 /// a duplicate), so at most one position matches and the index is never
@@ -170,20 +176,101 @@ macro_rules! row_tuples {
         impl<$($kind: Kind, $reply: RowReply),+> RowSet for ($(Row<$kind, $reply>,)+) {
             const CONTRACTS: &'static [(KindId, ReplyContract)] =
                 &[$((<$kind as Kind>::ID, <$reply as ReplyShape>::CONTRACT)),+];
+            const KIND_NAMES: &'static [&'static str] = &[$(<$kind as Kind>::NAME),+];
         }
 
         impl<T, $($kind: Kind, $reply: RowReply),+> covers_sealed::Sealed<($(Row<$kind, $reply>,)+)> for T
         where
-            $(T: Contract<$kind, Reply = $reply>),+
+            $(T: Contract<$kind, Reply = $reply, Sender = Anyone>),+
         {
         }
 
         impl<T, $($kind: Kind, $reply: RowReply),+> CoversRows<($(Row<$kind, $reply>,)+)> for T
         where
-            $(T: Contract<$kind, Reply = $reply>),+
+            $(T: Contract<$kind, Reply = $reply, Sender = Anyone>),+
         {
         }
     };
+}
+
+impl rows_sealed::Sealed for () {}
+
+// The empty row set, which only [`Anyone`] names: a protocol written with
+// `#[protocol]` lists at least one row.
+impl RowSet for () {
+    const CONTRACTS: &'static [(KindId, ReplyContract)] = &[];
+    const KIND_NAMES: &'static [&'static str] = &[];
+}
+
+impl<T: ?Sized> covers_sealed::Sealed<()> for T {}
+
+impl<T: ?Sized> CoversRows<()> for T {}
+
+/// The sender requirement of a handler that asks nothing of its sender
+/// (ADR-0231 §11): a protocol with no rows, which every type covers, the
+/// erased ctx's [`Erased`](crate::Erased) included.
+///
+/// It is the sender of every ctx that names none, the type default of the
+/// ctx's second type argument, and so
+/// [`HandlesKind::Sender`](super::HandlesKind::Sender) for every handler
+/// whose ctx states no sender, which `#[actor]` writes, and what a
+/// hand-written `HandlesKind` impl names. It is never a cast target and never
+/// a reference's protocol.
+pub struct Anyone;
+
+impl Protocol for Anyone {
+    type Rows = ();
+}
+
+mod sender_sealed {
+    /// Private supertrait sealing [`super::SenderRequirement`] to
+    /// [`super::Anyone`] and the cast targets.
+    pub trait Sealed {}
+
+    impl Sealed for super::Anyone {}
+    impl<P: super::CastTarget> Sealed for P {}
+}
+
+/// What a ctx's sender type argument is (ADR-0231 §11): [`Anyone`], or the
+/// protocol a handler requires its sender to cover. It says what
+/// `ctx.sender()` hands out on a ctx typed by it. Sealed.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a ctx's sender",
+    label = "not `Anyone` and not a protocol `ctx.cast` can prove",
+    note = "the ctx's type arguments are receiver, sender, mode: `NativeCtx<'_, Self, Anyone, Unchecked>` \
+            (ADR-0231 §7, §11)"
+)]
+pub trait SenderRequirement: sender_sealed::Sealed {
+    /// What `ctx.sender()` returns on a ctx whose sender is `Self`.
+    type Reference;
+
+    /// The sender of a dispatch stamped `position`. `standing` is the read
+    /// that says a route record stands at a position; only [`Anyone`] runs
+    /// it. Hidden plumbing of the two ctxs' `sender()`.
+    #[doc(hidden)]
+    fn __reference(position: Option<MailboxId>, standing: impl FnOnce(MailboxId) -> bool) -> Self::Reference;
+}
+
+impl SenderRequirement for Anyone {
+    type Reference = Option<ErasedActorRef>;
+
+    fn __reference(position: Option<MailboxId>, standing: impl FnOnce(MailboxId) -> bool) -> Option<ErasedActorRef> {
+        position.filter(|&position| standing(position)).map(ErasedActorRef::new)
+    }
+}
+
+impl<P: CastTarget> SenderRequirement for P {
+    type Reference = ProtocolRef<P>;
+
+    /// # Panics
+    ///
+    /// When the dispatch carries no stamp, which no ctx typed by a protocol
+    /// does: each ctx's private `prove_sender` is the only code that types a
+    /// ctx by `P`, and it does so only after casting that ctx's own stamp,
+    /// which is fixed at construction.
+    fn __reference(position: Option<MailboxId>, _standing: impl FnOnce(MailboxId) -> bool) -> ProtocolRef<P> {
+        ProtocolRef::new(position.expect("a ctx typed by a protocol is produced only by the arm that cast this stamp"))
+    }
 }
 
 row_tuples!(
@@ -241,7 +328,7 @@ pub(super) mod cast_sealed {
 /// guard cast), on a native ctx and on a guest ctx alike. Sealed.
 ///
 /// The cast reads the contract the reference's `Live` route published and
-/// mints a [`ProtocolRef<Self>`](crate::ProtocolRef) only when
+/// mints a [`ProtocolRef<Self>`] only when
 /// [`admits`](CastTarget::admits) accepts those rows. The rule lives here,
 /// beside the protocol, and the seal keeps any other crate from naming a
 /// protocol whose rule admits rows of its own choosing.

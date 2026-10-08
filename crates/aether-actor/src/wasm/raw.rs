@@ -70,6 +70,11 @@ unsafe extern "C" {
     /// Returns `0` when the dispatch is not a reply envelope.
     #[link_name = "reply_correlation_p32"]
     pub fn reply_correlation() -> u64;
+    /// Issue 7627: read the engine's actor clock, in nanoseconds since its
+    /// anchor. Within one engine a later read is never less than an earlier
+    /// one. The same clock answers a native actor's `NativeCtx::now`.
+    #[link_name = "now_nanos_p32"]
+    pub fn now_nanos() -> u64;
     /// Issue 525 Phase 4b / issue 531: stage a `ActorInitError` message
     /// for the substrate to surface in `LoadResult::Err` after the
     /// guest's `init` returns non-zero. The `export!` macro is the
@@ -124,33 +129,22 @@ unsafe extern "C" {
     /// host-side, nothing staged).
     #[link_name = "despawn_inline_child_p32"]
     pub fn despawn_inline_child(alias: u64) -> u32;
-    /// ADR-0163 §3 (#3984): pull one asset's bytes through the load window.
-    /// `(name_ptr, name_len)` is the asset name (a UTF-8 slice in guest
-    /// memory), copied out before the call returns. The return is the
-    /// packed `(ptr << 32) | len`: `u64::MAX` means "no such asset in the
-    /// open window" (the SDK maps it to `None`); any other value is a live
-    /// guest buffer of `len` bytes at `ptr` the SDK copies out and frees
-    /// through the guest allocator. A call after the load window closed
-    /// (post-`wire`) traps host-side — payload access is init+wire only.
-    #[link_name = "asset_fetch_p32"]
-    pub fn asset_fetch(name_ptr: u32, name_len: u32) -> u64;
-    /// ADR-0163 §3 (#3984): the component's asset catalog as a wire-encoded
-    /// `Vec<AssetInfo>`, delivered the same way as [`asset_fetch`] — the
-    /// return is the packed `(ptr << 32) | len` of a live guest buffer the
-    /// SDK decodes and frees. An empty catalog is a valid empty sequence.
-    /// Backs `AssetCatalog::assets()`; readable for the instance's life
-    /// (the catalog metadata is retained past the window close).
+    /// ADR-0250: the component's asset catalog as a wire-encoded
+    /// `Vec<AssetInfo>`, delivered into a guest buffer: the return is the
+    /// packed `(ptr << 32) | len` of a live guest buffer the SDK decodes and
+    /// frees. An empty catalog is a valid empty sequence.
+    /// Backs `Assets::assets()`; readable for the instance's life.
     #[link_name = "asset_catalog_p32"]
     pub fn asset_catalog() -> u64;
-    /// ADR-0163 §3: take one asset through the load window as a blob this
-    /// instance holds by hash, with no payload byte entering guest memory.
-    /// `(name_ptr, name_len)` is the asset name, copied out before the call
-    /// returns. On success the host places the asset in this instance's blob
-    /// table with one hold, writes its 32-byte hash at `hash_out_ptr`, and
-    /// returns its length; `blob_drop` gives the hold back. A negative return,
-    /// with nothing held or written, means "no such asset in the open
-    /// window" (the SDK maps it to `None`). The host traps where
-    /// [`asset_fetch`] does, and on a `hash_out_ptr` outside guest memory.
+    /// ADR-0250: take one asset from the instance's own module as a blob
+    /// this instance holds by hash, with no payload byte entering guest
+    /// memory. `(name_ptr, name_len)` is the asset name, copied out before
+    /// the call returns. On success the host places the asset in this
+    /// instance's blob table with one hold, writes its 32-byte hash at
+    /// `hash_out_ptr`, and returns its length; `blob_drop` gives the hold
+    /// back. A negative return, with nothing held or written, means "no such
+    /// asset in the module" (the SDK maps it to `None`). The host traps on
+    /// a `hash_out_ptr` outside guest memory.
     #[link_name = "asset_blob_p32"]
     pub fn asset_blob(name_ptr: u32, name_len: u32, hash_out_ptr: u32) -> i64;
     /// ADR-0230 §3 (#6786): prove the actor path at `(path_ptr, path_len)`, a
@@ -172,6 +166,18 @@ unsafe extern "C" {
     /// grammar; the SDK passes only a typed path's text.
     #[link_name = "live_route_p32"]
     pub fn live_route(path_ptr: u32, path_len: u32) -> u64;
+    /// ADR-0231 §3 (#7501): the rows of the `Live` or `Dropped` route
+    /// standing under exactly the canonical path at `(path_ptr, path_len)`, a
+    /// UTF-8 slice in guest memory copied out before the call returns. The
+    /// return is the packed `(ptr << 32) | len` of a live guest buffer
+    /// holding the wire-encoded answer, a `__PublishedRows`, which the SDK
+    /// decodes and frees as [`asset_catalog`] does. The host traps on an
+    /// out-of-bounds pointer, text that is not UTF-8, and text outside the
+    /// ADR-0166 path grammar; the SDK passes only a typed path's text. Its
+    /// one caller is the wasm32-only guest decode context, so it has no host
+    /// stub.
+    #[link_name = "route_rows_p32"]
+    pub fn route_rows(path_ptr: u32, path_len: u32) -> u64;
     /// ADR-0231 §4: the rows the route at `position` published while it is
     /// `Live`. The return is the packed `(ptr << 32) | len` of a live guest
     /// buffer holding the wire-encoded answer, a `__PublishedRows`, which the
@@ -179,6 +185,37 @@ unsafe extern "C" {
     /// answered; one naming no `Live` route answers no rows.
     #[link_name = "published_rows_p32"]
     pub fn published_rows(position: u64) -> u64;
+    /// ADR-0231 §11: the canonical path of the route record at `position`,
+    /// the position of a reference the guest holds; the guest half of the
+    /// native `NativeCtx::actor_path` read. The return is the packed
+    /// `(ptr << 32) | len` of a live guest buffer holding the wire-encoded
+    /// answer, a `__ActorPath`, which the SDK decodes and frees as
+    /// [`asset_catalog`] does. Any position is answered; one holding no
+    /// route record answers no path.
+    #[link_name = "actor_path_p32"]
+    pub fn actor_path(position: u64) -> u64;
+    /// ADR-0079 §8: watch the actor at `target` for the calling actor `from`,
+    /// through the watched type whose tag is `tag`, and return the
+    /// watch's id. A standing watch of that watcher, target, and watched type
+    /// answers its own id and nothing else changes; otherwise the id is new,
+    /// drawn from this mailbox's send-correlation sequence, and never `0`.
+    /// `from` is checked host-side like a send's; a claim outside this
+    /// component's cluster watches as the component itself. The host traps on
+    /// a `target` that holds no route record and is no alias of this
+    /// component, which no SDK reference names.
+    #[link_name = "watch_p32"]
+    pub fn watch(target: u64, from: u64, tag: u64) -> u64;
+    /// ADR-0079 §8: end the watch `watch` names. Returns `1` when a watch was
+    /// there, and `0`, with nothing changed, for a number that names no watch
+    /// of this mailbox.
+    #[link_name = "unwatch_p32"]
+    pub fn unwatch(watch: u64) -> u32;
+    /// ADR-0079 §8: end the watch `watcher` holds on `target` through the
+    /// watched type whose tag is `tag`, because `target`'s departure
+    /// notice is being dispatched, and return its id. `0` when no such watch
+    /// stands, or `watcher` is not this component or one of its aliases.
+    #[link_name = "watch_ended_p32"]
+    pub fn watch_ended(target: u64, watcher: u64, tag: u64) -> u64;
     /// ADR-0238 decisions 2 and 9: take one hold on the blob whose 32-byte
     /// hash sits at `hash_ptr`, resolved only against this instance's blob
     /// table, and return its length. Negative, with no hold taken, when the
@@ -284,6 +321,21 @@ pub unsafe fn prev_correlation() -> u64 {
     panic!("aether-actor: prev_correlation called outside the FFI guest");
 }
 
+/// Host-side stub for the FFI `aether::now_nanos` import.
+/// Always panics — callers outside the FFI guest are misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
+#[cfg(not(target_family = "wasm"))]
+#[must_use]
+pub unsafe fn now_nanos() -> u64 {
+    panic!("aether-actor: now_nanos called outside the FFI guest");
+}
+
 /// Host-side stub for the FFI `aether::reply_correlation` import.
 /// Always panics — callers outside the FFI guest are misusing the SDK.
 ///
@@ -321,22 +373,7 @@ pub unsafe fn spawn_inline_child(
     panic!("aether-actor: spawn_inline_child called outside the FFI guest");
 }
 
-/// Host-side stub for the FFI `aether::asset_fetch` import (ADR-0163).
-/// Always panics — callers outside the FFI guest are misusing the SDK.
-///
-/// # Safety
-/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
-///
-/// # Panics
-/// Always panics — fail-fast per ADR-0063: the host build of the SDK
-/// has no FFI host to call, so any invocation is a bug.
-#[cfg(not(target_family = "wasm"))]
-#[must_use]
-pub unsafe fn asset_fetch(_name_ptr: u32, _name_len: u32) -> u64 {
-    panic!("aether-actor: asset_fetch called outside the FFI guest");
-}
-
-/// Host-side stub for the FFI `aether::asset_catalog` import (ADR-0163).
+/// Host-side stub for the FFI `aether::asset_catalog` import (ADR-0250).
 /// Always panics — callers outside the FFI guest are misusing the SDK.
 ///
 /// # Safety
@@ -394,4 +431,64 @@ pub unsafe fn live_route(_path_ptr: u32, _path_len: u32) -> u64 {
 #[must_use]
 pub unsafe fn published_rows(_position: u64) -> u64 {
     panic!("aether-actor: published_rows called outside the FFI guest");
+}
+
+/// Host-side stub for the FFI `aether::actor_path` import (ADR-0231 §11).
+/// Always panics — callers outside the FFI guest are misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
+#[cfg(not(target_family = "wasm"))]
+#[must_use]
+pub unsafe fn actor_path(_position: u64) -> u64 {
+    panic!("aether-actor: actor_path called outside the FFI guest");
+}
+
+/// Host-side stub for the FFI `aether::watch` import (ADR-0079 §8).
+///
+/// # Safety
+/// The signature mirrors the FFI import so callers can stay
+/// target-agnostic; on the host there is no host fn to forward to.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
+#[cfg(not(target_family = "wasm"))]
+#[must_use]
+pub unsafe fn watch(_target: u64, _from: u64, _tag: u64) -> u64 {
+    panic!("aether-actor: watch called outside the FFI guest");
+}
+
+/// Host-side stub for the FFI `aether::unwatch` import (ADR-0079 §8).
+///
+/// # Safety
+/// The signature mirrors the FFI import so callers can stay
+/// target-agnostic; on the host there is no host fn to forward to.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
+#[cfg(not(target_family = "wasm"))]
+#[must_use]
+pub unsafe fn unwatch(_watch: u64) -> u32 {
+    panic!("aether-actor: unwatch called outside the FFI guest");
+}
+
+/// Host-side stub for the FFI `aether::watch_ended` import (ADR-0079 §8).
+///
+/// # Safety
+/// The signature mirrors the FFI import so callers can stay
+/// target-agnostic; on the host there is no host fn to forward to.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
+#[cfg(not(target_family = "wasm"))]
+#[must_use]
+pub unsafe fn watch_ended(_target: u64, _watcher: u64, _tag: u64) -> u64 {
+    panic!("aether-actor: watch_ended called outside the FFI guest");
 }

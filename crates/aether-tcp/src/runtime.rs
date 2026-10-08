@@ -33,16 +33,30 @@ use super::{TcpCapability, TcpListenerActor, TcpListenerConfig, TcpSessionActor,
 /// The shared body of `on_bind` and `on_bind_self`: bind the socket on the
 /// dispatcher thread (so a bind failure answers `Err` at once), then stage
 /// the bound listener over the already-proven `consumer`. Its task
-/// completion registers the monitor, commits the supervisor entry, and
-/// answers `held` only after authoritative activation.
-fn bind_listener(
+/// completion registers the monitors, commits the supervisor entry, and
+/// answers `held` only after authoritative activation. It takes a ctx of any
+/// sender `S`, since `on_bind_self` states one and `on_bind` does not.
+fn bind_listener<S>(
     state: &mut TcpCapabilityState,
-    ctx: &mut NativeCtx<'_, TcpCapability>,
+    ctx: &mut NativeCtx<'_, TcpCapability, S>,
     held: Held<BindListenerResult>,
     addr: String,
     name: Option<String>,
-    consumer: Option<ProtocolRef<TcpConsumer>>,
+    consumer: ProtocolRef<TcpConsumer>,
 ) {
+    let consumer_erased = consumer.erase();
+    let standing = state.listeners.values().find(|entry| {
+        let same_address = entry.addr == addr;
+        let same_consumer = entry.bound_to(consumer_erased);
+        let settled = matches!(entry.pending_unbind, UnbindState::Idle);
+        same_address && same_consumer && settled
+    });
+
+    if let Some(entry) = standing {
+        held.answer(ctx, &BindListenerResult::Ok { listener_name: entry.name.clone(), local_port: entry.port });
+        return;
+    }
+
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
         Err(e) => {
@@ -65,13 +79,13 @@ fn bind_listener(
     let staged = ctx
         .spawn_child::<TcpListenerActor>(
             Subname::Named(&listener_name),
-            TcpListenerConfig { listener: Some(listener), addr: addr.clone(), port: local_port, consumer },
+            TcpListenerConfig { listener, addr: addr.clone(), port: local_port, consumer },
             (),
         )
         .stage_with(ListenerSpawnKey { listener_name: listener_name.clone() });
     match staged {
         Ok(_) => {
-            state.starting_listeners.insert(listener_name, StartingListener { held, addr, local_port });
+            state.starting_listeners.insert(listener_name, StartingListener { held, addr, local_port, consumer });
         }
         Err((error, _)) => {
             held.answer(ctx, &BindListenerResult::failed(addr, format!("spawn failed: {error:?}")));
@@ -82,14 +96,15 @@ fn bind_listener(
 /// The shared body of `on_connect` and `on_connect_self`: park the caller's
 /// held reply under a fresh connect id, then dial `addr` on a one-shot
 /// transport thread that wakes the cap with `ConnectReady`. The session it
-/// stages delivers to the already-proven `consumer`.
-fn dial<A>(
+/// stages delivers to the already-proven `consumer`. It takes a ctx of any
+/// sender `S`, since `on_connect_self` states one and `on_connect` does not.
+fn dial<A, S>(
     state: &mut TcpCapabilityState,
-    ctx: &mut NativeCtx<'_, A>,
+    ctx: &mut NativeCtx<'_, A, S>,
     held: Held<ConnectResult>,
     addr: String,
     name: Option<String>,
-    consumer: Option<ProtocolRef<TcpConsumer>>,
+    consumer: ProtocolRef<TcpConsumer>,
 ) {
     let id = state.next_connect_id;
     state.next_connect_id += 1;
@@ -119,7 +134,10 @@ fn dial<A>(
 /// not a thin shim over the chassis registry. Each listener birth registers a
 /// monitor on the new listener and inserts a [`ListenerEntry`] into
 /// `listeners` under the listener's reference; `on_monitor_notice` removes
-/// the entry on listener close.
+/// the entry on listener close. A dialed session has a [`SessionEntry`] in
+/// `sessions` the same way, and `consumers` holds the cap's monitor on each
+/// consumer something here is bound to: that consumer's notice closes every
+/// listener and dialed session bound to it.
 /// The addressing identity is the distinct ZST
 /// [`TcpCapability`]. Living in this private module keeps
 /// it `pub`-enough to satisfy the `NativeActor::State` interface without
@@ -142,6 +160,23 @@ pub struct TcpCapabilityState {
     /// listener's reference, which is the sender of its close notice, so
     /// the notice finds its entry by keyed lookup (ADR-0230).
     pub listeners: HashMap<ErasedActorRef, ListenerEntry>,
+    /// Live sessions this cap dialed, in the shape `listeners` has: keyed by
+    /// the session's reference, which is the sender of its close notice.
+    /// Sessions a listener accepted are that listener's and are not here.
+    pub sessions: HashMap<ErasedActorRef, SessionEntry>,
+    /// The cap's monitor on each consumer a listener or dialed session here
+    /// is bound to, keyed by the consumer's reference, which is the sender
+    /// of its close notice.
+    ///
+    /// One handle per consumer, however many entries name it. The registry
+    /// keeps a monitor per `(watcher, target)` call and deregisters every
+    /// one of the pair when any handle drops, so a handle on each entry
+    /// would end the watch for the others when the first entry left, and a
+    /// consumer's close would post one notice per entry. An entry is here
+    /// exactly while some `listeners` or `sessions` entry names its
+    /// consumer ([`TcpCapabilityState::watch_consumer`],
+    /// [`TcpCapabilityState::release_consumer`]).
+    pub consumers: HashMap<ErasedActorRef, MonitorHandle>,
     /// Staged listener births awaiting their task completion, keyed by the
     /// listener name their [`ListenerSpawnKey`] carries.
     pub starting_listeners: HashMap<String, StartingListener>,
@@ -173,20 +208,80 @@ pub struct ListenerEntry {
     /// The reference the listener's spawn outcome proved; `on_unbind` mails
     /// `Close` through it. Its erased form keys this entry in `listeners`.
     pub listener: ActorRef<TcpListenerActor>,
-    /// The unbind reply held until this listener's close notice arrives.
-    /// One unbind at a time: a second request while this is `Some` is
-    /// refused.
-    pub pending_unbind: Option<PendingUnbind>,
+    /// The consumer this listener was bound for. Its close closes the
+    /// listener.
+    pub consumer: ProtocolRef<TcpConsumer>,
+    /// Whether an unbind reply is parked on the entry.
+    pub pending_unbind: UnbindState,
     // Held to keep the cap's monitor registered against the
     // listener for its lifetime. Drops when the entry is removed
     // (in `on_monitor_notice`).
     _monitor_handle: MonitorHandle,
 }
 
+impl ListenerEntry {
+    /// Whether this listener was bound for `consumer`.
+    fn bound_to(&self, consumer: ErasedActorRef) -> bool {
+        self.consumer.erase() == consumer
+    }
+}
+
+/// Cap-local supervisor state for one live dialed session, in the shape
+/// [`ListenerEntry`] has.
+pub struct SessionEntry {
+    /// The reference the session's spawn outcome proved; the cap mails
+    /// `SessionClose` through it when the consumer closes. Its erased form
+    /// keys this entry in `sessions`.
+    pub session: ActorRef<TcpSessionActor>,
+    /// The consumer this session was dialed for. Its close closes the
+    /// session.
+    pub consumer: ProtocolRef<TcpConsumer>,
+    // Held to keep the cap's monitor registered against the session for its
+    // lifetime. Drops when the entry is removed (in `on_monitor_notice`).
+    _monitor_handle: MonitorHandle,
+}
+
+impl SessionEntry {
+    /// Whether this session was dialed for `consumer`.
+    fn bound_to(&self, consumer: ErasedActorRef) -> bool {
+        self.consumer.erase() == consumer
+    }
+}
+
+impl TcpCapabilityState {
+    /// Monitor `consumer` unless the cap already does. Called as an entry
+    /// naming it is committed, so a consumer that closed before then is
+    /// noticed all the same: the registration posts its notice, which
+    /// arrives after the calling handler returns and finds the entry.
+    fn watch_consumer(&mut self, ctx: &NativeCtx<'_, TcpCapability>, consumer: ProtocolRef<TcpConsumer>) {
+        self.consumers.entry(consumer.erase()).or_insert_with(|| ctx.monitor(consumer));
+    }
+
+    /// Stop monitoring `consumer` once no listener or dialed session is
+    /// bound to it. Called as an entry naming it is removed.
+    fn release_consumer(&mut self, consumer: ProtocolRef<TcpConsumer>) {
+        let consumer = consumer.erase();
+        let binds = self.listeners.values().any(|entry| entry.bound_to(consumer));
+        let dials = self.sessions.values().any(|entry| entry.bound_to(consumer));
+        let bound = binds || dials;
+        if !bound {
+            self.consumers.remove(&consumer);
+        }
+    }
+}
+
 /// An unbind whose reply waits for the listener's close notice.
 pub struct PendingUnbind {
     pub held: Held<UnbindListenerResult>,
     pub listener_name: String,
+}
+
+/// Whether an unbind reply is parked on a listener entry.
+pub enum UnbindState {
+    /// No unbind is outstanding.
+    Idle,
+    /// The held reply waits for the listener close notice.
+    Unbinding(PendingUnbind),
 }
 
 /// A connect whose reply waits for its dial sidecar.
@@ -196,7 +291,7 @@ pub struct PendingConnect {
     pub name: Option<String>,
     /// The consumer proven at `Connect` or `ConnectSelf` receipt (ADR-0230,
     /// ADR-0231 §3/§4).
-    pub consumer: Option<ProtocolRef<TcpConsumer>>,
+    pub consumer: ProtocolRef<TcpConsumer>,
 }
 
 /// A dialed session whose staged birth is answering a connect, plus the
@@ -206,6 +301,9 @@ pub struct StartingSession {
     pub addr: String,
     pub session_name: String,
     pub peer: String,
+    /// The consumer the session was dialed for, entered with the session
+    /// when its birth completes.
+    pub consumer: ProtocolRef<TcpConsumer>,
 }
 
 /// A bound listener whose staged birth is answering a bind, plus the request
@@ -214,6 +312,9 @@ pub struct StartingListener {
     pub held: Held<BindListenerResult>,
     pub addr: String,
     pub local_port: u16,
+    /// The consumer the listener was bound for, entered with the listener
+    /// when its birth completes.
+    pub consumer: ProtocolRef<TcpConsumer>,
 }
 
 /// The context a staged session birth carries into its task completion: the
@@ -231,16 +332,6 @@ pub struct ListenerSpawnKey {
     pub listener_name: String,
 }
 
-/// Type a `_self` request's sender as the session consumer (ADR-0231 §4's
-/// guard cast), or name why it cannot be one: the mail has no actor sender,
-/// or the sender's published rows do not cover [`TcpConsumer`].
-fn cast_consumer<A>(ctx: &NativeCtx<'_, A>, request: &str) -> Result<ProtocolRef<TcpConsumer>, String> {
-    let sender = ctx.sender().ok_or_else(|| format!("{request} needs an actor sender to deliver frames to"))?;
-    ctx.cast::<TcpConsumer>(sender).ok_or_else(|| {
-        format!("{request} sender does not handle `SessionData` and `SessionClosed` silently (TcpConsumer)")
-    })
-}
-
 #[runtime]
 impl NativeActor for TcpCapability {
     /// The runtime state this identity boots into (ADR-0122 split): the
@@ -253,6 +344,8 @@ impl NativeActor for TcpCapability {
         let (connect_tx, connect_rx) = mpsc::channel::<(u64, Result<TcpStream, String>)>();
         Ok(TcpCapabilityState {
             listeners: HashMap::new(),
+            sessions: HashMap::new(),
+            consumers: HashMap::new(),
             starting_listeners: HashMap::new(),
             next_connect_id: 0,
             pending_connects: HashMap::new(),
@@ -275,7 +368,7 @@ impl NativeActor for TcpCapability {
         // ADR-0231 §3: the decode proved the consumer covers `TcpConsumer`
         // (a refusal there is answered `Err(Consumer(..))` by the dispatch);
         // prove it is still live once, at receipt.
-        match mail.consumer.as_ref().map(|path| ctx.resolve(path)).transpose() {
+        match ctx.resolve(&mail.consumer) {
             Ok(consumer) => dial(state, ctx, held, mail.addr, mail.name, consumer),
             Err(error) => held.answer(ctx, &ConnectResult::from(PathRefused::from(error))),
         }
@@ -285,22 +378,26 @@ impl NativeActor for TcpCapability {
     /// Dial `mail.addr` with the sender as the session's consumer, as
     /// [`Self::on_connect`] does with an explicit consumer.
     ///
-    /// The sender is cast to [`TcpConsumer`] once, at receipt (ADR-0231
-    /// §4), so nothing is dialed for a sender that would warn-drop the
-    /// session's frames or its close notice.
+    /// The ctx's sender is the requirement (ADR-0231 §11): an actor sends
+    /// this kind only when it covers [`TcpConsumer`], and the engine casts
+    /// the sender before this handler runs, so nothing is dialed for a sender
+    /// that would warn-drop the session's frames or its close notice.
     ///
     /// # Agent
-    /// Reply: `ConnectResult`. `Err` when the mail carries no actor sender
-    /// (a session has no inbox to deliver frames to), when the sender's
-    /// published rows do not handle `SessionData` and `SessionClosed`
-    /// silently, or on the errors `Connect` reports.
+    /// Reply: `ConnectResult`. A sender whose published rows do not handle
+    /// `SessionData` and `SessionClosed` silently is answered
+    /// `Err(Consumer(..))` naming it, without dialing; mail with no actor
+    /// sender (a session has no inbox to deliver frames to) is refused with
+    /// no reply. Otherwise `Err` on the errors `Connect` reports.
     #[handler::request]
-    fn on_connect_self(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: ConnectSelf) -> Pending<ConnectResult> {
+    fn on_connect_self(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Self, TcpConsumer>,
+        mail: ConnectSelf,
+    ) -> Pending<ConnectResult> {
         let (pending, held) = ctx.hold::<ConnectResult>();
-        match cast_consumer(ctx, "connect_self") {
-            Ok(consumer) => dial(state, ctx, held, mail.addr, mail.name, Some(consumer)),
-            Err(error) => held.answer(ctx, &ConnectResult::failed(mail.addr, error)),
-        }
+        let consumer = ctx.sender();
+        dial(state, ctx, held, mail.addr, mail.name, consumer);
         pending
     }
 
@@ -334,18 +431,13 @@ impl NativeActor for TcpCapability {
             let staged = ctx
                 .spawn_child::<TcpSessionActor>(
                     Subname::Named(&session_name),
-                    TcpSessionConfig {
-                        stream: Some(stream),
-                        peer: peer.clone(),
-                        session_name: session_name.clone(),
-                        consumer,
-                    },
+                    TcpSessionConfig { stream, peer: peer.clone(), session_name: session_name.clone(), consumer },
                     (),
                 )
                 .stage_with(SessionSpawnKey { connect_id: id });
             match staged {
                 Ok(_) => {
-                    state.starting_sessions.insert(id, StartingSession { held, addr, session_name, peer });
+                    state.starting_sessions.insert(id, StartingSession { held, addr, session_name, peer, consumer });
                 }
                 Err((error, _)) => {
                     held.answer(ctx, &ConnectResult::failed(addr, format!("spawn failed: {error:?}")));
@@ -370,7 +462,7 @@ impl NativeActor for TcpCapability {
         // ADR-0231 §3: the decode proved the consumer covers `TcpConsumer`
         // (a refusal there is answered `Err(Consumer(..))` by the dispatch);
         // prove it is still live once, at receipt, before binding.
-        match mail.consumer.as_ref().map(|path| ctx.resolve(path)).transpose() {
+        match ctx.resolve(&mail.consumer) {
             Ok(consumer) => bind_listener(state, ctx, held, mail.addr, mail.name, consumer),
             Err(error) => held.answer(ctx, &BindListenerResult::from(PathRefused::from(error))),
         }
@@ -380,31 +472,34 @@ impl NativeActor for TcpCapability {
     /// Spawn a fresh `TcpListenerActor` bound to `mail.addr` whose consumer
     /// is the sender, as [`Self::on_bind`] does with an explicit consumer.
     ///
-    /// The sender is cast to [`TcpConsumer`] once, at receipt (ADR-0231
-    /// §4), so nothing is bound for a sender that would warn-drop its
-    /// sessions' frames or close notices.
+    /// The ctx's sender is the requirement (ADR-0231 §11): an actor sends
+    /// this kind only when it covers [`TcpConsumer`], and the engine casts
+    /// the sender before this handler runs, so nothing is bound for a sender
+    /// that would warn-drop its sessions' frames or close notices.
     ///
     /// # Agent
-    /// Reply: `BindListenerResult`. `Err` when the mail carries no actor
-    /// sender (a session has no inbox to deliver frames to), when the
-    /// sender's published rows do not handle `SessionData` and
-    /// `SessionClosed` silently, or on the errors `BindListener` reports.
+    /// Reply: `BindListenerResult`. A sender whose published rows do not
+    /// handle `SessionData` and `SessionClosed` silently is answered
+    /// `Err(Consumer(..))` naming it, without binding; mail with no actor
+    /// sender (a session has no inbox to deliver frames to) is refused with
+    /// no reply. Otherwise `Err` on the errors `BindListener` reports.
     #[handler::request]
     fn on_bind_self(
         state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_, Self, TcpConsumer>,
         mail: BindListenerSelf,
     ) -> Pending<BindListenerResult> {
         let (pending, held) = ctx.hold::<BindListenerResult>();
-        match cast_consumer(ctx, "bind_listener_self") {
-            Ok(consumer) => bind_listener(state, ctx, held, mail.addr, mail.name, Some(consumer)),
-            Err(error) => held.answer(ctx, &BindListenerResult::failed(mail.addr, error)),
-        }
+        let consumer = ctx.sender();
+        bind_listener(state, ctx, held, mail.addr, mail.name, consumer);
         pending
     }
 
-    /// Settle one staged session birth: answer the connect it serves with
-    /// the activated session, or with the owner's rejection.
+    /// Settle one staged session birth: monitor the activated session and
+    /// its consumer, commit its entry, and answer the connect it serves, or
+    /// answer with the owner's rejection. A session or a consumer that
+    /// closed before this ran is entered all the same, and its notice, which
+    /// arrives after this handler returns, finds the entry.
     #[handler(task)]
     fn on_session_spawn_done(
         state: &mut Self::State,
@@ -414,19 +509,31 @@ impl NativeActor for TcpCapability {
         let Some(SessionSpawnKey { connect_id }) = ctx.take_context() else {
             return;
         };
-        let Some(StartingSession { held, addr, session_name, peer }) = state.starting_sessions.remove(&connect_id)
+        let Some(StartingSession { held, addr, session_name, peer, consumer }) =
+            state.starting_sessions.remove(&connect_id)
         else {
             return;
         };
-        let reply = match done.into_output().result {
-            Ok(_) => ConnectResult::Ok { session_name, peer },
-            Err(error) => ConnectResult::failed(addr, format!("spawn failed: {error:?}")),
+        let session = match done.into_output().result {
+            Ok(session) => session,
+            Err(error) => {
+                held.answer(ctx, &ConnectResult::failed(addr, format!("spawn failed: {error:?}")));
+                return;
+            }
         };
-        held.answer(ctx, &reply);
+
+        state
+            .sessions
+            .insert(session.erase(), SessionEntry { session, consumer, _monitor_handle: ctx.monitor(session) });
+        state.watch_consumer(ctx, consumer);
+        held.answer(ctx, &ConnectResult::Ok { session_name, peer });
     }
 
-    /// Settle one staged listener birth: monitor the activated listener,
-    /// commit its supervisor entry, and only then answer the bind it serves.
+    /// Settle one staged listener birth: monitor the activated listener and
+    /// its consumer, commit its supervisor entry, and only then answer the
+    /// bind it serves. A listener or a consumer that closed before this ran
+    /// is entered and answered all the same, and its notice, which arrives
+    /// after this handler returns, finds the entry.
     #[handler(task)]
     fn on_listener_spawn_done(
         state: &mut Self::State,
@@ -436,21 +543,15 @@ impl NativeActor for TcpCapability {
         let Some(ListenerSpawnKey { listener_name }) = ctx.take_context() else {
             return;
         };
-        let Some(StartingListener { held, addr, local_port }) = state.starting_listeners.remove(&listener_name) else {
+        let Some(StartingListener { held, addr, local_port, consumer }) =
+            state.starting_listeners.remove(&listener_name)
+        else {
             return;
         };
         let listener = match done.into_output().result {
             Ok(listener) => listener,
             Err(spawn_error) => {
                 held.answer(ctx, &BindListenerResult::failed(addr, format!("spawn failed: {spawn_error:?}")));
-                return;
-            }
-        };
-        let monitor_handle = match ctx.monitor(listener.erase()) {
-            Ok(handle) => handle,
-            Err(monitor_error) => {
-                ctx.send_to(listener, &Close::default());
-                held.answer(ctx, &BindListenerResult::failed(addr, format!("monitor failed: {monitor_error:?}")));
                 return;
             }
         };
@@ -462,10 +563,12 @@ impl NativeActor for TcpCapability {
                 port: local_port,
                 name: listener_name.clone(),
                 listener,
-                pending_unbind: None,
-                _monitor_handle: monitor_handle,
+                consumer,
+                pending_unbind: UnbindState::Idle,
+                _monitor_handle: ctx.monitor(listener),
             },
         );
+        state.watch_consumer(ctx, consumer);
         held.answer(ctx, &BindListenerResult::Ok { listener_name, local_port });
     }
 
@@ -503,7 +606,7 @@ impl NativeActor for TcpCapability {
         // first caller when a duplicate request arrives while that
         // close is still in flight; replacing it would lose the
         // original reply.
-        if entry.pending_unbind.is_some() {
+        if matches!(entry.pending_unbind, UnbindState::Unbinding(_)) {
             held.answer(
                 ctx,
                 &UnbindListenerResult::Err {
@@ -513,7 +616,7 @@ impl NativeActor for TcpCapability {
             );
             return pending;
         }
-        entry.pending_unbind = Some(PendingUnbind { held, listener_name: mail.listener_name });
+        entry.pending_unbind = UnbindState::Unbinding(PendingUnbind { held, listener_name: mail.listener_name });
         let listener = entry.listener;
         // Mail Close through the reference the listener's spawn outcome
         // proved. ADR-0099 §3: the listener is a spawned child, so its id
@@ -542,28 +645,61 @@ impl NativeActor for TcpCapability {
         ListListenersResult { listeners }
     }
 
-    /// Listener tombstoned — remove from the supervisor map and
-    /// answer the held unbind reply if one is waiting.
+    /// An actor the cap monitors tombstoned. The host stamps it as the
+    /// notice's sender, and the table that sender keys says which it was:
     ///
-    /// The host stamps the closed listener as the notice's sender, so its
-    /// entry is the one keyed by `ctx.sender()`. The cap's monitor on every
-    /// spawned listener (registered by its birth's completion) fires this
-    /// notice; if the close came from an unbind request, the entry's
-    /// `pending_unbind` holds the originator's reply.
+    /// - `listeners`: a listener closed. Its entry goes, and an unbind held
+    ///   on it is answered. The cap's monitor on every spawned listener
+    ///   (registered by its birth's completion) fires this, whatever closed
+    ///   the listener.
+    /// - `sessions`: a dialed session closed. Its entry goes.
+    /// - `consumers`: a consumer closed. Every listener bound to it is
+    ///   mailed the `Close` an unbind sends, and every session dialed for it
+    ///   `SessionClose`. Their entries stay until their own notices arrive.
+    ///
+    /// A listener or a session entry that goes releases the cap's monitor on
+    /// its consumer when it was the last one bound to it. A sender that keys
+    /// no table is a notice posted before its handle dropped, and changes
+    /// nothing.
     #[handler::event]
     fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased>, _notice: MonitorNotice) {
-        // Drop the supervisor entry. The held MonitorHandle drops
-        // here; deregister is idempotent with the close path's
-        // forward-index drain.
-        let Some(entry) = ctx.sender().and_then(|departed| state.listeners.remove(&departed)) else {
+        let Some(departed) = ctx.sender() else {
             return;
         };
-        // Answer the held unbind reply if one was waiting.
-        if let Some(PendingUnbind { held, listener_name }) = entry.pending_unbind {
-            held.answer(ctx, &UnbindListenerResult::Ok { listener_name });
+
+        // The held MonitorHandle drops with the entry; deregister is
+        // idempotent with the close path's forward-index drain.
+        if let Some(entry) = state.listeners.remove(&departed) {
+            state.release_consumer(entry.consumer);
+            // The close came from an unbind request when one is parked here;
+            // otherwise from the consumer's close or a teardown, with no one
+            // to answer.
+            if let UnbindState::Unbinding(PendingUnbind { held, listener_name }) = entry.pending_unbind {
+                held.answer(ctx, &UnbindListenerResult::Ok { listener_name });
+            }
+            return;
         }
-        // Else: notice came from a non-unbind close (chassis
-        // shutdown, future trap). Nothing to reply to; the
-        // supervisor entry is gone, that's the cleanup.
+
+        if let Some(entry) = state.sessions.remove(&departed) {
+            state.release_consumer(entry.consumer);
+            return;
+        }
+
+        // Dropping the handle ends a watch the consumer's close already
+        // drained. A bind or dial for this consumer that commits later
+        // monitors it again and is noticed at once.
+        let Some(_consumer_monitor) = state.consumers.remove(&departed) else {
+            return;
+        };
+        for entry in state.listeners.values() {
+            if entry.bound_to(departed) {
+                ctx.send_to(entry.listener, &Close::default());
+            }
+        }
+        for entry in state.sessions.values() {
+            if entry.bound_to(departed) {
+                ctx.send_to(entry.session, &SessionClose::default());
+            }
+        }
     }
 }

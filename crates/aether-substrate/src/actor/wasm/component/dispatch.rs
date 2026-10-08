@@ -1,11 +1,13 @@
+use std::error::Error;
+use std::fmt;
 use std::sync::Arc;
 
 use aether_actor::wasm::NO_INBOUND_SOURCE;
-use aether_actor::{DISPATCH_HANDLED_HOLD, DISPATCH_HANDLED_RELEASE};
+use aether_actor::{DISPATCH_HANDLED_HOLD, DISPATCH_HANDLED_RELEASE, DISPATCH_REFUSED_SENDER};
 
 use crate::actor::native::envelope::Envelope;
 use crate::actor::wasm::reply_table::{HeldChain, NO_REPLY_HANDLE, ReplyEntry};
-use crate::mail::{MailId, SourceAddr};
+use crate::mail::{MailId, Source, SourceAddr};
 
 use super::instantiate::Placement;
 use super::{Component, MAX_DELIVERABLE_MAIL_BYTES, SMALL_REGION_BYTES};
@@ -26,17 +28,63 @@ pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 /// the native dispatcher still discharges settlement.
 pub const DISPATCH_DROPPED_OVERSIZE: u32 = 2;
 
+/// Why a guest hook the engine waits on did not succeed: `wire` (ADR-0247
+/// rule 3), `on_dehydrate` or `on_rehydrate` (ADR-0249 §1, §2). The two cases
+/// differ in whether the guest can run again, which decides what its caller
+/// may do with it.
+///
+/// Its `Display` prints the detail only, the staged message or the trap. Each
+/// caller names the hook it ran.
+#[derive(Debug)]
+pub enum HookFault {
+    /// The hook returned an error. The guest is intact and can run again: one
+    /// that ran part of its `wire` still has an `unwire` that knows what to
+    /// release, and one that refused a republish keeps running. Carries the
+    /// message the guest staged. A state bundle the host could not place in
+    /// the guest is reported this way too, since no guest code ran.
+    Returned(String),
+    /// The hook trapped. The guest's store is left wherever the trap found
+    /// it, so no more of its code runs, as for a guest whose `init` trapped.
+    Trapped(wasmtime::Error),
+}
+
+impl HookFault {
+    /// Whether the guest trapped, so it must be released without running
+    /// any more of its code.
+    #[must_use]
+    pub const fn is_trap(&self) -> bool {
+        matches!(self, Self::Trapped(_))
+    }
+}
+
+impl fmt::Display for HookFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Returned(message) => f.write_str(message),
+            Self::Trapped(trap) => write!(f, "{trap:#}"),
+        }
+    }
+}
+
+impl Error for HookFault {}
+
 impl Component {
     /// Run the guest's `wire` hook, if it exports one. The trampoline runs it
-    /// at birth and again on a guest it reinstates after a republish aborts
-    /// (ADR-0241 §7), since that guest's `unwire` ran at prepare.
+    /// at birth and on a republish successor at prepare, with its outbox held
+    /// (ADR-0249 §3).
     ///
     /// `root` is the `wire` ctx's in-flight root: the birth's wire root
     /// (ADR-0244), which every send the guest makes from `wire` inherits, or
-    /// `None` for a reinstatement, whose guest sends mint their own roots.
-    /// It is published on the in-flight cells for the call and cleared
-    /// after, as [`Self::deliver`] does with an inbound's lineage.
-    pub fn wire(&mut self, root: Option<MailId>) -> wasmtime::Result<()> {
+    /// `None` for a republish prepare, whose sends are held and re-stamped on
+    /// the commit turn at flush. It is published on the in-flight cells for
+    /// the call and cleared after, as [`Self::deliver`] does with an
+    /// inbound's lineage.
+    ///
+    /// # Errors
+    /// [`HookFault::Returned`] when the hook returned a non-zero code, with
+    /// the message it staged through `init_failed_p32`, and
+    /// [`HookFault::Trapped`] when it trapped.
+    pub fn wire(&mut self, root: Option<MailId>) -> Result<(), HookFault> {
         let Some(wire_fn) = self.wire.clone() else {
             return Ok(());
         };
@@ -44,31 +92,41 @@ impl Component {
         self.store.data().set_in_flight(None, root);
         let result = wire_fn.call(&mut self.store, mailbox_id);
         self.store.data().clear_in_flight();
-        let rc = result?;
-        if rc != 0 {
-            return Err(wasmtime::Error::msg(format!("guest wire returned non-zero rc {rc}")));
-        }
-        Ok(())
+        self.hook_outcome("wire", result.map_err(HookFault::Trapped)?)
     }
 
-    /// ADR-0163 §3: close the asset load window on this component's store
-    /// ctx. The trampoline calls this once the guest's `wire` has returned,
-    /// so post-window `asset_fetch_p32` traps while the catalog metadata
-    /// stays queryable through `asset_catalog_p32` for the instance's life.
-    pub fn close_load_window(&mut self) {
-        self.store.data_mut().close_load_window();
+    /// Read the return code of the hook export named `hook`: `0` is success,
+    /// and any other code is the hook's returned error, whose message the
+    /// guest staged through `init_failed_p32`. The one read `wire`,
+    /// `on_dehydrate` and `on_rehydrate` share.
+    pub(super) fn hook_outcome(&mut self, hook: &str, code: u32) -> Result<(), HookFault> {
+        if code == 0 {
+            return Ok(());
+        }
+        let message = self
+            .store
+            .data_mut()
+            .init_failure
+            .take()
+            .unwrap_or_else(|| format!("guest {hook} returned {code} without staging an error"));
+        Err(HookFault::Returned(message))
     }
 
     /// Resolve the inbound mail's source `MailboxId` for the trailing
     /// `receive_p32` frame slot (issue 2001). A peer-component origin
-    /// (`SourceAddr::Component`) yields that mailbox's raw id; every other
-    /// origin — session, remote engine, or no reply target — yields
-    /// `NO_INBOUND_SOURCE` (0). Mirrors what `source_of_p32` resolved from
-    /// the reply table, but reads the inbound's `SourceAddr` directly (the
-    /// same value the reply entry is built from) without a table lookup.
-    fn resolve_inbound_source(addr: &SourceAddr) -> u64 {
-        match addr {
+    /// (`SourceAddr::Component`) yields that mailbox's raw id. A reply (no
+    /// address, a correlation) yields the sender half of the mail id its
+    /// replier minted, the same stamp `NativeCtx::sender` reads, and a reply
+    /// with no mail id yields `NO_INBOUND_SOURCE` (0). Every other origin —
+    /// session, remote engine, or no reply target — yields
+    /// `NO_INBOUND_SOURCE`. It reads the envelope directly, without a table
+    /// lookup.
+    fn resolve_inbound_source(env: &Envelope) -> u64 {
+        let correlated = env.sender.correlation_id != Source::NO_CORRELATION;
+        let is_reply = matches!(env.sender.addr, SourceAddr::None) && correlated;
+        match env.sender.addr {
             SourceAddr::Component(m) => m.0,
+            SourceAddr::None if is_reply => env.mail_id.map_or(NO_INBOUND_SOURCE, |id| id.sender.0),
             _ => NO_INBOUND_SOURCE,
         }
     }
@@ -113,6 +171,15 @@ impl Component {
     /// drops at once. A hold on a live handle with no registration for it
     /// fails the delivery, which the trampoline turns into an ADR-0063
     /// fail-fast: the requester's reply would not be guaranteed.
+    ///
+    /// ADR-0231 §11: an arm whose handler requires something of its sender
+    /// reports `DISPATCH_REFUSED_SENDER` when this mail's sender does not
+    /// cover it and the arm sent no reply. The handler did not run and the
+    /// guest logged why. The handle is freed, as for a single arm, and the
+    /// refusal is answered to the reply target as a native arm answers it:
+    /// `aether.mail.decode_refused`, only to a target that opted in, on the
+    /// inbound's chain. The guest names the missing handler in its own log;
+    /// the notice names the kind and the sender.
     ///
     /// ADR-0238 decision 3: the envelope's blob attachments are pinned in
     /// the instance's blob table for the `receive` call and unpinned when it
@@ -171,10 +238,10 @@ impl Component {
         // Issue 2001: thread the resolved inbound source as the trailing
         // slot too, so the guest's `WasmCtx::sender` is a single
         // ctx-field read on both the in-place and top-level paths and the
-        // `source_of_p32` host round-trip can be retired. Resolved exactly
-        // as `source_of_p32` did — a peer-component origin yields its
-        // `MailboxId`, every other origin yields `NO_INBOUND_SOURCE` (0).
-        let source = Self::resolve_inbound_source(&env.sender.addr);
+        // `source_of_p32` host round-trip can be retired. A peer-component
+        // origin yields its `MailboxId`, a reply yields the actor that
+        // replied, every other origin yields `NO_INBOUND_SOURCE` (0).
+        let source = Self::resolve_inbound_source(env);
         // ADR-0238 decision 3: pin each attached entry for this receive call
         // only, so the guest's decode can take a hold on a tag-1 hash
         // (`blob_hold_p32`). The payload was written verbatim: a hash names
@@ -195,6 +262,11 @@ impl Component {
         match result {
             Ok(DISPATCH_HANDLED_RELEASE | DISPATCH_UNKNOWN_KIND) => {
                 self.store.data_mut().reply_table.take(handle);
+            }
+            Ok(DISPATCH_REFUSED_SENDER) => {
+                let ctx = self.store.data_mut();
+                ctx.reply_table.take(handle);
+                ctx.answer_refused_sender(env);
             }
             Ok(DISPATCH_HANDLED_HOLD) if handle != NO_REPLY_HANDLE => {
                 let ctx = self.store.data_mut();

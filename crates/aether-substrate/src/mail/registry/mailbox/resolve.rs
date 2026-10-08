@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use aether_actor::ErasedActorRef;
 use aether_data::wire::PublishedRoutes;
-use aether_data::{ActorPathError, ActorPathForm, ErasedActorPath, ReplyContract, ScopePathError, validate_scope_path};
+use aether_data::{ActorPathError, ActorPathForm, CanonicalPath, ErasedActorPath, ReplyContract};
 
 use crate::mail::registry::{AddressResolutionError, ResolvedAddress, RouteContract, lineage_mailbox_id};
 use crate::mail::{KindId, MailboxId};
@@ -168,40 +168,71 @@ impl Registry {
     /// Starting-or-Live rule, so an over-cap candidate counts as not live
     /// (ADR-0166 §5).
     pub fn resolve_address(&self, address: &ErasedActorPath) -> Result<ResolvedAddress, AddressResolutionError> {
-        let canonical_path = match address.form() {
-            ActorPathForm::Canonical(path) => path.to_owned(),
-            ActorPathForm::Short { root, steps } => self
-                .addresses
-                .load()
-                .table()
-                .as_ref()
-                .map_err(Clone::clone)?
-                .expand(root, &steps, |candidate| matches!(self.lookup_canonical(candidate), Ok(Some(_))))?,
-        };
-        let mailbox_id = self
-            .lookup_canonical(&canonical_path)?
-            .ok_or_else(|| AddressResolutionError::NoLiveMailbox { canonical_path: canonical_path.clone() })?;
-        Ok(ResolvedAddress { mailbox_id, canonical_path })
+        match address.form() {
+            ActorPathForm::Canonical(path) => self.resolve_canonical(&path),
+            ActorPathForm::Short { root, steps } => {
+                let expanded = self.addresses.load().table().as_ref().map_err(Clone::clone)?.expand(
+                    root,
+                    &steps,
+                    |candidate| self.candidate_is_live(candidate),
+                )?;
+                // A short path's expansion can outgrow what was written, so
+                // it is checked as a path of its own before it folds to a
+                // registry key (ADR-0098): an over-cap expansion is a
+                // resolution miss, not key-space bloat.
+                let expanded_path = ErasedActorPath::new(&expanded).map_err(|error| match error {
+                    ActorPathError::Scope(scope) => AddressResolutionError::from(scope),
+                    ActorPathError::Segment { .. }
+                    | ActorPathError::RetiredShortForm
+                    | ActorPathError::ShortPathFromInstance => {
+                        AddressResolutionError::NoLiveMailbox { canonical_path: expanded.clone() }
+                    }
+                })?;
+
+                match expanded_path.form() {
+                    ActorPathForm::Canonical(path) => self.resolve_canonical(&path),
+                    ActorPathForm::Short { .. } => {
+                        Err(AddressResolutionError::NoLiveMailbox { canonical_path: expanded })
+                    }
+                }
+            }
+        }
     }
 
-    fn lookup_canonical(&self, name: &str) -> Result<Option<MailboxId>, ScopePathError> {
-        // ADR-0098 wire boundary: `name` is user-controlled text that arrived
-        // as an `ErasedActorPath` (or is a short path's expansion, which can
-        // outgrow what was written), so cap its scope depth / byte size
-        // before it folds to a registry key. An over-cap name is a
-        // resolution miss, not a key-space bloat.
-        let segments: Vec<&str> = name.split('/').collect();
-        validate_scope_path(&segments)?;
+    fn resolve_canonical(&self, path: &CanonicalPath) -> Result<ResolvedAddress, AddressResolutionError> {
+        let canonical_path = path.text().to_owned();
+
+        match self.lookup_canonical(path) {
+            Some(mailbox_id) => Ok(ResolvedAddress { mailbox_id, canonical_path }),
+            None => Err(AddressResolutionError::NoLiveMailbox { canonical_path }),
+        }
+    }
+
+    /// Whether the expansion candidate `candidate` names a Starting or Live
+    /// route. A candidate that is no canonical path, an over-cap one
+    /// included, counts as not live (ADR-0166 §5).
+    fn candidate_is_live(&self, candidate: &str) -> bool {
+        let Ok(path) = ErasedActorPath::new(candidate) else {
+            return false;
+        };
+
+        match path.form() {
+            ActorPathForm::Canonical(path) => self.lookup_canonical(&path).is_some(),
+            ActorPathForm::Short { .. } => false,
+        }
+    }
+
+    fn lookup_canonical(&self, path: &CanonicalPath) -> Option<MailboxId> {
         // ADR-0099 §4: resolve a written name by the parse → fold (the
         // inverse of the `/`-render), not `hash(name)` — a hosted /
         // nested actor's id is the lineage fold, so the whole-string hash
         // would miss it. The depth-1 case (every root cap) folds to the
         // same id `hash(name)` gives.
-        let id = lineage_mailbox_id(name);
+        let id = lineage_mailbox_id(path);
         let routes = self.routes.load();
-        Ok(match routes.entry_for(&id) {
+        match routes.entry_for(&id) {
             Some(route)
-                if route.canonical_name.as_str() == name
+                if route.canonical_name.as_str() == path.text()
                     && matches!(
                         resolve_route(id, |candidate| routes.entry_for(&candidate)),
                         ResolvedRoute::Starting { .. } | ResolvedRoute::Live { .. }
@@ -210,7 +241,7 @@ impl Registry {
                 Some(id)
             }
             _ => None,
-        })
+        }
     }
 
     /// Fetch the entry for the actor `actor` proves from a point-in-time view.
@@ -315,7 +346,10 @@ impl Registry {
     /// through the `live_route_p32` host fn. A `ProtocolPath` decode reads
     /// [`Self::route_rows`] instead, which also answers a `Dropped` route.
     pub(crate) fn live_route(&self, path: &ErasedActorPath) -> Option<MailboxId> {
-        let id = lineage_mailbox_id(path.as_str());
+        let ActorPathForm::Canonical(view) = path.form() else {
+            return None;
+        };
+        let id = lineage_mailbox_id(&view);
         let routes = self.routes.load();
         if routes.entry_for(&id)?.canonical_name != *path {
             return None;
@@ -341,7 +375,10 @@ impl Registry {
     /// Consumer: the registry's [`PublishedRoutes`] impl, which a
     /// `ProtocolPath` decode reads.
     pub(crate) fn route_rows(&self, path: &ErasedActorPath) -> Option<Arc<[(KindId, ReplyContract)]>> {
-        let id = lineage_mailbox_id(path.as_str());
+        let ActorPathForm::Canonical(view) = path.form() else {
+            return None;
+        };
+        let id = lineage_mailbox_id(&view);
         let routes = self.routes.load();
         if routes.entry_for(&id)?.canonical_name != *path {
             return None;
@@ -371,7 +408,19 @@ impl Registry {
     /// The crate-private path behind
     /// [`NativeCtx::actor_path`](crate::actor::native::ctx::NativeCtx::actor_path).
     pub(crate) fn actor_path(&self, actor: ErasedActorRef) -> Option<ErasedActorPath> {
-        self.routes.load().entry_for(&actor.id()).map(|route| route.canonical_name.clone())
+        self.actor_path_at(actor.id())
+    }
+
+    /// The canonical path of the route record at `position`, or `None` when
+    /// no record stands there: the read [`Self::actor_path`] makes, for a
+    /// position that arrived unproven. It mints nothing, so a position that
+    /// arrived from a guest gets a name and no reference.
+    ///
+    /// Its callers are [`Self::actor_path`] and
+    /// `NativeBinding::actor_path_at`, the read behind the wasm guest's
+    /// `actor_path_p32` host fn.
+    pub(crate) fn actor_path_at(&self, position: MailboxId) -> Option<ErasedActorPath> {
+        self.routes.load().entry_for(&position).map(|route| route.canonical_name.clone())
     }
 }
 

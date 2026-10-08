@@ -16,6 +16,7 @@ use crate::actor::native::binding::{NativeBinding, OutboundSend};
 use crate::actor::native::offload::blocking::DeferredCompletion;
 use crate::actor::native::slot::dispatcher::DispatcherSlot;
 use crate::actor::registry::ActorRegistry;
+use crate::chassis::error::BootError;
 use crate::chassis::inbox::InboxRelay;
 use crate::mail::registry::effect::{
     ACTIVATION_BARRIER_KIND, ActivationReservation, ActivationToken, InstalledActivation, LiveActivation, PreparedMail,
@@ -196,8 +197,10 @@ impl<A: 'static, O: BirthOutcome<A>> SpawnFinalizer for NativeSpawnFinalizer<A, 
             PreparedSpawnFailure::GuestNotPublished { namespace } => SpawnError::GuestNotPublished { namespace },
             PreparedSpawnFailure::SubnameRetired { full_name } => SpawnError::SubnameRetired { full_name },
             PreparedSpawnFailure::SubnameInUse { full_name } => SpawnError::SubnameInUse { full_name },
+            PreparedSpawnFailure::ParentUnknown { full_name } => SpawnError::ParentUnknown { full_name },
             PreparedSpawnFailure::ActivationRejected => SpawnError::ActivationRejected,
             PreparedSpawnFailure::OwnerClosed => SpawnError::OwnerClosed,
+            PreparedSpawnFailure::WireFailed(error) => SpawnError::WireFailed(error),
         };
         state.completion.complete(O::decided(state.canonical_name, Err(error)));
     }
@@ -486,11 +489,21 @@ impl<A: NativeActor> Drainable for ActivationJob<A> {
             return CycleResult::Closed;
         }
 
-        let live = LegacyLiveActivation::wire(prepared, self.token, Arc::clone(&self.failure));
-        if self.cancelled.load(Ordering::Acquire) {
+        let (live, wired) = LegacyLiveActivation::wire(prepared, self.token, Arc::clone(&self.failure));
+        // ADR-0247 rule 3: a `wire` that failed fails the birth. Its error
+        // is the birth's answer, whatever else was about to reject it, and
+        // the actor closes exactly as one cancelled after `wire` does.
+        let wire_failed = wired.is_err();
+        if let Err(error) = wired {
+            self.failure
+                .lock()
+                .expect("activation failure lock poisoned")
+                .replace(PreparedSpawnFailure::WireFailed(error));
+        }
+        let cancelled = self.cancelled.load(Ordering::Acquire);
+        let abandoned = wire_failed || cancelled;
+        if abandoned {
             live.cancel_here();
-            self.actor_registry.rollback_starting(self.id, self.token);
-            self.registry.activation_cancelled(self.id, self.token);
         } else {
             let binding = Arc::clone(&live.binding);
             let id = live.id;
@@ -554,11 +567,15 @@ struct LegacyLiveActivation<A: NativeActor> {
 }
 
 impl<A: NativeActor> LegacyLiveActivation<A> {
+    /// Build the slot and run the actor's `wire` in it. The activation comes
+    /// back whether or not the hook succeeded, beside the hook's result: the
+    /// hook was entered, so a failed one is closed through
+    /// [`Self::cancel_here`] like any wired activation, never dropped.
     fn wire(
         prepared: LegacyPreparedActivation<A>,
         token: ActivationToken,
         failure: Arc<Mutex<Option<PreparedSpawnFailure>>>,
-    ) -> Self {
+    ) -> (Self, Result<(), BootError>) {
         let LegacyPreparedActivation {
             spawner,
             id,
@@ -574,11 +591,14 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
         let slot =
             DispatcherSlot::new(Box::new(state), Arc::clone(&binding), slots, Arc::clone(spawner.actor_registry()), id);
         binding.hold_outbound_for_activation();
-        slot.wire_activation(chain, wire_root.as_ref().map(WireRoot::root));
+        let wired = slot.wire_activation(chain, wire_root.as_ref().map(WireRoot::root));
 
-        Self { spawner, id, token, relay, binding, slot, finalizer, failure, wire_root }
+        (Self { spawner, id, token, relay, binding, slot, finalizer, failure, wire_root }, wired)
     }
 
+    /// End this wired-but-not-live activation at its execution home: close
+    /// the actor, give back the birth's reservation, and only then tell
+    /// whoever asked.
     fn cancel_here(self) {
         let finalizer = self.finalizer.as_ref().map(Arc::clone);
         // The actor wired, so it closes: the one close runs `unwire` and
@@ -588,6 +608,12 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
         // goes before the rejection reaches the staging caller: its chain
         // then settles after the wire root, as a discarded birth's does.
         drop(self.wire_root);
+        // The reservation goes before the asker hears. The actor registry's
+        // entry is gone on return, and the owner applies its commands in
+        // order, so a birth of the same name staged in answer to the
+        // rejection is applied after the `Starting` route is removed.
+        self.spawner.actor_registry().rollback_starting(self.id, self.token);
+        self.spawner.registry().activation_cancelled(self.id, self.token);
         if let Some(finalizer) = finalizer {
             finalizer.reject(
                 self.failure
@@ -719,6 +745,9 @@ impl<A: NativeActor> Drainable for CancelJob<A> {
             if let Some(live) = live {
                 live.cancel_here();
             }
+            // `cancel_here` gave the reservation back already; repeated for
+            // a job that found no activation to cancel. Both are keyed by
+            // the token, so a second call changes nothing.
             self.actor_registry.rollback_starting(self.id, self.token);
             self.registry.activation_cancelled(self.id, self.token);
             let done = self.done.lock().expect("activation cancel completion lock poisoned").take();

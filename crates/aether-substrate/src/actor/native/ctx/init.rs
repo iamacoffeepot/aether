@@ -8,6 +8,7 @@
 use std::any::{Any, TypeId};
 use std::sync::Arc;
 
+use aether_actor::Instant;
 use aether_data::ActorMail;
 
 use crate::actor::native::ActorProbe;
@@ -16,7 +17,10 @@ use crate::actor::native::offload::self_wake::SelfWake;
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::component::ComponentCtx;
 #[cfg(feature = "wasm")]
+use crate::actor::wasm::module::Module;
+#[cfg(feature = "wasm")]
 use crate::mail::outbound::HubOutbound;
+use crate::memory::MemoryGauge;
 
 use super::ExportedHandles;
 
@@ -52,11 +56,11 @@ impl<'a> NativeInitCtx<'a> {
     /// binding's own mailer routes through, so the two cannot disagree.
     ///
     /// Consumer: the wasm trampoline's `init`, which instantiates its guest
-    /// against the ctx this builds.
+    /// against the ctx this builds. `module` is the module that guest runs.
     #[cfg(feature = "wasm")]
     #[must_use]
-    pub fn guest_ctx(&self, outbound: Arc<HubOutbound>) -> ComponentCtx {
-        self.binding.guest_ctx(outbound)
+    pub fn guest_ctx(&self, outbound: Arc<HubOutbound>, module: Module) -> ComponentCtx {
+        self.binding.guest_ctx(outbound, module)
     }
 
     /// A [`SelfWake<K>`] for a thread this cap spawns during `init` — an
@@ -75,6 +79,28 @@ impl<'a> NativeInitCtx<'a> {
     #[must_use]
     pub fn actor_probe(&self) -> ActorProbe {
         self.binding.actor_probe()
+    }
+
+    /// A reading of the engine's actor clock, for an actor that keeps an
+    /// [`Instant`] in its state and so needs one to build that state with.
+    /// It is the same clock [`NativeCtx::now`](super::NativeCtx::now) reads.
+    ///
+    /// The guest twin is `aether_actor::WasmInitCtx::now`.
+    #[must_use]
+    pub fn now(&self) -> Instant {
+        aether_actor::__mint_instant(self.binding.mailer().actor_clock().now_nanos())
+    }
+
+    /// A [`MemoryGauge`] listed in the engine's memory report under this
+    /// actor, with `label` saying what its bytes are. The actor keeps the
+    /// gauge for as long as it holds the memory: the row appears now, at
+    /// zero, and leaves when the gauge drops. The gauge names no position.
+    ///
+    /// Consumer: the render capability's `init`, which mints one gauge for
+    /// its staged textures and one for its staged geometry.
+    #[must_use]
+    pub fn memory_gauge(&self, label: &'static str) -> MemoryGauge {
+        self.binding.memory_gauge(label)
     }
 
     /// Issue 629 / Phase A: publish a sub-handle bundle for cross-

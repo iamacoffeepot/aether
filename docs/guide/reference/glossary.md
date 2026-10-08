@@ -172,14 +172,16 @@ Staged component/config instructions consumed while a substrate starts.
 **Package depot**
 
 The shippable directory `cargo xtask package` emits: one chassis binary, the
-workspace licenses, a persisted `pack/manifest`, and content-addressed component
-and config objects under `pack/objects/`. Its chassis boots by resolving the
-manifest against those objects, so it does not require the development hub.
+workspace licenses, a persisted `pack/manifest`, and content-addressed objects
+under `pack/objects/`: the component and config objects boot loads, and the
+named objects the manifest lists under the paths a running engine reads them
+at. Its chassis boots by resolving the manifest against those objects, so it
+does not require the development hub.
 
 **Asset bundle**
 
 A component that carries payload bytes in a wasm custom section, transforms them
-into an engine resident inside its `wire` load window, and afterwards holds only
+into an engine resident, usually in `wire`, and afterwards holds only
 the handle (ADR-0163 §4). `aether.kit.bundle` is the reference actor. Distinct
 from the package depot above, which is a shipping layout rather than an actor.
 
@@ -212,8 +214,8 @@ not granting more applies backpressure.
 
 ## Workflow and maturity
 
-The four scoped-issue terms below — managed Plan, approval record,
-direct-review verdict, and landable draft — belong to the checked-in
+The four scoped-issue terms below — managed Plan, approval record, landable
+draft, and surface overflow — belong to the checked-in
 `scope` / `approve` / `implement` / `land` skills. Those skills are still in the
 tree and still define these artifacts when a session uses them; they are not the
 repository's default path today, which is an ordinary focused pull request
@@ -242,22 +244,12 @@ A trusted hidden issue-body record binding one managed-Plan digest and route to
 an exact base commit and resolved approval policy. Labels and visible comments
 are not substitutes.
 
-**Direct-review verdict**
-
-The implementer's semantic result after directly inspecting and repairing the
-exact current-head diff against the approved Plan. Its durable authority is a
-canonical hidden `aether-direct-review:v2` record in the closing issue body,
-bound to the issue, pull request, head, and Plan digest and trusted through the
-effective body editor's repository association. Pull-request reviews, comments,
-and handoffs remain human-readable and carry no machine JSON/HTML marker.
-Native GitHub review decisions and unresolved threads are independent gates.
-
 **Landable draft**
 
 A draft pull request whose approval ancestry holds, priced surface overflow is
-settled, required current-head checks pass, direct review accepts, and native
-change requests and threads are clear. It still needs explicit landing
-authorization.
+settled, required current-head checks pass, and native change requests and
+review threads are clear. No review record is part of it. It still needs
+explicit landing authorization.
 
 **Surface overflow**
 

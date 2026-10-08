@@ -38,6 +38,7 @@ extern crate self as aether_actor;
 pub mod asset;
 mod blob;
 mod held_reply;
+mod instant;
 pub mod local;
 pub mod log;
 pub mod mail;
@@ -46,36 +47,43 @@ mod path;
 pub mod reference;
 mod refusal_answer;
 pub mod request_context;
+mod sender_refused;
 pub mod trace;
 pub mod wasm;
 
-pub use asset::{AssetCatalog, AssetInfo, AssetWindow};
+pub use asset::{AssetInfo, Assets};
 #[cfg(target_arch = "wasm32")]
 #[doc(hidden)]
 pub use blob::guest::__mint_guest_blob;
 pub use held_reply::HeldReply;
+#[doc(hidden)]
+pub use instant::__mint_instant;
+pub use instant::Instant;
 pub use local::Local;
 pub use model::ctx::{Erased, MailSender, OutboundReply, Persistence, ReplyMode, Single, Unchecked};
 pub use model::slot::Slot;
 pub use model::{
-    Actor, Addressable, AllHandle, At, CallerAddressable, CallerScope, CallerScoped, CastTarget, ChildOf, Contract,
-    Contracts, CoveredBy, CoversRows, Declared, DependencyLink, DependencyList, DependencyResolver, DependsOn, Gap,
-    HandlesKind, Here, Instanced, Lifecycle, ListIndex, Many, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Protocol,
-    Publisher, Publishes, Replies, ReplyShape, Resolve, Root, Row, RowAt, RowIndex, RowReply, RowSet, SendableTo,
-    Silent, SilentRow, Singleton, Subname, Subscriber, There, Undeclared, declared_dependencies, root_mailbox,
-    validate_namespace_segment,
+    Actor, Addressable, AllHandle, Anyone, At, CallerAddressable, CallerScope, CallerScoped, CastTarget, ChildOf,
+    Contract, Contracts, CoveredBy, CoversRows, Declared, DependencyLink, DependencyList, DependencyResolver,
+    DependsOn, Gap, HandlesKind, Here, Instanced, Lifecycle, ListIndex, Many, NAMESPACE_SEGMENT_MAX_LEN,
+    NamespaceError, One, Protocol, Publisher, Publishes, Replies, ReplyShape, Resolve, Root, Row, RowAt, RowIndex,
+    RowReply, RowSet, SendableTo, SenderRequirement, SentBy, Silent, SilentRow, Singleton, Subname, Subscriber, There,
+    Undeclared, WatchTarget, Watchable, Watches, declared_dependencies, root_mailbox, validate_namespace_segment,
 };
-pub use path::{ActorPath, PathRefusal, PathRefused, ProtocolPath, ResolveError};
+pub use path::{ActorPath, PathRefusal, PathRefused, ProtocolPath, ResolveError, TypedPath};
 #[doc(hidden)]
 pub use reference::{__mint_actor_ref, __mint_erased_actor_ref, __mint_protocol_ref};
 pub use reference::{ActorRef, Direct, ErasedActorRef, HandsOff, ProtocolRef, Target};
 pub use request_context::{RequestContextTable, split_state_envelope};
-// The `resolve_path_p32` answer (ADR-0230 §3), the `published_rows_p32`
-// answer (ADR-0231 §4), and the `live_route_p32` answer (ADR-0230 §3,
-// #7205): the substrate's host fns encode them, and `WasmCtx::resolve_path`,
-// `WasmCtx::cast`, and `WasmCtx::resolve` decode them.
+// The `resolve_path_p32` answer (ADR-0230 §3), the `published_rows_p32` and
+// `route_rows_p32` answer (ADR-0231 §4, §3), and the `live_route_p32` answer
+// (ADR-0230 §3, #7205), and the `actor_path_p32` answer (ADR-0231 §11), the
+// position-to-path read beside them: the substrate's host fns encode them,
+// and `WasmCtx::resolve_path`,
+// `WasmCtx::cast`, a guest's `ProtocolPath` decode, `WasmCtx::resolve`, and a
+// dispatch arm's refusal of its sender decode them.
 #[doc(hidden)]
-pub use wasm::bridge::address::{__LiveRoute, __PublishedRows, __ResolvedPath};
+pub use wasm::bridge::address::{__ActorPath, __LiveRoute, __PublishedRows, __ResolvedPath};
 // Both transports send through flat verbs and hold no typed handle: wasm
 // actors through [`WasmCtx`], native actors through
 // `aether_substrate::actor::native::NativeCtx`.
@@ -85,8 +93,8 @@ pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, RegistryChanged, ReplyHandle};
 // `aether_actor::WasmCtx<'_>` / `aether_actor::WasmActor` / etc. without
 // an extra `wasm::` segment.
 pub use wasm::{
-    ActorInitError, ActorTypeTag, ErasedWasmActor, HasParent, Held, InlineChild, InlineParent, Pending, Rebuildable,
-    Sends, SpawnError, Spawns, WasmActor, WasmCtx, WasmDispatch, WasmDropCtx, WasmInitCtx, WireCtx,
+    ActorInitError, ActorTypeTag, Departed, ErasedWasmActor, HasParent, Held, InlineChild, InlineParent, Pending,
+    Rebuildable, Sends, SpawnError, Spawns, WasmActor, WasmCtx, WasmDispatch, WasmDropCtx, WasmInitCtx, WireCtx,
 };
 
 // Issue 665 retired `MailTransport` and its `MailTransportTrait`
@@ -123,15 +131,18 @@ pub const DISPATCH_HANDLED_RELEASE: u32 = 3;
 /// [`DISPATCH_HANDLED`].
 pub const DISPATCH_HANDLED_HOLD: u32 = 4;
 
-/// Status the guest's `on_dehydrate` export returns when a live held reply
-/// was left unsaved: refuse the replace (ADR-0243 §6). The substrate maps it
-/// onto the save-error rollback, which reinstates the old guest so the
-/// requester is not stranded. The refusing export still saves the state it
-/// composed, and the reinstated guest gets that state back through its
-/// `on_rehydrate`, so a held reply the dehydrate moved into it returns too
-/// (issue 7125). `0` is a normal dehydrate and `1` is the shim's "no
-/// instance" status.
-pub const DEHYDRATE_HELD_UNSAVED: u32 = 2;
+/// Return code for "a single arm's handler requires something of its sender,
+/// and this mail's sender does not cover it, so the handler did not run"
+/// (ADR-0231 §11). The arm logged the refusal and sent no reply: it is a tell,
+/// or a request whose mail has no sender to name in one. The substrate frees
+/// the dispatch's reply handle, as for [`DISPATCH_HANDLED_RELEASE`], and
+/// answers the refusal notice `aether.mail.decode_refused` to a reply target
+/// that opted in to it, so a caller relayed through `aether.rpc.server` is
+/// told. A request the arm answered itself returns
+/// [`DISPATCH_HANDLED_RELEASE`] instead, so its caller gets one answer. A
+/// host that predates it reads it as an unrecognized class and keeps the
+/// handle, as for [`DISPATCH_HANDLED`].
+pub const DISPATCH_REFUSED_SENDER: u32 = 5;
 
 /// Return code for "no `#[handler]` matched and there's no `#[fallback]`"
 /// — the strict-receiver miss. Propagated through the FFI so the
@@ -160,9 +171,15 @@ pub mod __macro_internals {
     // row's reply with this selector, which refuses to compile when a
     // path-carrying request's reply cannot say so.
     pub use crate::refusal_answer::{Refusal, RefusalAnswer, refused_reply};
+    // ADR-0231 §11: what both transports' dispatch arms build, log, and
+    // answer from when a handler's sender requirement refuses the sender.
+    pub use crate::sender_refused::SenderRefused;
     pub use crate::wasm::{ActorTypeTag, WasmPlacementFacts};
     pub use aether_data::__derive_runtime::{Cow, KindLabels, SchemaType, canonical};
     pub use aether_data::{ActorId, CrossesActors, Kind, KindId, ReplyContract, Schema};
+    // ADR-0079 §8: the notice a guest's departure handlers share one row and
+    // one dispatch arm for, which no author names.
+    pub use aether_kinds::MonitorNotice;
     // Section-version bytes the `#[actor]` / `export!` writers emit as
     // token references so the literals const-fold from one source of
     // truth in `aether-data`.
@@ -179,10 +196,10 @@ pub mod __macro_internals {
     // `String` the same way — the emitted code stays free of an `alloc`
     // prelude assumption on the guest crate.
     pub use alloc::string::String;
-    // ADR-0113: the `#[actor]`-generated `on_rehydrate` warns through
-    // `::aether_actor::__macro_internals::tracing::warn!` on a non-empty
-    // decode-miss, so the macro roots the warn here rather than forcing
-    // `tracing` into every component's dependency list.
+    // The `#[actor]`-generated dispatch arms log through
+    // `::aether_actor::__macro_internals::tracing`, so the macro roots the
+    // log here rather than forcing `tracing` into every component's
+    // dependency list.
     pub use tracing;
 }
 
@@ -202,7 +219,10 @@ pub use aether_actor_derive::{
     actor, capability, export_asset, fallback, handler, handler_set, local, protocol, runtime,
 };
 pub use aether_data::{Blob, BlobReader, MAX_READ_BYTES};
-pub use aether_data::{Kind, KindId as DataKindId, MailboxId, RequestId, Schema};
+pub use aether_data::{Kind, KindId as DataKindId, MailboxId, RequestId, Schema, WatchId};
+/// The engine's empty watch context: `ctx.watch(reference, NoContext)` for a
+/// departure handler that takes no context parameter (ADR-0079 §8).
+pub use aether_kinds::NoContext;
 // ADR-0119: the `#[derive(Singleton)]` / `#[derive(Instanced)]` /
 // `#[derive(Embeddable)]` proc-macros are retired. Cardinality is the
 // `Addressable::Resolver`, and the `Singleton` / `Instanced` marker traits

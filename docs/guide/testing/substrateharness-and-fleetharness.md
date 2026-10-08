@@ -28,7 +28,9 @@ It still uses the real:
 - offscreen render/capture path;
 - lifecycle driver plus synthetic window-event and tick stages;
 - deterministic synthetic windows and selector-aware window-event routing;
-- logging/tracing rings and typed replies.
+- logging/tracing rings and typed replies;
+- the inventory capability, so a scenario may mail `aether.inventory` or load a
+  component that depends on it with no extra composition.
 
 It is not a mock engine. The simplification is process/transport ownership.
 
@@ -43,6 +45,23 @@ installs `FsCapability` and redirects `save://`, `assets://`, and `config://`.
 Point those namespaces at temporary roots so parallel tests do not share host
 files. Use the in-memory clipboard when testing deterministic text interaction.
 
+A test of code that measures time with `ctx.now()` builds the harness on a clock
+it moves by hand. Make a `SteppedClock`, hand a clone to the builder, and step
+the one you kept:
+
+```rust
+let clock = SteppedClock::new();
+let mut harness = SubstrateHarness::builder().clock(clock.clone()).build()?;
+// ... send the mail that starts the measurement and wait for it to settle ...
+clock.step(Duration::from_millis(7));
+// ... every ctx.now() in this engine, guest or native, now reads 7 ms later ...
+```
+
+The clock stands still between steps, so an asserted duration is exact. Without
+`.clock(..)` the harness reads real elapsed time, as every chassis does. Trace
+and cost timestamps are real either way. FleetHarness forks real engines, which
+always run on real time, so a stepped measurement is a SubstrateHarness test.
+
 Dropping the bench tears down its passives and scheduler. Do not leak it into a
 global or run several tests against one mutable bench unless the shared lifetime
 is itself the contract.
@@ -56,7 +75,7 @@ counts.
 
 On a harness built with render, `send_and_settle` drains the pumped
 `aether.render` slot on its mail wake while it waits, through the same
-`await_settlement_pumped` the desktop and harness-binary drivers use (ADR-0161
+`await_settlement_pumped` the desktop driver uses (ADR-0161
 §Decision 2): a chain that reaches the render actor settles because each render
 mail arrival triggers a drain, and there is no fixed drain round. The heartbeat
 only logs; it never drains.
@@ -133,7 +152,9 @@ discipline:
 
 - `Advance` drives complete frames. `HarnessOp::advance(n)` represents
   16,667 µs per frame; use `HarnessOp::advance_by(n, duration)` when elapsed
-  time is part of the behavior under test;
+  time is part of the behavior under test. The total a `Tick` carries is the sum
+  of the stated frame durations, each added whole, so a test that states elapsed
+  time can assert exact steps;
 - `SendAndSettle` sends typed mail and waits for its whole causal chain to
   settle — the strongest barrier;
 - `SendAndAwaitReply` stores a typed reply for later decode, and waits for
@@ -174,16 +195,16 @@ actor is the reply's stamped sender. When a test needs that reference — to ask
 through the harness directly instead of through an operation:
 
 ```rust,ignore
-let panel = harness.load::<WidgetPanel>(LoadComponent {
+let camera = harness.load::<CameraComponent>(LoadComponent {
     wasm,
-    name: Some("panel".to_owned()),
+    name: Some("main".to_owned()),
     config: Vec::new(),
     export: None,
 })?;
 ```
 
 `load::<R>` sets the export to `R::NAMESPACE` and returns `ActorRef<R>`;
-`harness.actor_path(&panel)` reads its canonical path for an assertion or a
+`harness.actor_path(&camera)` reads its canonical path for an assertion or a
 `CaptureWithMails` recipient. `load_any` sends the load as given and returns
 the erased reference and its path, for a fixture actor the test cannot name,
 which the test types with `SubstrateHarness::cast::<P>` before it sends.
@@ -300,7 +321,7 @@ against it or a `CaptureWithMails` bundle recipient:
 
 ```rust,ignore
 let camera = harness.load::<CameraComponent>(load)?;
-HarnessOp::send_and_settle(&camera, &CameraDestroy { name: "main".to_owned() });
+HarnessOp::send_and_settle(&camera, &Frame { bounds });
 ```
 
 A wasm-only fixture's erased reference is cast with `SubstrateHarness::cast::<P>`
@@ -321,7 +342,7 @@ let counter = harness.cast::<StatefulCounter>(harness.load_any(&load)?.0)?;
 HarnessOp::send_and_settle(&counter, &Bump);
 ```
 
-A child an actor spawned — a widget beneath a panel, a window beneath the
+A child an actor spawned — an inline child beneath its parent, a window beneath the
 window capability — is reached by type and key beneath a reference already
 held, with `SubstrateHarness::child`. Once a root `CreateWindow` operation has
 settled, send an id-less control to the child it opened:
@@ -340,7 +361,7 @@ use a separate generic convenience constructor, sent through the synthetic
 window capability's reference:
 
 ```rust
-let window = window_path(&LoadName::new("main")?);
+let window = WindowInstance::path(&LoadName::new("main")?);
 HarnessOp::window_event(&synthetic, window.clone(), &Key { window, code: keycode });
 ```
 
@@ -430,7 +451,7 @@ artifact and CI cost, so it should prove a boundary the current matrix cannot.
 ## Source routes
 
 - Public SubstrateHarness API: `crates/aether-harness-substrate/src/`
-- Scenario examples: the per-cap scenario suites (e.g. `crates/aether-render/tests/`, `crates/aether-text/tests/`)
+- Scenario examples: the per-cap scenario suites (e.g. `crates/aether-render/tests/`, `crates/aether-audio/tests/`)
 - FleetHarness harness: `crates/aether-harness-fleet/src/lib.rs`
 - Fleet scenarios: the per-cap `fleetharness_*.rs` suites (e.g. `crates/aether-component/tests/`, `crates/aether-fleet/tests/`)
 - Fixtures: `crates/aether-test-fixtures-*/`

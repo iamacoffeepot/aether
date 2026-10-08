@@ -24,10 +24,25 @@ use aether_data::KindId;
 #[aether_data::kind(name = "aether.actor.monitor_notice", pod, default, eq, engine_only)]
 pub struct MonitorNotice;
 
-/// Host-generated notice that a request's recipient refused its payload at
-/// decode. The refusing actor answers it to the request's reply target in
-/// place of the reply it could not produce, so it joins the request's chain
-/// and is handled before that chain's `Settled`.
+/// The engine's empty watch context (ADR-0079 §8): what a component passes
+/// to `ctx.watch` for a watched type whose departure handler takes no context
+/// parameter, as in `ctx.watch(camera, NoContext)`.
+///
+/// A watch always stores a context, so a handler with nothing to note leaves
+/// its fourth parameter out and its context kind is this one. No author
+/// declares a kind to say nothing.
+#[repr(C)]
+#[aether_data::kind(name = "aether.actor.no_context", pod, default, eq)]
+pub struct NoContext;
+
+/// Host-generated notice that a request's recipient refused it before its
+/// handler ran: its payload at decode, or its sender, when the handler
+/// requires a protocol the sender does not cover or the mail has no sender
+/// (ADR-0231 §11). The refusing actor answers it to the request's reply
+/// target in place of the reply it could not produce, so it joins the
+/// request's chain and is handled before that chain's `Settled`. A request
+/// whose sender is refused is answered with its own typed reply instead, and
+/// no notice follows.
 ///
 /// Only a reply target that opts in hears it: one whose published contract
 /// carries a row for this kind. Any other sender hears nothing, because an
@@ -37,10 +52,11 @@ pub struct MonitorNotice;
 ///
 /// The refuser is the notice's sender, read as a proven reference from
 /// `ctx.sender()`, so the notice carries no address. `kind` is the refused
-/// payload's kind and `error` the decode error's text.
+/// payload's kind and `error` the refusal's text: the decode error, or which
+/// sender was refused and why.
 ///
-/// Engine-only mail (ADR-0233): the native decode path answers it from host
-/// code, and no actor may send it.
+/// Engine-only mail (ADR-0233): the native dispatch path and the wasm
+/// component's delivery answer it from host code, and no actor may send it.
 #[aether_data::kind(name = "aether.mail.decode_refused", eq, engine_only)]
 pub struct DecodeRefused {
     pub kind: KindId,
