@@ -370,7 +370,8 @@ two ways
 **The upload queue, ahead of use.** Every create, update and layer write puts
 its resource on one queue, once, in arrival order; a destroy takes it off. Each
 frame the renderer uploads a fixed number of *pieces* from the front of the
-queue, before it records any pass. A resource that is staged and then given
+queue, before it records any pass. Resources an unanswered
+`aether.render.await_resident` names go first (see below). A resource that is staged and then given
 frames is on the GPU before anything draws it, so the frame that first draws it
 uploads nothing.
 
@@ -405,9 +406,55 @@ array with many unwritten layers would otherwise cost one long frame the first
 time it is drawn. A dispatch that binds the array early uploads its written
 layers in that frame and leaves the unwritten ones to the queue.
 
+**Waiting until resources are on the GPU.** A resource is *staged* while the
+renderer holds its bytes and the GPU object is missing or behind them, and
+*resident* once the GPU object holds every staged byte. An actor that wants to
+hold content back until drawing it uploads nothing sends one request:
+
+```jsonc
+// send_mail → aether.render  (kind: aether.render.await_resident)
+{ "resources": [
+    { "Geometry":  { "geometry_id": 3 } },
+    { "Instances": { "instances_id": 0 } },
+    { "Texture":   { "texture_id": 1 } }   // a texture, a texture array or a volume
+] }
+```
+
+The reply is `aether.render.await_resident_result`, sent exactly once:
+
+| Reply | Meaning |
+|---|---|
+| `Ok { bytes }` | every named resource was resident at some point after the request arrived; `bytes` is what they hold on the GPU, each counted once, as the memory report counts them |
+| `Err(Unknown { resource })` | `resource` named nothing when the request arrived (never created, already destroyed, or a texture the renderer keeps for itself); nothing was waited on |
+| `Err(Destroyed { resource })` | `resource` was destroyed before it became resident |
+| `Err(DeviceUnusable { error })` | the render device failed for good, so nothing more uploads |
+| `Err(Closed)` | the renderer closed first |
+
+- **When it is answered.** At once when every named resource is already
+  resident, when an id names nothing, or when the list is empty
+  (`Ok { bytes: 0 }`). Otherwise in the frame whose upload step finds the last
+  named resource resident. A resource a draw uploaded first is noticed by the
+  next step that reaches it, not in the frame of that draw.
+- **Order.** The upload step takes the resources an unanswered request names
+  before every other queued resource, and each of the two groups in arrival
+  order. This is the only ordering signal: no create kind carries a priority.
+- **A later update does not reopen a wait.** A named resource is counted the
+  first time it is found resident. If it is updated afterwards the request is
+  still answered when the others arrive, and an answered request is never
+  answered again. To hear that an update reached the GPU, send the update and
+  then ask again; mail from one sender arrives in order, so the new request
+  covers it.
+- **A request that has to wait settles its own chain first.** The reply is
+  owed without holding the sender's chain, so a request sent from a `Tick`
+  handler does not hold the frame loop, and a `send_mail` over MCP returns
+  with no reply for it. A component takes the reply in a
+  `#[handler::response]`; from MCP, check that a frame has run and ask again,
+  which is answered inside the call once everything is resident.
+- **Duplicates.** A resource named twice in one request counts once.
+
 The white texture and the glyph atlas, which the renderer keeps for itself,
 are never queued: the frame that draws with one uploads it. With no device, or
-no frames, nothing uploads.
+no frames, nothing uploads and no wait is answered.
 
 ## How to use it
 

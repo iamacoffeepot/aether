@@ -22,7 +22,7 @@ use aether_substrate::session_ids::SessionIds;
 
 use super::holds::Holds;
 use super::surface::render_limits;
-use super::upload::Piece;
+use super::upload::{Piece, Residency};
 use crate::kinds::{
     CreateInstances, CreateInstancesResult, DestroyInstances, UpdateInstances, VertexAttribute, vertex_stride_bytes,
 };
@@ -90,6 +90,13 @@ impl StagedInstances {
     #[must_use]
     pub fn is_resident(&self) -> bool {
         self.realized.is_some() && self.dirty.is_none()
+    }
+
+    /// What the buffer holds on the device once resident: every record,
+    /// `capacity × stride` bytes.
+    #[must_use]
+    pub fn device_bytes(&self) -> u64 {
+        self.records.len() as u64
     }
 
     /// The GPU buffer, once [`Self::ensure_realized`] has made it on the
@@ -265,11 +272,22 @@ impl InstancesRegistry {
             return Piece::Missing;
         };
         if entry.is_resident() {
-            return Piece::Resident;
+            return Piece::Resident { bytes: entry.device_bytes() };
         }
 
         entry.ensure_realized(device, queue);
-        Piece::Landed
+        Piece::Landed { bytes: entry.device_bytes() }
+    }
+
+    /// Where the buffer at `instances_id` stands for a wait on it
+    /// (ADR-0251 section 5). Only a live id is looked up: a buffer
+    /// destroyed under a draw set answers to no id, so it is `Unknown`.
+    pub(super) fn residency(&self, instances_id: u32) -> Residency {
+        let Some(entry) = self.entries.get(&instances_id) else {
+            return Residency::Unknown;
+        };
+
+        Residency::live(entry.is_resident(), entry.device_bytes())
     }
 
     /// Drop every buffer built against the current device while keeping

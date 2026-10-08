@@ -164,18 +164,37 @@ pub enum RenderResource {
 
 pub enum AwaitResidentResult {
     Ok { bytes: u64 },                      // what the named resources hold on the device
-    Err(AwaitResidentError),                // a named id names nothing, or was destroyed while awaited
+    Err(AwaitResidentError),
+}
+
+pub enum AwaitResidentError {
+    Unknown { resource: RenderResource },    // named nothing when the request arrived
+    Destroyed { resource: RenderResource },  // destroyed before it became resident
+    DeviceUnusable { error: String },        // the render device failed for good; nothing more uploads
+    Closed,                                  // the renderer closed first
 }
 ```
 
-The handler answers at once when every named resource is already resident or
-when an id names nothing. Otherwise it owes the reply with `ctx.defer`, so the
+The handler answers at once when every named resource is already resident,
+when an id names nothing, or when the render device has failed for good
+(`Err(DeviceUnusable)`). Otherwise it owes the reply with `ctx.defer`, so the
 sender's chain settles as the handler returns and a request sent from a `Tick`
 handler does not hold the frame loop. The upload step answers a held request
-in the frame its last named resource becomes resident, whether the step or a
-draw made it so. If a named resource is destroyed first, the request is
-answered with the error. If the renderer closes, the in-flight ledger answers
-it (ADR-0243 §1).
+in the frame it finds the request's last named resource resident. A resource a
+draw made resident is found by the next step that reaches it, not in the frame
+of the draw: the record path does not know the queue, and section 4 keeps it
+that way. If a named resource is destroyed first, the request is answered with
+the error. If the device fails for good while requests are held, each is
+answered `Err(DeviceUnusable)` then. If the renderer closes, the in-flight
+ledger answers it `Err(Closed)` (ADR-0243 §1).
+
+A request means each named resource was resident at some point after the
+request arrived. Each is counted the first time it is found resident and never
+again, so a resource that becomes resident and is then updated does not reopen
+the request; a sender that wants to hear about the later update asks again
+after sending it. A resource named twice in one request counts once, toward
+the answer and in `bytes`. An empty list is answered `Ok { bytes: 0 }` at
+once.
 
 The sender chooses the grain: one request for everything it staged, or
 several for parts it wants to hear about separately.
@@ -218,7 +237,7 @@ again.
 - With no device or no frames, nothing uploads and no request is answered,
   which matches today: nothing realizes without a frame. The headless chassis
   composes no render actor and is unchanged.
-- No kind changes shape. Two kinds and three schema types are added to
+- No kind changes shape. Two kinds and two schema types are added to
   `aether-render`.
 - The guide pages that say a resource is created at first use
   (`docs/guide/systems/rendering.md`, `docs/guide/systems/render-programs.md`,

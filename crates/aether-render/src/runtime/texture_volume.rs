@@ -53,6 +53,18 @@ impl StagedTextureVolume {
         self.realized.is_some() && !self.dirty
     }
 
+    /// What the volume holds on the device once resident: the bytes it
+    /// was created from, the count its memory charge uses.
+    ///
+    /// # Panics
+    /// Panics if the shape's byte count overflows, fail-fast per ADR-0063:
+    /// `create_volume` refuses such a volume before it stages it.
+    #[must_use]
+    pub fn device_bytes(&self) -> u64 {
+        volume_bytes(self.format, self.width, self.height, self.depth)
+            .expect("create_texture_volume refuses an overflowing volume") as u64
+    }
+
     /// Create the GPU texture if it does not exist yet and upload the
     /// blob if this device's texture has not received it: every slice in
     /// one `write_texture`. Runs on the driver thread, where a device and

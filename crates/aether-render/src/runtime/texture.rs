@@ -19,7 +19,7 @@ use aether_substrate::session_ids::SessionIds;
 use super::text::ATLAS_SIZE;
 use super::texture_array::StagedTextureArray;
 use super::texture_volume::StagedTextureVolume;
-use super::upload::Piece;
+use super::upload::{Piece, Residency};
 use crate::kinds::{CreateTexture, CreateTextureResult, DestroyTexture, UpdateTexture};
 use crate::{TextureFormat, TextureSampling, TextureUsage};
 
@@ -138,6 +138,18 @@ impl StagedTexture {
     #[must_use]
     pub fn is_resident(&self) -> bool {
         self.realized.is_some() && !self.dirty
+    }
+
+    /// What the texture holds on the device once resident: its declared
+    /// pixel bytes, sampled or writable, the count its memory charge uses.
+    ///
+    /// # Panics
+    /// Panics if the declared dimensions have no byte count, fail-fast per
+    /// ADR-0063: `create` refuses such a texture before it stages it.
+    #[must_use]
+    pub fn device_bytes(&self) -> u64 {
+        expected_pixel_bytes(self.width, self.height, self.format)
+            .expect("create_texture refuses dimensions with no byte count") as u64
     }
 
     /// Realize the GPU texture if it isn't yet, or re-upload the
@@ -376,23 +388,45 @@ impl TextureRegistry {
         }
         if let Some(entry) = self.entries.get_mut(&texture_id) {
             if entry.is_resident() {
-                return Piece::Resident;
+                return Piece::Resident { bytes: entry.device_bytes() };
             }
             entry.ensure_realized(device, queue, texture_bindings);
-            return Piece::Landed;
+            return Piece::Landed { bytes: entry.device_bytes() };
         }
         if let Some(volume) = self.volumes.get_mut(&texture_id) {
             if volume.is_resident() {
-                return Piece::Resident;
+                return Piece::Resident { bytes: volume.device_bytes() };
             }
             volume.ensure_realized(device, queue);
-            return Piece::Landed;
+            return Piece::Landed { bytes: volume.device_bytes() };
         }
 
         match self.arrays.get_mut(&texture_id) {
             Some(array) => array.upload_layer(device, queue, &mut self.zeros),
             None => Piece::Missing,
         }
+    }
+
+    /// Where the texture, array or volume at `texture_id` stands for a
+    /// wait on it (ADR-0251 section 5). A reserved id is `Unknown`: the
+    /// white texture and the glyph atlas are the renderer's own, never
+    /// queued, and nothing a sender can wait on.
+    pub(super) fn residency(&self, texture_id: u32) -> Residency {
+        if is_reserved(texture_id) {
+            return Residency::Unknown;
+        }
+        if let Some(entry) = self.entries.get(&texture_id) {
+            return Residency::live(entry.is_resident(), entry.device_bytes());
+        }
+        if let Some(volume) = self.volumes.get(&texture_id) {
+            return Residency::live(volume.is_resident(), volume.device_bytes());
+        }
+
+        let Some(array) = self.arrays.get(&texture_id) else {
+            return Residency::Unknown;
+        };
+
+        Residency::live(array.is_resident(), array.device_bytes())
     }
 
     /// Stage a new texture, validating the declared dimensions, format,

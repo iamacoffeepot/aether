@@ -528,6 +528,38 @@ set for a frame, leave its id out of the list. None of those re-registers the
 program. A dispatch that lists an unknown set id, or a set whose layouts are
 not the pass's, drops whole with a warning.
 
+### Hold a draw back until its buffers are on the GPU
+
+A geometry and an instance buffer are staged by their creates and uploaded in a
+later frame. A set that draws them before then makes the renderer upload them
+in the frame of that first draw, which is the long frame streamed content
+wants to avoid. To add content only once drawing it uploads nothing, await it
+first and add the draw when the reply arrives:
+
+```jsonc
+// send_mail → aether.render  (kind: aether.render.await_resident)
+{ "resources": [
+    { "Geometry":  { "geometry_id": GEOMETRY_ID } },
+    { "Instances": { "instances_id": INSTANCES_ID } }
+] }
+```
+
+The reply is `aether.render.await_resident_result`. `{ "Ok": { "bytes": 72 } }`
+says both are on the GPU and how many bytes they hold there: 48 for the
+triangle's vertices and indices, 24 for the two records. Then send
+`aether.render.create_draw_set`, or patch the draw into a live set with
+`aether.render.update_draw_set`. Awaited resources also upload ahead of
+everything else in the queue, so asking is how a sender says what it needs
+soonest.
+
+A request that has to wait is answered in a later frame, after its own chain
+has settled: over MCP the `send_mail` call returns with no reply for it, and a
+second request sent once frames have run is answered inside the call. A
+component takes the reply in a `#[handler::response]` over
+`AwaitResidentResult` and adds the draw there. An `Err` names the resource that
+named nothing or was destroyed while awaited
+([Rendering](../systems/rendering.md#when-staged-bytes-reach-the-gpu)).
+
 ## From a wasm component
 
 The same kinds flow through the flat send verbs. Registration is a
