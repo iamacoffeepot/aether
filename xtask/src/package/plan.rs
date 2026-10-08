@@ -2,11 +2,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aether_chassis::boot_manifest::ChassisSettings;
+use aether_chassis::package::NamespacePath;
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 
 use crate::inventory::{PACKAGE_CHASSIS, PACKAGE_CHASSIS_HEADLESS};
-use crate::package::build::{ComponentSource, PlannedComponent};
+use crate::package::build::{ComponentSource, PlannedComponent, PlannedObject};
 
 /// Which chassis a package depot ships. Each selects the real host
 /// substrate binary from the chassis inventory; the two are distinct
@@ -40,6 +41,20 @@ pub(super) struct PackagePlan {
     /// reads them back.
     pub(super) settings: ChassisSettings,
     pub(super) components: Vec<PlannedComponent>,
+    /// The objects to ship that boot does not load, in authored order.
+    pub(super) named: Vec<PlannedObject>,
+}
+
+/// The flag-path inputs to [`resolve_package_plan`]: what the command line
+/// selects when no `--spec` file does.
+pub(super) struct FlagSelection<'a> {
+    pub(super) chassis: PackageChassis,
+    pub(super) components: &'a [String],
+    /// Init-config files, paired with `components` by position.
+    pub(super) configs: &'a [PathBuf],
+    /// `--named` values as flattened `<UNDER> <DIR>` pairs.
+    pub(super) named: &'a [String],
+    pub(super) settings: ChassisSettings,
 }
 
 /// `--spec` file schema (JSON). Mirrors [`PackagePlan`] with
@@ -58,6 +73,25 @@ struct PackageSpec {
     #[serde(default)]
     clear_color: Option<String>,
     components: Vec<SpecComponent>,
+    /// Objects to ship that boot does not load, each under the path a
+    /// running engine reads it at.
+    #[serde(default)]
+    named: Vec<SpecObject>,
+}
+
+/// One named-object entry in a [`PackageSpec`]: a one-key JSON object whose
+/// key says where the bytes come from.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "lowercase", deny_unknown_fields)]
+enum SpecObject {
+    /// A workspace package, built for wasm32 as its lib cdylib, shipped at
+    /// `path`.
+    Package { name: String, path: NamespacePath },
+    /// A prebuilt file shipped at `path`.
+    Wasm { file: PathBuf, path: NamespacePath },
+    /// Every file beneath the directory `from`, each shipped at
+    /// `<under>/<its relative path>`.
+    Dir { from: PathBuf, under: NamespacePath },
 }
 
 /// One component entry in a [`PackageSpec`].
@@ -86,16 +120,10 @@ struct SpecComponent {
 }
 
 /// Normalize the `package` pack inputs: `--spec <file>` when present, the
-/// component flags plus the flag-supplied chassis `settings` otherwise.
-/// Taking the input fields rather than the args struct keeps the flag path
-/// and the spec path resolving to one plan shape.
-pub(super) fn resolve_package_plan(
-    spec: Option<&Path>,
-    chassis: PackageChassis,
-    components: &[String],
-    configs: &[PathBuf],
-    settings: ChassisSettings,
-) -> Result<PackagePlan> {
+/// flag selection otherwise. Taking the input fields rather than the args
+/// struct keeps the flag path and the spec path resolving to one plan shape.
+pub(super) fn resolve_package_plan(spec: Option<&Path>, flags: FlagSelection<'_>) -> Result<PackagePlan> {
+    let FlagSelection { chassis, components, configs, named, settings } = flags;
     if let Some(spec_path) = spec {
         return resolve_package_spec(spec_path, chassis);
     }
@@ -117,7 +145,15 @@ pub(super) fn resolve_package_plan(
             export: None,
         })
         .collect();
-    Ok(PackagePlan { chassis, settings, components })
+    let named = named.chunks_exact(2).map(named_directory).collect::<Result<_>>()?;
+    Ok(PackagePlan { chassis, settings, components, named })
+}
+
+/// One `--named <UNDER> <DIR>` pair as the directory it ships.
+fn named_directory(pair: &[String]) -> Result<PlannedObject> {
+    let under =
+        NamespacePath::new(&pair[0]).with_context(|| format!("--named {}: not a path to ship under", pair[0]))?;
+    Ok(PlannedObject::Dir { from: PathBuf::from(&pair[1]), under })
 }
 
 /// Parse a `--spec` file into a plan. Relative paths inside the spec
@@ -157,6 +193,19 @@ fn resolve_package_spec(spec_path: &Path, chassis_flag: PackageChassis) -> Resul
     if components.is_empty() {
         bail!("package spec {} lists no components", spec_path.display());
     }
+    let named = spec
+        .named
+        .into_iter()
+        .map(|object| match object {
+            SpecObject::Package { name, path } => {
+                PlannedObject::Single { source: ComponentSource::Package(name), path }
+            }
+            SpecObject::Wasm { file, path } => {
+                PlannedObject::Single { source: ComponentSource::Prebuilt(anchor(&file)), path }
+            }
+            SpecObject::Dir { from, under } => PlannedObject::Dir { from: anchor(&from), under },
+        })
+        .collect();
     Ok(PackagePlan {
         chassis: spec.chassis.unwrap_or(chassis_flag),
         settings: ChassisSettings {
@@ -166,6 +215,7 @@ fn resolve_package_spec(spec_path: &Path, chassis_flag: PackageChassis) -> Resul
             clear_color: spec.clear_color,
         },
         components,
+        named,
     })
 }
 
@@ -186,8 +236,19 @@ mod tests {
 
     use aether_chassis::boot_manifest::ChassisSettings;
 
-    use super::{PackageChassis, resolve_package_plan};
-    use crate::package::build::ComponentSource;
+    use super::{FlagSelection, PackageChassis, resolve_package_plan};
+    use crate::package::build::{ComponentSource, PlannedObject};
+
+    /// A desktop flag selection of `components` and `configs` and nothing else.
+    fn flags<'a>(components: &'a [String], configs: &'a [PathBuf]) -> FlagSelection<'a> {
+        FlagSelection {
+            chassis: PackageChassis::Desktop,
+            components,
+            configs,
+            named: &[],
+            settings: ChassisSettings::default(),
+        }
+    }
 
     #[test]
     fn flag_plan_pairs_configs_by_position_and_classifies_sources() {
@@ -200,8 +261,10 @@ mod tests {
         let configs = vec![PathBuf::from("camera.cfg")];
         let settings =
             ChassisSettings { title: Some("loco".to_owned()), tick_hz: Some(60), ..ChassisSettings::default() };
-        let plan = resolve_package_plan(None, PackageChassis::Desktop, &components, &configs, settings)
-            .expect("resolve flag plan");
+        let named = vec!["modules".to_owned(), "build/squares".to_owned()];
+        let plan =
+            resolve_package_plan(None, FlagSelection { named: &named, settings, ..flags(&components, &configs) })
+                .expect("resolve flag plan");
 
         assert_eq!(plan.settings.title.as_deref(), Some("loco"));
         assert_eq!(plan.settings.tick_hz, Some(60));
@@ -214,11 +277,22 @@ mod tests {
             "the config pairs to the first component by position",
         );
         assert_eq!(plan.components[1].config, None, "the trailing component is config-less");
+        assert!(
+            matches!(plan.named.as_slice(), [PlannedObject::Dir { from, under }]
+                if from == Path::new("build/squares") && under.as_str() == "modules"),
+            "a --named pair is one directory under its path: {:?}",
+            plan.named,
+        );
 
         let excess = vec![PathBuf::from("a"), PathBuf::from("b"), PathBuf::from("c")];
-        let err = resolve_package_plan(None, PackageChassis::Desktop, &components, &excess, ChassisSettings::default())
+        let err = resolve_package_plan(None, flags(&components, &excess))
             .expect_err("more configs than components is rejected");
         assert!(err.to_string().contains("pair by position"), "excess configs are rejected: {err}");
+
+        let uppercase = vec!["Modules".to_owned(), "build/squares".to_owned()];
+        let err = resolve_package_plan(None, FlagSelection { named: &uppercase, ..flags(&components, &[]) })
+            .expect_err("a --named path that is not a namespace path is rejected");
+        assert!(err.to_string().contains("--named Modules"), "the refused value is named: {err}");
     }
 
     #[test]
@@ -237,14 +311,14 @@ mod tests {
 
         let both = dir.join("both.json");
         fs::write(&both, r#"{ "components": [ { "package": "p", "wasm": "p.wasm" } ] }"#).expect("write both spec");
-        let err = resolve_package_plan(Some(&both), PackageChassis::Desktop, &[], &[], ChassisSettings::default())
-            .expect_err("package and wasm together is rejected");
+        let err =
+            resolve_package_plan(Some(&both), flags(&[], &[])).expect_err("package and wasm together is rejected");
         assert!(err.to_string().contains("exactly one of"), "package+wasm rejected: {err}");
 
         let neither = dir.join("neither.json");
         fs::write(&neither, r#"{ "components": [ { "name": "n" } ] }"#).expect("write neither spec");
-        let err = resolve_package_plan(Some(&neither), PackageChassis::Desktop, &[], &[], ChassisSettings::default())
-            .expect_err("neither package nor wasm is rejected");
+        let err =
+            resolve_package_plan(Some(&neither), flags(&[], &[])).expect_err("neither package nor wasm is rejected");
         assert!(err.to_string().contains("exactly one of"), "neither package nor wasm rejected: {err}");
 
         fs::remove_dir_all(&dir).ok();

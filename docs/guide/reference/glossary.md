@@ -172,9 +172,11 @@ Staged component/config instructions consumed while a substrate starts.
 **Package depot**
 
 The shippable directory `cargo xtask package` emits: one chassis binary, the
-workspace licenses, a persisted `pack/manifest`, and content-addressed component
-and config objects under `pack/objects/`. Its chassis boots by resolving the
-manifest against those objects, so it does not require the development hub.
+workspace licenses, a persisted `pack/manifest`, and content-addressed objects
+under `pack/objects/`: the component and config objects boot loads, and the
+named objects the manifest lists under the paths a running engine reads them
+at. Its chassis boots by resolving the manifest against those objects, so it
+does not require the development hub.
 
 **Asset bundle**
 

@@ -16,7 +16,7 @@ use std::time::Duration;
 use aether_actor::ProtocolRef;
 use aether_component::{ComponentHostCapability, ComponentHostParams};
 use aether_data::{KindId, MailId};
-use aether_fs::{FsCapability, NamespaceRoots};
+use aether_fs::{FsCapability, NamespaceRoots, ObjectSource};
 use aether_inventory::InventoryCapability;
 use aether_kinds::{CaptureFrame, CaptureFrameResult, FrameVerdict};
 use aether_lifecycle::LifecycleCapability;
@@ -506,7 +506,7 @@ impl SubstrateHarnessChassis {
             // ADR-0156 §5: compose + stage the lifecycle config in one paired call.
             .with_actor_configured::<LifecycleCapability>(frame_lifecycle_params(), LifecycleConfig::default());
         if let Some(roots) = io_roots {
-            builder = builder.with_actor_configured::<FsCapability>((), roots);
+            builder = builder.with_actor_configured::<FsCapability>(ObjectSource::Directory, roots);
         }
         // ADR-0161 slice R4: the render extension's frame hook boots the
         // reserved pumped `aether.render` slot on this thread at the builder's

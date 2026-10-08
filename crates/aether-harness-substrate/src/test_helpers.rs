@@ -299,7 +299,7 @@ pub fn init_save_sandbox(label: &str) -> &'static Path {
 /// [`init_save_sandbox`]) backs the `save://` namespace; `assets://`
 /// and `config://` reuse the same dir so writes that target either
 /// don't escape the sandbox, and `objects` reads it too, so a file
-/// written there under its sha256 hex name is an object. Pass the result to
+/// written there is an object at its path. Pass the result to
 /// `SubstrateHarness::builder().namespace_roots(...)`.
 ///
 /// Per issue 464, this is the no-env replacement for the old
