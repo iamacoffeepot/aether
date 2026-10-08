@@ -554,6 +554,37 @@ mod tests {
     }
 
     #[test]
+    fn named_objects_refuse_a_path_that_is_also_a_directory() {
+        // A depot whose `objects` namespace holds `world` as an object and
+        // `world/top.bin` beneath it is one no directory can mirror, so the
+        // run fails naming both files.
+        use std::fs;
+
+        let dir = named_scratch("nested");
+        fs::write(dir.join("boot.wasm"), [0x00, 0x61, 0x73, 0x6d, 1]).expect("write boot wasm");
+        fs::write(dir.join("squares").join("top.bin"), b"top").expect("write a directory file");
+        let spec_path = dir.join("depot.json");
+        let named = r#"{ "wasm": { "file": "boot.wasm", "path": "world" } },
+                       { "dir": { "from": "squares", "under": "world" } }"#;
+        let spec = format!(r#"{{ "components": [ {{ "wasm": "boot.wasm" }} ], "named": [ {named} ] }}"#);
+        fs::write(&spec_path, spec).expect("write spec");
+
+        let error = resolve_named(
+            &spec_plan(&spec_path).expect("resolve spec plan"),
+            Path::new("unused-for-prebuilt"),
+            Profile::Release,
+        )
+        .expect_err("a path that is also a directory is refused")
+        .to_string();
+        assert!(
+            error.contains("world/top.bin") && error.contains("boot.wasm"),
+            "both paths and files are named: {error}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn emitted_depot_ships_the_asset_tree_where_the_chassis_boot_looks_for_it() {
         // A depot's assets are the one part of `pack/` that is not
         // content-addressed: a component reads one by mailing the path an

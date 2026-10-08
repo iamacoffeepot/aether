@@ -43,7 +43,7 @@ pub use config::NamespaceRoots;
 // `into_layer`) ride the type and need no re-export.
 #[cfg(feature = "runtime")]
 pub use config::{NamespaceRootsLayer, NamespaceRootsOverlay};
-pub use named_object::{NamedObject, Sha256, Sha256ParseError};
+pub use named_object::{NamedObject, NestedObjectPaths, Sha256, Sha256ParseError, nested_object_paths};
 pub use namespace_path::{NamespacePath, NamespacePathError};
 pub use object_adapter::{NamedObjectError, ObjectSource};
 pub use registry::{AdapterRegistry, RegistryError, build_registry};

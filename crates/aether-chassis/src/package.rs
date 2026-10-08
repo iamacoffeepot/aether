@@ -64,7 +64,8 @@
 //! Optional scalars/strings are a presence byte (0/1) then the value;
 //! strings are a `u32` length then UTF-8 bytes. A named path is a
 //! [`NamespacePath`], and a path that is malformed, repeated, or out of
-//! order is a decode error, so one manifest has one byte image.
+//! order, or whose path is also a directory of another, is a decode error, so
+//! one manifest has one byte image.
 //!
 //! ## Object resolution
 //!
@@ -86,7 +87,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::str;
 
-pub use aether_fs::{NamedObject, NamespacePath, NamespacePathError, Sha256, Sha256ParseError};
+pub use aether_fs::{
+    NamedObject, NamespacePath, NamespacePathError, NestedObjectPaths, Sha256, Sha256ParseError, nested_object_paths,
+};
 use aether_substrate::config::ConfigError;
 
 use crate::autoload::{AutoloadComponent, expand_replicas};
@@ -266,6 +269,14 @@ pub enum ManifestDecodeError {
     /// A named object's path is not strictly greater than the one before
     /// it: the table is unsorted or repeats a path.
     ObjectsOutOfOrder,
+    /// A named object's path is also an ancestor of another named object's
+    /// path, which a directory cannot mirror.
+    NestedObjectPaths {
+        /// The path that names an object and is also an ancestor of another.
+        object: NamespacePath,
+        /// The path of an object under it.
+        beneath: NamespacePath,
+    },
 }
 
 impl fmt::Display for ManifestDecodeError {
@@ -280,6 +291,9 @@ impl fmt::Display for ManifestDecodeError {
             Self::BadObjectPath(source) => write!(f, "package manifest names an object at a bad path: {source}"),
             Self::ObjectsOutOfOrder => {
                 write!(f, "package manifest named objects are not in strictly ascending path order")
+            }
+            Self::NestedObjectPaths { object, beneath } => {
+                write!(f, "package manifest names an object at {object} and another beneath it at {beneath}")
             }
         }
     }
@@ -395,6 +409,12 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<PackageManifest, ManifestDecodeEr
             return Err(ManifestDecodeError::ObjectsOutOfOrder);
         }
         named.insert(path, NamedObject { sha256, size });
+    }
+    if let Some(nested) = nested_object_paths(&named) {
+        return Err(ManifestDecodeError::NestedObjectPaths {
+            object: nested.object.clone(),
+            beneath: nested.beneath.clone(),
+        });
     }
     Ok(PackageManifest { settings: ChassisSettings { title, window_mode, tick_hz, clear_color }, entries, named })
 }
@@ -726,7 +746,8 @@ mod tests {
         // The hand-written decode must admit only what the path constructor
         // admits, and only one ordering of a table: the bugs are a path the
         // adapter would refuse reaching the table, and a repeated path
-        // collapsing into one row without a word.
+        // collapsing into one row without a word, and a table the decode never
+        // hands to the nested-path check.
         let table = |paths: &[&str]| {
             let empty = PackageManifest { named: BTreeMap::new(), ..sample_manifest() };
             let mut bytes = encode_manifest(&empty);
@@ -747,6 +768,13 @@ mod tests {
         );
         assert_eq!(decode_manifest(&table(&["b", "a"])), Err(ManifestDecodeError::ObjectsOutOfOrder));
         assert_eq!(decode_manifest(&table(&["a", "a"])), Err(ManifestDecodeError::ObjectsOutOfOrder));
+        assert_eq!(
+            decode_manifest(&table(&["a", "a-b", "a/b"])),
+            Err(ManifestDecodeError::NestedObjectPaths {
+                object: NamespacePath::new("a").expect("a path"),
+                beneath: NamespacePath::new("a/b").expect("a path"),
+            })
+        );
     }
 
     #[test]

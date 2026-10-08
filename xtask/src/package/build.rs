@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use aether_chassis::autoload::{actor_lineage, selectable_exports};
 use aether_chassis::encode_config_json;
-use aether_chassis::package::NamespacePath;
+use aether_chassis::package::{NamespacePath, nested_object_paths};
 use aether_data::ActorLineageRecord;
 use anyhow::{Context, Result, bail};
 use cargo_metadata::Metadata;
@@ -168,7 +168,9 @@ fn locate_wasm(source: &ComponentSource, target_dir: &Path, profile: Profile) ->
 /// Resolve the plan's named objects to each shipped path and the file whose
 /// bytes ship there: a single object is built or located as a boot
 /// component's wasm is, and a directory contributes every file beneath it.
-/// Two entries resolving to one path fail the run naming both files.
+/// Two entries resolving to one path fail the run naming both files, and so
+/// does a path that is also the directory of another, which a directory of
+/// built files could not mirror.
 pub(super) fn resolve_named(
     plan: &PackagePlan,
     target_dir: &Path,
@@ -182,6 +184,14 @@ pub(super) fn resolve_named(
             }
             PlannedObject::Dir { from, under } => insert_named_directory(&mut named, from, under)?,
         }
+    }
+    if let Some(nested) = nested_object_paths(&named) {
+        let (object, beneath) = (nested.object, nested.beneath);
+        bail!(
+            "named object {object} ({}) is also a directory: {beneath} ({}) ships beneath it",
+            named[object].display(),
+            named[beneath].display(),
+        );
     }
     Ok(named)
 }

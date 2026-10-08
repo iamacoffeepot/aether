@@ -1,6 +1,7 @@
 //! [`NamespacePath`]: a path relative to a file namespace's root, valid by
 //! construction on every way in, wire decode and `Deserialize` included.
 
+use std::borrow::Borrow;
 use std::error::Error as StdError;
 use std::fmt;
 
@@ -86,6 +87,13 @@ const fn is_segment_byte(byte: u8) -> bool {
 impl fmt::Display for NamespacePath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// A path borrows as its text: equality, order and hash are those of the text.
+impl Borrow<str> for NamespacePath {
+    fn borrow(&self) -> &str {
+        self.as_str()
     }
 }
 
