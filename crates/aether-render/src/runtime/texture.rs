@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use aether_data::Blob;
 use aether_substrate::memory::{Charged, MemoryGauge};
 use aether_substrate::render::{
-    RealizedTexture, TextureBindings, TextureSpec, realize_texture, realize_writable_texture, upload_texture_full,
+    RealizedTexture, TextureBindings, TextureSpec, realize_texture, realize_writable_texture, upload_texture_rows,
 };
 use aether_substrate::session_ids::SessionIds;
 
@@ -26,8 +26,8 @@ use crate::{TextureFormat, TextureSampling, TextureUsage};
 /// A texture registered via `create_texture`: the staged pixels (the CPU
 /// source of truth), plus the GPU texture + bind group once the upload
 /// queue or a draw has made them. `create_texture` / `update_texture`
-/// only touch the staging side. `dirty` flags staging that the GPU copy
-/// hasn't caught up to yet — the next upload sends the whole texture. A
+/// only touch the staging side. `awaiting` names the staged rows the GPU
+/// copy hasn't caught up to yet — the next upload sends those rows. A
 /// `Writable` texture (ADR-0170) has no CPU staging: `pixels` stays
 /// empty, `update` warn-drops, and realization clears the GPU render
 /// target instead of uploading.
@@ -39,7 +39,40 @@ pub struct StagedTexture {
     pub usage: TextureUsage,
     pub pixels: TexturePixels,
     pub realized: Option<RealizedTexture>,
-    pub dirty: bool,
+    pub awaiting: Awaiting,
+}
+
+/// The staged rows that await upload to the device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Awaiting {
+    /// The device holds every staged byte, or the texture is writable and
+    /// has none.
+    Nothing,
+    /// Rows `first..end` of the staging changed since the last upload;
+    /// `first < end <= height`.
+    Rows { first: u32, end: u32 },
+}
+
+impl Awaiting {
+    /// Every row of a texture `height` rows tall.
+    #[must_use]
+    pub fn every_row(height: u32) -> Self {
+        if height == 0 {
+            Self::Nothing
+        } else {
+            Self::Rows { first: 0, end: height }
+        }
+    }
+
+    /// Widen the span to also cover rows `first..end`.
+    pub fn widen(&mut self, first: u32, end: u32) {
+        *self = match *self {
+            Self::Nothing => Self::Rows { first, end },
+            Self::Rows { first: held_first, end: held_end } => {
+                Self::Rows { first: held_first.min(first), end: held_end.max(end) }
+            }
+        };
+    }
 }
 
 /// The staged pixels of a texture. A created texture holds the received
@@ -91,7 +124,7 @@ impl StagedTexture {
             usage: TextureUsage::Sampled,
             pixels,
             realized: None,
-            dirty: true,
+            awaiting: Awaiting::every_row(height),
         }
     }
 
@@ -99,7 +132,7 @@ impl StagedTexture {
     /// uploads the cleared image.
     pub fn clear(&mut self) {
         self.pixels.edit().fill(0);
-        self.dirty = true;
+        self.awaiting = Awaiting::every_row(self.height);
     }
 
     /// Overwrite the `(x, y, width, height)` sub-rect of the staged
@@ -127,7 +160,7 @@ impl StagedTexture {
             let dst_start = dst_row * dst_stride + x as usize * bytes_per_pixel;
             staged[dst_start..dst_start + row_bytes].copy_from_slice(&pixels[src_start..src_start + row_bytes]);
         }
-        self.dirty = true;
+        self.awaiting.widen(y, y + height);
         true
     }
 
@@ -137,7 +170,7 @@ impl StagedTexture {
     /// render target exists.
     #[must_use]
     pub fn is_resident(&self) -> bool {
-        self.realized.is_some() && !self.dirty
+        self.realized.is_some() && self.awaiting == Awaiting::Nothing
     }
 
     /// What the texture holds on the device once resident: its declared
@@ -158,13 +191,15 @@ impl StagedTexture {
     /// available: from the upload queue's step, and from the record path
     /// for a texture a draw names first. A `Writable` texture realizes as a
     /// cleared render target (ADR-0170) and has no staging to re-upload
-    /// (`update` rejects it, so `dirty` never sets).
+    /// (`update` rejects it, so `awaiting` stays `Nothing`).
     pub fn ensure_realized(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, texture_bindings: &TextureBindings) {
         if let Some(realized) = &self.realized {
             // Already on the GPU; re-upload only if `update_texture`
             // dirtied the staging buffer since the last record.
-            if self.dirty {
-                upload_texture_full(queue, realized, self.pixels.bytes());
+            if let Awaiting::Rows { first, end } = self.awaiting {
+                let stride = self.width as usize * self.format.bytes_per_pixel();
+                let rows = &self.pixels.bytes()[first as usize * stride..end as usize * stride];
+                upload_texture_rows(queue, realized, first, rows);
             }
         } else {
             let spec = TextureSpec {
@@ -178,7 +213,7 @@ impl StagedTexture {
                 TextureUsage::Writable => realize_writable_texture(device, queue, texture_bindings, spec),
             });
         }
-        self.dirty = false;
+        self.awaiting = Awaiting::Nothing;
     }
 }
 
@@ -360,7 +395,10 @@ impl TextureRegistry {
     pub fn invalidate_device_resources(&mut self) {
         for entry in self.entries.values_mut() {
             entry.realized = None;
-            entry.dirty = entry.usage == TextureUsage::Sampled;
+            entry.awaiting = match entry.usage {
+                TextureUsage::Sampled => Awaiting::every_row(entry.height),
+                TextureUsage::Writable => Awaiting::Nothing,
+            };
         }
         for array in self.arrays.values_mut() {
             array.invalidate_device_resources();
@@ -492,7 +530,10 @@ impl TextureRegistry {
             usage: mail.usage,
             pixels: TexturePixels::Received(mail.pixels),
             realized: None,
-            dirty: mail.usage == TextureUsage::Sampled,
+            awaiting: match mail.usage {
+                TextureUsage::Sampled => Awaiting::every_row(mail.height),
+                TextureUsage::Writable => Awaiting::Nothing,
+            },
         };
         self.entries.insert(texture_id, self.memory.charged(expected, texture));
         CreateTextureResult::Ok { texture_id }
@@ -661,23 +702,42 @@ mod tests {
             usage: TextureUsage::Sampled,
             pixels: TexturePixels::Received(Blob::from(vec![0u8; 16])),
             realized: None,
-            dirty: false,
+            awaiting: Awaiting::Nothing,
         };
         // Overwrite the bottom-right pixel (1, 1) with 0xAA bytes.
         assert!(texture.apply_subrect(1, 1, 1, 1, &[0xAA, 0xAA, 0xAA, 0xAA]));
-        assert!(texture.dirty);
+        assert_eq!(texture.awaiting, Awaiting::Rows { first: 1, end: 2 });
         assert_eq!(&texture.pixels.bytes()[12..16], &[0xAA, 0xAA, 0xAA, 0xAA]);
         // The other three pixels are untouched.
         assert_eq!(&texture.pixels.bytes()[0..12], &[0u8; 12]);
 
         // Out of bounds (rect extends past the right edge).
-        texture.dirty = false;
+        texture.awaiting = Awaiting::Nothing;
         assert!(!texture.apply_subrect(1, 0, 2, 1, &[1, 2, 3, 4, 5, 6, 7, 8]));
-        assert!(!texture.dirty);
+        assert_eq!(texture.awaiting, Awaiting::Nothing);
         // Pixel-length mismatch for the declared rect.
         assert!(!texture.apply_subrect(0, 0, 1, 1, &[1, 2, 3]));
         // Zero-sized rect.
         assert!(!texture.apply_subrect(0, 0, 0, 1, &[]));
+    }
+
+    #[test]
+    fn two_updates_on_separate_rows_await_their_union() {
+        let mut texture = StagedTexture {
+            width: 2,
+            height: 6,
+            format: TextureFormat::R8,
+            sampling: TextureSampling::Linear,
+            usage: TextureUsage::Sampled,
+            pixels: TexturePixels::Received(Blob::from(vec![0u8; 12])),
+            realized: None,
+            awaiting: Awaiting::Nothing,
+        };
+
+        assert!(texture.apply_subrect(0, 4, 1, 1, &[1]));
+        assert!(texture.apply_subrect(1, 1, 1, 2, &[2, 3]));
+
+        assert_eq!(texture.awaiting, Awaiting::Rows { first: 1, end: 5 });
     }
 
     #[test]
@@ -690,16 +750,16 @@ mod tests {
             usage: TextureUsage::Sampled,
             pixels: TexturePixels::Received(Blob::from(vec![0u8; 8])),
             realized: None,
-            dirty: false,
+            awaiting: Awaiting::Nothing,
         };
 
         assert!(texture.apply_subrect(1, 0, 2, 2, &[10, 20, 30, 40]));
         assert_eq!(texture.pixels.bytes(), &[0, 10, 20, 0, 0, 30, 40, 0]);
-        assert!(texture.dirty);
+        assert_eq!(texture.awaiting, Awaiting::Rows { first: 0, end: 2 });
 
-        texture.dirty = false;
+        texture.awaiting = Awaiting::Nothing;
         assert!(!texture.apply_subrect(0, 0, 2, 1, &[1, 2, 3]));
-        assert!(!texture.dirty);
+        assert_eq!(texture.awaiting, Awaiting::Nothing);
     }
 
     /// ADR-0170: a writable create must arrive without staged pixels —
@@ -732,7 +792,10 @@ mod tests {
             panic!("an empty-pixels writable create must be accepted");
         };
         let entry = registry.entries.get(&texture_id).expect("accepted create stages an entry");
-        assert!(!entry.dirty, "a writable texture has no staging for the record path to re-upload");
+        assert!(
+            entry.awaiting == Awaiting::Nothing,
+            "a writable texture has no staging for the record path to re-upload"
+        );
     }
 
     /// ADR-0170: core WebGPU cannot linear-filter `R32Float`, so a
@@ -785,7 +848,7 @@ mod tests {
 
         let entry = registry.entries.get(&texture_id).expect("entry survives the dropped update");
         assert!(entry.pixels.bytes().is_empty(), "a writable texture must never gain staged pixels");
-        assert!(!entry.dirty, "a dropped update must not dirty a writable texture");
+        assert!(entry.awaiting == Awaiting::Nothing, "a dropped update must not dirty a writable texture");
     }
 
     #[test]
@@ -834,7 +897,10 @@ mod tests {
         assert_eq!(sampled.sampling, TextureSampling::Nearest);
         assert_eq!(sampled.pixels.bytes(), sampled_pixels);
         assert!(sampled.realized.is_none(), "the old-device texture must be released");
-        assert!(sampled.dirty, "sampled pixels must be upload-ready for the replacement device");
+        assert!(
+            sampled.awaiting == Awaiting::every_row(sampled.height),
+            "sampled pixels must be upload-ready for the replacement device"
+        );
 
         let writable = &registry.entries[&writable_id];
         assert_eq!(writable.width, 3);
@@ -842,11 +908,17 @@ mod tests {
         assert_eq!(writable.format, TextureFormat::R16Float);
         assert!(writable.pixels.bytes().is_empty(), "writable textures remain deliberately unstaged");
         assert!(writable.realized.is_none(), "the old-device writable texture must be released");
-        assert!(!writable.dirty, "a writable texture must recreate cleared rather than attempt an upload");
+        assert!(
+            writable.awaiting == Awaiting::Nothing,
+            "a writable texture must recreate cleared rather than attempt an upload"
+        );
 
         let white = &registry.entries[&WHITE_TEXTURE_ID];
         assert_eq!(white.pixels.bytes(), vec![255, 255, 255, 255]);
         assert!(white.realized.is_none());
-        assert!(white.dirty, "the internal sampled texture must rebuild with the rest of the registry");
+        assert!(
+            white.awaiting == Awaiting::every_row(white.height),
+            "the internal sampled texture must rebuild with the rest of the registry"
+        );
     }
 }

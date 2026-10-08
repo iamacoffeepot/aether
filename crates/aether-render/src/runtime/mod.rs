@@ -1895,7 +1895,7 @@ mod tests {
         Blend, Mips, OutputSlot, PassStage, ProgramPass, Sampling, ScreenTriangle, ScreenVertex, Shape, SlotExtent,
         SlotShape, SlotSpec, TextureFormat, TextureSampling, TextureUsage, VertexAttribute, VertexFormat, Wrap,
     };
-    use super::texture::{StagedTexture, TexturePixels};
+    use super::texture::{Awaiting, StagedTexture, TexturePixels};
     use super::*;
     use aether_actor::HandlesKind;
     use aether_data::{Blob, Kind, SessionToken, Uuid};
@@ -1925,7 +1925,7 @@ mod tests {
             usage: TextureUsage::Sampled,
             pixels: TexturePixels::Received(Blob::from(pixels)),
             realized: None,
-            dirty: true,
+            awaiting: Awaiting::every_row(2),
         };
 
         MemoryGauge::detached().charged(bytes, texture)

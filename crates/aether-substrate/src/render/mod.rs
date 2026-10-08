@@ -55,7 +55,7 @@ pub use quad::{
     QUAD_VERTICES_PER_QUAD, QUAD_VERTICES_PER_TRIANGLE, QuadOverlayPassRecord, QuadPipeline, RealizedTexture,
     TextureBindings, TextureSpec, build_quad_pipeline, build_texture_bindings, push_screen_quad_vertices,
     push_screen_triangle_vertices, push_world_quad_vertices, push_world_triangle_vertices, realize_texture,
-    realize_writable_texture, record_quad_overlay_pass, upload_texture_full,
+    realize_writable_texture, record_quad_overlay_pass, upload_texture_full, upload_texture_rows,
 };
 pub use shape::{
     SHAPE_VERTEX_BUFFER_BYTES, SHAPE_VERTEX_STRIDE, SHAPE_VERTICES_PER_SHAPE, ShapeParams, push_screen_shape_vertices,
