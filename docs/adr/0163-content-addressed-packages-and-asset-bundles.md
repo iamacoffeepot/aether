@@ -6,7 +6,8 @@
 - **Amended:** 2026-10-04 — Section 3: `AssetWindow` gains `asset_blob`, which hands an asset over as a `Blob` the guest holds by handle, a range of the module's code where it already sits in the engine blob store; a blob the actor keeps or sends on holds that code resident until it drops, while the window itself still lets go when `wire` returns (issue 7393).
 - **Amended:** 2026-10-07 — Section 3: the load window is replaced by module-held asset blobs (ADR-0250): a publish checks each asset in as its own deduplicated blob held by the `Module`, and `asset` / `asset_blob` read from the instance's own module through the `Assets` ctx trait in every hook.
 - **Amended:** 2026-10-07 — Section 4: the load-window door is replaced by the module model (ADR-0250): a `Spawn` carries no bytes, and a spawn of a published type always builds an instance that can read its assets, in every hook, from its own module.
-- **Amended:** 2026-10-07 — Sections 1 and 4: a running engine reads the object store through the read-only `objects` file namespace, addressed by hash, so an actor can read an object and publish it; "no runtime payload fetch" is narrowed to a live instance's payload (issue 7629).
+- **Amended:** 2026-10-07 — Sections 1 and 4: a running engine reads the object store through the read-only `objects` file namespace, read by path, so an actor can read an object and publish it; "no runtime payload fetch" is narrowed to a live instance's payload (issue 7629).
+- **Amended:** 2026-10-07 — Sections 1 and 4: the manifest gains a table of named objects, the objects a package ships that boot checks for and does not load, each under the path a running engine reads it at; the `objects` namespace reads by that path, against a package's table or a plain directory of files, and the manifest format goes to version 3 (issue 7631).
 
 ## Context
 
@@ -37,7 +38,7 @@ The shippable artifact is a directory holding the chassis binary, content-addres
 <package>/
   aether-substrate            # chassis binary — the platform updates it
   pack/manifest               # the one manifest
-  pack/objects/<sha256>       # component wasm and config bytes, immutable
+  pack/objects/<sha256>       # component wasm and config bytes, and named objects, immutable
 ```
 
 The manifest is a persisted, versioned artifact (this ADR is the "revisit" the bundle-pack doc called for). It carries the chassis settings and a list of entries, each referencing objects by hash:
@@ -46,6 +47,7 @@ The manifest is a persisted, versioned artifact (this ADR is the "revisit" the b
 pub struct PackageManifest {
     pub settings: ChassisSettings,       // title, window_mode, tick_hz
     pub entries: Vec<PackageEntry>,
+    pub named: BTreeMap<NamespacePath, NamedObject>,
 }
 
 pub struct PackageEntry {
@@ -55,11 +57,18 @@ pub struct PackageEntry {
     pub export: Option<String>,
     pub replicas: Option<u32>,
 }
+
+pub struct NamedObject {
+    pub sha256: Sha256,                  // -> pack/objects/<hash>
+    pub size: u64,
+}
 ```
 
 Identity is the content hash everywhere; a name is a label, never a key. The chassis boots by resolving manifest references against the local object store instead of receiving inline bytes. Deletion is manifest-shape: a file exists because the manifest references it. Platform update, integrity verify, and repair all reduce to converging the disk toward the manifest by hash — the platform's own machinery does this for the base install, and aether ships no updater.
 
-**Amended 2026-10-07 (issue 7629):** a running engine reads the same store. The file capability registers a read-only `objects` namespace beside `save`, `assets` and `config` (ADR-0041 §2), and an actor mails `aether.fs.read` for namespace `objects` with an object's lowercase hex sha256 as the path. The reply carries the object as a `Blob`, which the actor publishes with `aether.component.publish` and spawns from with `aether.component.spawn`. The namespace is addressed by hash and nothing else: a path that is not 64 characters of `0-9a-f`, and every write, delete and list, answers `FsError::Forbidden`, and an object the store does not hold answers `NotFound`. The read is unverified, as boot's is: the name is a locator, integrity is the platform's job, and the engine's identity for the bytes is the hash its blob store takes at check-in (ADR-0241 §2). A packaged chassis roots the namespace at `pack/objects`; an unpackaged one roots it at `AETHER_OBJECTS_DIR` / `--objects-dir`, a plain directory of hash-named files, which defaults to `objects` beside the binary and need not exist.
+**Amended 2026-10-07 (issue 7629):** a running engine reads the same store. The file capability registers a read-only `objects` namespace beside `save`, `assets` and `config` (ADR-0041 §2), and an actor mails `aether.fs.read` for namespace `objects` with an object's path. The reply carries the object as a `Blob`, which the actor publishes with `aether.component.publish` and spawns from with `aether.component.spawn`. The namespace is read by path and nothing else. A path is a `NamespacePath`: segments of `a-z`, `0-9`, `.`, `_` and `-` joined by single `/`, none of them `.` or `..`. A path that is not one, and every write and delete, answers `FsError::Forbidden`; a path that names no object answers `NotFound`; `list` is one level deep and answers bare names, as it does in every other file namespace. The capability is composed with an `ObjectSource` that says how a path finds its file. `Package` is a packaged chassis: the path is a key of the manifest's table of named objects, the file read is the one under `pack/objects` named for that row's sha256, and a request's path is never joined to a directory. `Directory` is an engine with no package: an object is the file at its path under `AETHER_OBJECTS_DIR` / `--objects-dir`, a plain directory that defaults to `objects` beside the binary and need not exist. The same request works against both, so a directory of built files stands in for a package. The read is unverified, as boot's is: integrity is the platform's job, and the engine's identity for the bytes is the hash its blob store takes at check-in (ADR-0241 §2).
+
+**Amended 2026-10-07 (issue 7631):** the manifest lists the objects a package ships that boot does not load. `named` is a table from path to `NamedObject`, the object's sha256 and its size in bytes. An object's identity on disk stays its sha256, and a running engine names it by path: a boot entry reaches an object by hash, and a named object is reachable by path. A file exists under `pack/objects` because an entry or the table references it. A packaged chassis hands the table to the `objects` namespace, which checks at boot that every named object is a regular file of its recorded size and fails the boot naming the path, the hash and the lengths when one is not, so a truncated install fails at boot as a missing boot object does. The check is by size alone: bytes are not read or hashed. The table is encoded after the entries in ascending path order, and a path that is malformed, repeated or out of order is a decode error, so one manifest has one byte image. The format version goes from 2 to 3, and a depot built for version 2 is re-emitted.
 
 The package is single-channel in this ADR. Object lookup is written as an ordered walk over a list of stores that today has one entry, so a later overlay channel (mods, server-pushed content) is a list append, not a redesign — but no layering machinery is built now.
 

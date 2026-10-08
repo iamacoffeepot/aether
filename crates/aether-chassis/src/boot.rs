@@ -22,6 +22,7 @@ use aether_actor::log::DEFAULT_RING_CAP;
 use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
 use aether_codec::frame::install_max_frame_size;
 use aether_component::{ComponentHostCapability, ComponentHostParams};
+pub use aether_fs::ObjectSource;
 use aether_fs::{FsCapability, NamespaceRoots};
 use aether_http::HttpCapability;
 use aether_inventory::InventoryCapability;
@@ -50,7 +51,7 @@ use aether_trace::TraceDispatchCapability;
 use crate::autoload::{AutoloadComponent, boot_manifest_autoload, load_boot_components};
 use crate::boot_manifest::ChassisSettings;
 use crate::cli::{ChassisCli, ChassisMeta};
-use crate::package::{package_assets_root, package_autoload, package_objects_root};
+use crate::package::{PackageBoot, package_assets_root, package_autoload, package_objects_root};
 
 /// Env fallback for the chassis config-file path. The path is
 /// meta-config: it selects the file source and does not change the file
@@ -815,6 +816,9 @@ pub struct CommonBoot {
     /// fs cap via the builder's programmatic layer so the cap uses the exact
     /// same value.
     pub namespace_roots: NamespaceRoots,
+    /// How the fs cap's `objects` namespace finds an object's file: the
+    /// cap's composer-supplied `Params`, carried from [`CommonEnv`].
+    pub object_source: ObjectSource,
 }
 
 /// The full-stack chassis env (desktop + headless): the resolved config *data*
@@ -849,6 +853,11 @@ pub struct CommonEnv {
     /// Resolved chassis-side and passed to the fs cap programmatically so the
     /// cap uses the exact same value.
     pub namespace_roots: NamespaceRoots,
+    /// How the `objects` file namespace finds an object's file. A package
+    /// booted with no operator-supplied fs root gives its object directory
+    /// and its table of named objects; every other boot reads the plain
+    /// directory at `namespace_roots.objects`.
+    pub object_source: ObjectSource,
     /// The substrate runtime knobs (#3849), resolved off the source stack. Only
     /// [`RuntimeConfig::log_filter`] is consumed chassis-side (re-applied after
     /// the subscriber installs, in each chassis's `Chassis::build`); the field
@@ -916,12 +925,13 @@ impl CommonEnv {
         // builder seam at install time, so lowering no longer happens here.
         let chassis_boot = sources.resolve::<ChassisBootConfig>()?;
         // Read before resolving, because resolution consumes the staged argv
-        // layer and programmatic override: a depot's own `pack/assets` and
-        // `pack/objects` fill the `assets` and `objects` roots only when no
-        // source above the compiled defaults supplied one, so an operator's
-        // `AETHER_ASSETS_DIR` / `--assets-dir` or `AETHER_OBJECTS_DIR` /
-        // `--objects-dir` still wins over a shipped package (the issue 4001 precedence the
-        // manifest's tick cadence and window mode already take).
+        // layer and programmatic override: a depot's own `pack/assets` fills
+        // the `assets` root, and its named objects become the `objects`
+        // namespace, only when no source above the compiled defaults supplied
+        // an fs root, so an operator's `AETHER_ASSETS_DIR` / `--assets-dir` or
+        // `AETHER_OBJECTS_DIR` / `--objects-dir` still wins over a shipped
+        // package (the issue 4001 precedence the manifest's tick cadence and
+        // window mode already take).
         //
         // Provenance is per member rather than per field, so any pinned fs
         // root — save or config as much as assets or objects — keeps the whole resolved
@@ -954,35 +964,43 @@ impl CommonEnv {
         // the winning boot source here keeps the manifest-vs-package precedence in
         // one place; each chassis applies the subset it supports (title /
         // window_mode on desktop, tick_hz on headless).
-        let (package_settings, autoload) = match (chassis_boot.boot_manifest.clone(), chassis_boot.package.clone()) {
-            (Some(path), _) => (ChassisSettings::default(), boot_manifest_autoload(Path::new(&path))?),
-            (None, Some(root)) => {
-                // A depot ships its assets beside its objects, so the `assets`
-                // namespace roots inside the package rather than beside the
-                // binary. Without this a shipped product boots with an empty
-                // asset namespace and every `aether.fs.read` a component makes
-                // answers `NotFound`. The `objects` namespace roots at the
-                // package's own object store under the same gate, so an actor
-                // reads by hash the objects the depot ships, the ones boot did
-                // not load included.
-                if !roots_supplied {
-                    let package_root = Path::new(&root);
-                    namespace_roots.objects = package_objects_root(package_root);
-                    if let Some(assets) = package_assets_root(package_root) {
-                        namespace_roots.assets = assets;
-                    }
+        let (package_settings, autoload, object_source) =
+            match (chassis_boot.boot_manifest.clone(), chassis_boot.package.clone()) {
+                (Some(path), _) => {
+                    let autoload = boot_manifest_autoload(Path::new(&path))?;
+                    (ChassisSettings::default(), autoload, ObjectSource::Directory)
                 }
-                package_autoload(Path::new(&root))?
-            }
-            (None, None) => (ChassisSettings::default(), Vec::new()),
-        };
+                (None, Some(root)) => {
+                    let package_root = Path::new(&root);
+                    let PackageBoot { settings, components, named } = package_autoload(package_root)?;
+                    // A depot ships its assets beside its objects, so the `assets`
+                    // namespace roots inside the package rather than beside the
+                    // binary. Without this a shipped product boots with an empty
+                    // asset namespace and every `aether.fs.read` a component makes
+                    // answers `NotFound`. Under the same gate the `objects`
+                    // namespace reads the package's named objects by path out of
+                    // its own object store, and the fs cap fails the boot when one
+                    // is absent or the wrong length. An operator who pinned an fs
+                    // root keeps the plain directory at the `objects` root.
+                    let object_source = if roots_supplied {
+                        ObjectSource::Directory
+                    } else {
+                        if let Some(assets) = package_assets_root(package_root) {
+                            namespace_roots.assets = assets;
+                        }
+                        ObjectSource::Package { root: package_objects_root(package_root), named }
+                    };
+                    (settings, components, object_source)
+                }
+                (None, None) => (ChassisSettings::default(), Vec::new(), ObjectSource::Directory),
+            };
 
         // The base stratum (`ChassisBase`) carries the source stack and the three
         // non-cap members `composed` installs ahead of the chassis's own delta —
         // embedded here so each `Chassis::build` can resolve its driver knobs off
         // `base.sources` before lifting the base out.
         let base = ChassisBase { sources, actor_ring, scheduler_tuning, registry_queues, settlement };
-        Ok(Self { base, namespace_roots, runtime, chassis_boot, autoload, package_settings })
+        Ok(Self { base, namespace_roots, object_source, runtime, chassis_boot, autoload, package_settings })
     }
 
     /// Read this resolved env off into the shared [`CommonBoot`] cap args in one
@@ -997,8 +1015,16 @@ impl CommonEnv {
     /// `composed`, and the source stack rides [`ChassisBase`].
     #[must_use]
     pub fn into_common_boot(self, component_host_params: ComponentHostParams) -> CommonBoot {
-        let Self { base: _, namespace_roots, runtime: _, chassis_boot, autoload: _, package_settings: _ } = self;
-        CommonBoot { chassis_boot, component_host_params, namespace_roots }
+        let Self {
+            base: _,
+            namespace_roots,
+            object_source,
+            runtime: _,
+            chassis_boot,
+            autoload: _,
+            package_settings: _,
+        } = self;
+        CommonBoot { chassis_boot, component_host_params, namespace_roots, object_source }
     }
 }
 
@@ -1042,8 +1068,9 @@ pub fn with_full_stack_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -
         // its aggregate-membership declaration in one call.
         .with_chassis_config_member(&boot.chassis_boot)
         .with_actor::<ComponentHostCapability>(boot.component_host_params)
-        // Programmatic: the fs cap uses the exact roots resolved chassis-side.
-        .with_actor_configured::<FsCapability>((), boot.namespace_roots)
+        // Programmatic: the fs cap uses the exact roots resolved chassis-side,
+        // and its params say how the `objects` namespace finds an object.
+        .with_actor_configured::<FsCapability>(boot.object_source, boot.namespace_roots)
         // Builder-resolved off the source stack: `HttpConfig`.
         .with_actor::<HttpCapability>(())
         .with_actor::<TcpCapability>(())

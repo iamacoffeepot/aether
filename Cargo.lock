@@ -426,7 +426,6 @@ dependencies = [
  "crossbeam-channel",
  "inventory",
  "serde_json",
- "sha2",
  "tracing",
  "wasmtime",
 ]

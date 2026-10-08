@@ -1,6 +1,6 @@
 //! Issue 7629: a guest that pages a module in from the `objects` file
-//! namespace, the way a shipped loader does: it reads a package object by
-//! hash, publishes the blob it is answered with, and spawns a type from it.
+//! namespace, the way a shipped loader does: it reads an object by its
+//! path, publishes the blob it is answered with, and spawns a type from it.
 //!
 //! - `ObjectLoader` (`test.object.loader`, root) answers each `ObjectSpawn`
 //!   with the `SpawnResult` of the spawn its read and publish lead to, or with
@@ -14,7 +14,7 @@ use aether_fs::{FsCapability, NamespaceAddr, Read, ReadResult};
 use aether_kinds::{Publish, PublishResult, Spawn, SpawnResult};
 use aether_test_fixtures_kinds::ObjectSpawn;
 
-/// The file namespace a package object is read from.
+/// The file namespace an object is read from.
 const OBJECTS: &str = "objects";
 
 /// Carried across the read: the reply owed to the requester, and the
@@ -53,8 +53,8 @@ impl WasmActor for ObjectLoader {
     #[handler::request]
     fn on_object_spawn(&mut self, ctx: &mut WasmCtx<'_>, request: ObjectSpawn) -> Pending<SpawnResult> {
         let (pending, held) = ctx.hold::<SpawnResult>();
-        let ObjectSpawn { hash, namespace } = request;
-        let read = Read { addr: NamespaceAddr::new(OBJECTS, hash) };
+        let ObjectSpawn { path, namespace } = request;
+        let read = Read { addr: NamespaceAddr::new(OBJECTS, path) };
         let _ = ctx.send_with_context::<FsCapability>(&read, ReadContext { held, namespace });
         pending
     }

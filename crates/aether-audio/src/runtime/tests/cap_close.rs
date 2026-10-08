@@ -1,5 +1,5 @@
 use super::*;
-use aether_fs::{FsCapability, NamespaceRoots};
+use aether_fs::{FsCapability, NamespaceRoots, ObjectSource};
 use aether_substrate::testing::{PumpedDriver, boot_bare_test_chassis, cleanup, fresh_substrate_and_rx, scratch_dir};
 use aether_substrate::{BootError, Subname};
 
@@ -47,7 +47,7 @@ fn close_purges_sender_state_and_in_flight_load() {
         config: scratch.join("config"),
         objects: scratch.join("objects"),
     };
-    let _fs = chassis.boot_pumped_actor::<FsCapability>(roots, ()).expect("the fs cap boots");
+    let _fs = chassis.boot_pumped_actor::<FsCapability>(roots, ObjectSource::Directory).expect("the fs cap boots");
     let mut driver: PumpedDriver<AudioCapability> =
         PumpedDriver::boot(chassis, AudioConfig { output: AudioOutput::Null, requested_sample_rate: None }, ());
     let probe = driver

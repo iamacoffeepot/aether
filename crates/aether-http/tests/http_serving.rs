@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use aether_chassis::autoload::AutoloadComponent;
 use aether_chassis::boot::{
-    ActorRingConfig, ChassisBase, ChassisBootConfig, CommonEnv, RegistryQueueConfig, RuntimeConfig,
+    ActorRingConfig, ChassisBase, ChassisBootConfig, CommonEnv, ObjectSource, RegistryQueueConfig, RuntimeConfig,
     SchedulerTuningConfig, SettlementConfig,
 };
 use aether_chassis::boot_manifest::ChassisSettings;
@@ -385,6 +385,7 @@ mod tests {
                 settlement: SettlementConfig::default(),
             },
             namespace_roots: test_namespace_roots(sandbox),
+            object_source: ObjectSource::Directory,
             runtime: RuntimeConfig::default(),
             chassis_boot: ChassisBootConfig::default(),
             package_settings: ChassisSettings::default(),
@@ -476,6 +477,7 @@ mod tests {
                 settlement: SettlementConfig::default(),
             },
             namespace_roots: test_namespace_roots(sandbox),
+            object_source: ObjectSource::Directory,
             runtime: RuntimeConfig::default(),
             chassis_boot: ChassisBootConfig::default(),
             package_settings: ChassisSettings::default(),
@@ -567,6 +569,7 @@ mod tests {
                 settlement: SettlementConfig::default(),
             },
             namespace_roots: test_namespace_roots(sandbox),
+            object_source: ObjectSource::Directory,
             runtime: RuntimeConfig::default(),
             chassis_boot: ChassisBootConfig::default(),
             package_settings: ChassisSettings::default(),
@@ -656,6 +659,7 @@ mod tests {
                 settlement: SettlementConfig::default(),
             },
             namespace_roots: test_namespace_roots(sandbox),
+            object_source: ObjectSource::Directory,
             runtime: RuntimeConfig::default(),
             chassis_boot: ChassisBootConfig::default(),
             package_settings: ChassisSettings::default(),
@@ -873,6 +877,7 @@ mod tests {
                 settlement: SettlementConfig::default(),
             },
             namespace_roots: test_namespace_roots(sandbox),
+            object_source: ObjectSource::Directory,
             runtime: RuntimeConfig::default(),
             chassis_boot: ChassisBootConfig::default(),
             package_settings: ChassisSettings::default(),

@@ -133,9 +133,6 @@ aether-clipboard = { path = "../aether-clipboard" }
 # iamacoffeepot/aether#4156).
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 wasmtime = { workspace = true }
-# `harness_object_load` names a package object by the sha256 of its bytes,
-# as the package depot does.
-sha2 = { workspace = true }
 # The host's unit test waits on its egress wake through the channel
 # `aether_substrate::testing::await_signal` takes.
 crossbeam-channel = "0.5"

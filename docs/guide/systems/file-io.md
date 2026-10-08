@@ -95,11 +95,11 @@ guess ids or treat the facility as arbitrary host execution.
   level data. A write or delete here replies `Forbidden`.
 - **`config`** — writable, for component-authored configuration (keybinds and
   the like).
-- **`objects`** — read-only, the content-addressed objects a package ships
-  under `pack/objects`
+- **`objects`** — read-only, the objects an engine reads by path after boot:
+  the named objects a package ships
   ([ADR-0163](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0163-content-addressed-packages-and-asset-bundles.md)
-  §1). It is addressed by hash and nothing else: `addr.path` is an object's
-  sha256 as 64 lowercase hex characters, and `read` is its only verb.
+  §1), or the files of a plain directory on an engine with no package. Its
+  verbs are `read` and `list`.
 
 Each resolves to a real directory chosen at boot; that resolution, and the
 `AETHER_*_DIR` knobs behind it, are covered under [Configuration](configuration.md).
@@ -108,16 +108,40 @@ Each resolves to a real directory chosen at boot; that resolution, and the
 the reply's `bytes` is a `Blob`; put that blob in `aether.component.publish` as
 `code`, then `aether.component.spawn` a type it published. A guest holds the
 blob by handle and its publish names it by hash, so the object's bytes never
-enter guest memory. A path that is not an object name — uppercase hex, the
-wrong length, a sub-path, `..` — replies `Forbidden`, as does every `write`,
-`delete` and `list`; an object the store does not hold replies `NotFound`. The
-root is never created, so an engine with no object directory answers `NotFound`
-for every object. The read is not checked against its name: the hash locates the
-file, and the engine's identity for the bytes is the one its blob store takes
-when they are checked in. A packaged chassis roots the namespace at
-`pack/objects`; any other engine roots it at `AETHER_OBJECTS_DIR` /
-`--objects-dir`, a plain directory of hash-named files, defaulting to `objects`
-beside the binary.
+enter guest memory.
+
+An object's path is stricter than a path in the other namespaces. It is one or
+more segments joined by single `/`, with no leading or trailing `/` and no
+empty segment; a segment is never `.` or `..`, and every byte of one is `a-z`,
+`0-9`, `.`, `_` or `-`. Lowercase only, because a case-insensitive filesystem
+would otherwise give one object several names. A segment is at most 255 bytes
+and a path at most 1024. `modules/50_50/square.wasm` is a path; `Modules/a`,
+`a//b`, `/a`, `a/../b` and `a b` are not. A path that breaks the rule replies
+`Forbidden`, as does every `write` and `delete`; a path that names no object
+replies `NotFound`. `list` is one level deep and answers sorted bare names, as
+in every other namespace: its prefix is empty for the root or a path naming a
+directory, a malformed prefix replies `Forbidden`, and a prefix nothing sits
+under replies `NotFound`.
+
+The namespace finds an object's file in one of two ways, chosen at boot, and
+the same request works against both:
+
+- **A packaged chassis** reads the package's table of named objects. A path is
+  a key of that table, the file read is the one under `pack/objects` named for
+  the row's sha256, and a request's path is never joined to a directory. The
+  table is checked at boot: a named object that is absent, or not the size the
+  manifest records, fails the boot. An object boot loads is not in the table,
+  so it cannot be read here.
+- **Any other engine** reads `AETHER_OBJECTS_DIR` / `--objects-dir`, a plain
+  directory where an object is the file at its path, defaulting to `objects`
+  beside the binary. The directory is never created, so an engine without one
+  answers `NotFound` for every object and lists as empty.
+
+So a directory of built files stands in for a package during development. The
+read is not verified in either case: integrity is the platform's job, and the
+engine's identity for the bytes is the one its blob store takes when they are
+checked in. [Package depot](../building/distribution.md#package-depot) covers
+how a package names its objects.
 
 **Local paths receive a lexical check, not complete containment.** The local
 adapter behind `save`, `assets` and `config` rejects a string that starts with `/` or contains a slash-delimited

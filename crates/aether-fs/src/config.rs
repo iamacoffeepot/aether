@@ -48,8 +48,9 @@ pub struct NamespaceRoots {
         config(env = "AETHER_CONFIG_DIR", cli_long = "config-dir", parse = parse_dir)
     )]
     pub config: PathBuf,
-    /// Read-only directory of hash-named package objects; unset uses the directory beside the binary.
-    /// Always set and never created: a directory that does not exist holds no objects.
+    /// Read-only directory whose files are objects at their paths; unset uses the directory beside the binary.
+    /// Read when the engine has no package table of named objects. Always set and never created:
+    /// a directory that does not exist holds no objects.
     #[cfg_attr(
         feature = "runtime",
         config(env = "AETHER_OBJECTS_DIR", cli_long = "objects-dir", parse = parse_dir)
@@ -67,8 +68,8 @@ impl NamespaceRoots {
     /// init failure abort the whole boot.
     ///
     /// `objects` is left alone: its adapter never creates or
-    /// canonicalizes its root, and an absent root is a valid store
-    /// holding no objects.
+    /// canonicalizes its root, an absent root is a valid directory
+    /// holding no objects, and a packaged engine does not read it.
     pub fn ensure_dirs(&self) -> io::Result<()> {
         fs::create_dir_all(&self.save)?;
         fs::create_dir_all(&self.assets)?;

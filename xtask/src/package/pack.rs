@@ -1,8 +1,9 @@
+use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use aether_chassis::boot_manifest::ChassisSettings;
-use aether_chassis::package::{PackageEntry, PackageManifest, Sha256, encode_manifest};
+use aether_chassis::package::{NamedObject, NamespacePath, PackageEntry, PackageManifest, Sha256, encode_manifest};
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256 as Sha256Hasher};
 
@@ -18,6 +19,16 @@ pub(super) struct PackComponent {
     pub(super) replicas: Option<u32>,
 }
 
+/// Everything that becomes `pack/objects` and `pack/manifest`.
+pub(super) struct PackContents<'a> {
+    /// The boot components, in autoload order.
+    pub(super) components: &'a [PackComponent],
+    /// The named objects: each shipped path and the file whose bytes ship
+    /// there.
+    pub(super) named: &'a BTreeMap<NamespacePath, PathBuf>,
+    pub(super) settings: ChassisSettings,
+}
+
 /// The workspace license files every depot carries, copied verbatim from the
 /// repository root into the depot root beside the chassis binary.
 const DEPOT_LICENSE_FILES: [&str; 2] = ["LICENSE-MIT", "LICENSE-APACHE"];
@@ -27,7 +38,8 @@ const DEPOT_LICENSE_FILES: [&str; 2] = ["LICENSE-MIT", "LICENSE-APACHE"];
 /// copy the workspace license files from `workspace_root` via
 /// [`copy_licenses`], copy `assets` (when given) into `pack/assets` via
 /// [`copy_assets`], then write the `pack/` tree of content-addressed
-/// objects and `pack/manifest` via [`write_pack`]. Regenerates `out` from
+/// objects (boot components and named objects alike) and `pack/manifest`
+/// via [`write_pack`]. Regenerates `out` from
 /// scratch so a stale prior run can't leave orphaned objects. Returns the
 /// manifest it wrote.
 pub(super) fn emit_depot(
@@ -35,8 +47,7 @@ pub(super) fn emit_depot(
     workspace_root: &Path,
     chassis_src: &Path,
     chassis_file: &str,
-    components: &[PackComponent],
-    settings: ChassisSettings,
+    contents: PackContents<'_>,
     assets: Option<&Path>,
 ) -> Result<PackageManifest> {
     if out.exists() {
@@ -45,7 +56,7 @@ pub(super) fn emit_depot(
     fs::create_dir_all(out).with_context(|| format!("create {}", out.display()))?;
     copy_artifact(chassis_src, &out.join(chassis_file))?;
     copy_licenses(out, workspace_root)?;
-    let manifest = write_pack(out, components, settings)?;
+    let manifest = write_pack(out, contents)?;
     if let Some(assets) = assets {
         copy_assets(out, assets)?;
     }
@@ -114,12 +125,14 @@ fn copy_licenses(out: &Path, workspace_root: &Path) -> Result<()> {
 }
 
 /// Write the `pack/` tree under `<root>/pack`: hash each component's wasm (and
-/// optional config) into `pack/objects/<sha256>` and write the
+/// optional config) and each named object's file into `pack/objects/<sha256>`,
+/// record each named object's sha256 and size under its path, and write the
 /// [`encode_manifest`] bytes to `pack/manifest`. The `pack/` subtree is
 /// regenerated from scratch so a stale prior run can't leave orphaned objects.
 /// Called by the depot [`emit_depot`], which also copies the chassis binary
 /// alongside the `pack/` tree. Returns the manifest.
-fn write_pack(root: &Path, components: &[PackComponent], settings: ChassisSettings) -> Result<PackageManifest> {
+fn write_pack(root: &Path, contents: PackContents<'_>) -> Result<PackageManifest> {
+    let PackContents { components, named: named_files, settings } = contents;
     let pack_dir = root.join(PACK_DIR);
     if pack_dir.exists() {
         fs::remove_dir_all(&pack_dir).with_context(|| format!("clear {}", pack_dir.display()))?;
@@ -143,7 +156,14 @@ fn write_pack(root: &Path, components: &[PackComponent], settings: ChassisSettin
         });
     }
 
-    let manifest = PackageManifest { settings, entries };
+    let mut named = BTreeMap::new();
+    for (path, file) in named_files {
+        let bytes = fs::read(file).with_context(|| format!("read named object {}", file.display()))?;
+        let sha256 = write_object(&objects_dir, &bytes)?;
+        named.insert(path.clone(), NamedObject { sha256, size: bytes.len() as u64 });
+    }
+
+    let manifest = PackageManifest { settings, entries, named };
     let manifest_path = pack_dir.join("manifest");
     fs::write(&manifest_path, encode_manifest(&manifest))
         .with_context(|| format!("write {}", manifest_path.display()))?;
@@ -168,16 +188,38 @@ fn write_object(objects_dir: &Path, bytes: &[u8]) -> Result<Sha256> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
 
     use aether_chassis::boot_manifest::ChassisSettings;
-    use aether_chassis::package::{Sha256, decode_manifest, package_assets_root};
+    use aether_chassis::package::{NamespacePath, Sha256, decode_manifest, package_assets_root};
     use sha2::{Digest, Sha256 as Sha256Hasher};
 
-    use super::{DEPOT_LICENSE_FILES, PackComponent, emit_depot, write_pack};
+    use super::{DEPOT_LICENSE_FILES, PackComponent, PackContents, emit_depot, write_pack};
     use crate::cargo::Profile;
-    use crate::package::build::build_planned_components;
-    use crate::package::plan::{PackageChassis, resolve_package_plan};
+    use crate::package::build::{build_planned_components, resolve_named};
+    use crate::package::plan::{FlagSelection, PackageChassis, PackagePlan, resolve_package_plan};
+
+    /// A package that names no objects.
+    static NO_NAMED: BTreeMap<NamespacePath, PathBuf> = BTreeMap::new();
+
+    /// The pack contents of boot `components` alone.
+    fn boot_only(components: &[PackComponent], settings: ChassisSettings) -> PackContents<'_> {
+        PackContents { components, named: &NO_NAMED, settings }
+    }
+
+    /// Resolve the `--spec` file at `spec_path` as the command does, under
+    /// the desktop flag default.
+    fn spec_plan(spec_path: &Path) -> anyhow::Result<PackagePlan> {
+        let flags = FlagSelection {
+            chassis: PackageChassis::Desktop,
+            components: &[],
+            configs: &[],
+            named: &[],
+            settings: ChassisSettings::default(),
+        };
+        resolve_package_plan(Some(spec_path), flags)
+    }
 
     /// Write a stand-in workspace root carrying both license files, so an emit
     /// under test reads the same sources `copy_licenses` reads from the real
@@ -233,16 +275,8 @@ mod tests {
             named("beta", vec![9, 9, 9, 9]),
             named("alpha_twin", vec![0x00, 0x61, 0x73, 0x6d, 1, 2, 3]),
         ];
-        let manifest = emit_depot(
-            &out,
-            &license_root,
-            &chassis_src,
-            "aether-desktop",
-            &components,
-            ChassisSettings::default(),
-            None,
-        )
-        .expect("emit");
+        let contents = boot_only(&components, ChassisSettings::default());
+        let manifest = emit_depot(&out, &license_root, &chassis_src, "aether-desktop", contents, None).expect("emit");
 
         assert!(out.join("aether-desktop").exists(), "chassis binary copied into the depot root");
 
@@ -312,7 +346,7 @@ mod tests {
             tick_hz: Some(30),
             clear_color: Some("f6f2e9".to_owned()),
         };
-        let manifest = write_pack(&root, &components, settings.clone()).expect("write pack");
+        let manifest = write_pack(&root, boot_only(&components, settings.clone())).expect("write pack");
 
         let manifest_bytes = fs::read(root.join("pack").join("manifest")).expect("read pack/manifest");
         let decoded = decode_manifest(&manifest_bytes).expect("chassis decoder reads the pack manifest");
@@ -375,9 +409,7 @@ mod tests {
         fs::write(&spec_path, spec).expect("write spec");
 
         // `--chassis desktop` is the flag default; the spec's `headless` wins.
-        let plan =
-            resolve_package_plan(Some(&spec_path), PackageChassis::Desktop, &[], &[], ChassisSettings::default())
-                .expect("resolve spec plan");
+        let plan = spec_plan(&spec_path).expect("resolve spec plan");
         assert_eq!(plan.chassis, PackageChassis::Headless, "spec chassis overrides the flag default");
 
         let (_, chassis_bin) = plan.chassis.substrate();
@@ -390,8 +422,8 @@ mod tests {
         fs::write(&chassis_src, b"headless-binary-bytes").expect("write fake chassis");
         write_license_root(&dir);
         let out = dir.join("depot");
-        let manifest =
-            emit_depot(&out, &dir, &chassis_src, chassis_bin, &components, plan.settings, None).expect("emit depot");
+        let manifest = emit_depot(&out, &dir, &chassis_src, chassis_bin, boot_only(&components, plan.settings), None)
+            .expect("emit depot");
 
         let manifest_bytes = fs::read(out.join("pack").join("manifest")).expect("read manifest");
         let decoded = decode_manifest(&manifest_bytes).expect("chassis decoder reads the emitted manifest");
@@ -407,6 +439,116 @@ mod tests {
         assert_eq!(decoded.entries[1].config, None, "the config-less entry has no config object");
 
         assert!(out.join("aether-headless").exists(), "the headless chassis bin is shipped into the depot");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A fresh scratch directory for one named-object test.
+    fn named_scratch(tag: &str) -> PathBuf {
+        use std::env;
+        use std::fs;
+        use std::process;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = env::temp_dir().join(format!("aether-xtask-named-{tag}-{}-{seq}", process::id()));
+        fs::create_dir_all(dir.join("squares").join("50")).expect("create the named directory");
+        dir
+    }
+
+    #[test]
+    fn spec_driven_emit_ships_named_objects_under_their_paths() {
+        // A spec's `named` list ships objects boot does not load: every file
+        // beneath a `dir`, at its relative path under `under`, and a single
+        // `wasm` at its explicit path. Each is written under its sha256 and
+        // recorded in the manifest with that hash and its size, which is what
+        // the packaged chassis checks at boot and reads by path. The bugs
+        // this catches: a directory file dropped or flattened, an object
+        // recorded under the wrong hash or size, or a table the chassis's
+        // own `decode_manifest` (the oracle) cannot read.
+        use std::fs;
+
+        let dir = named_scratch("emit");
+        fs::write(dir.join("boot.wasm"), [0x00, 0x61, 0x73, 0x6d, 1]).expect("write boot wasm");
+        fs::write(dir.join("late.wasm"), [0x00, 0x61, 0x73, 0x6d, 2, 2]).expect("write late wasm");
+        fs::write(dir.join("squares").join("top.bin"), b"top").expect("write a directory file");
+        fs::write(dir.join("squares").join("50").join("50.bin"), b"nested!").expect("write a nested file");
+        let spec = r#"{
+            "components": [ { "wasm": "boot.wasm" } ],
+            "named": [
+                { "dir": { "from": "squares", "under": "world/squares" } },
+                { "wasm": { "file": "late.wasm", "path": "modules/late.wasm" } }
+            ]
+        }"#;
+        let spec_path = dir.join("depot.json");
+        fs::write(&spec_path, spec).expect("write spec");
+
+        let plan = spec_plan(&spec_path).expect("resolve spec plan");
+        let unused = Path::new("unused-for-prebuilt");
+        let components = build_planned_components(&plan, unused, Profile::Release).expect("read prebuilt components");
+        let named = resolve_named(&plan, unused, Profile::Release).expect("resolve named objects");
+        let chassis_src = dir.join("fake-chassis");
+        fs::write(&chassis_src, b"chassis-binary-bytes").expect("write fake chassis");
+        write_license_root(&dir);
+        let out = dir.join("depot");
+        let contents = PackContents { components: &components, named: &named, settings: plan.settings };
+        let manifest = emit_depot(&out, &dir, &chassis_src, "aether-desktop", contents, None).expect("emit depot");
+
+        let manifest_bytes = fs::read(out.join("pack").join("manifest")).expect("read manifest");
+        let decoded = decode_manifest(&manifest_bytes).expect("chassis decoder reads the emitted manifest");
+        assert_eq!(decoded, manifest, "the decoded manifest equals what emit_depot wrote");
+        let shipped: Vec<(&str, &[u8])> = vec![
+            ("modules/late.wasm", &[0x00, 0x61, 0x73, 0x6d, 2, 2]),
+            ("world/squares/50/50.bin", b"nested!"),
+            ("world/squares/top.bin", b"top"),
+        ];
+        let paths: Vec<&str> = decoded.named.keys().map(NamespacePath::as_str).collect();
+        assert_eq!(paths, shipped.iter().map(|(path, _)| *path).collect::<Vec<_>>());
+        for ((path, bytes), object) in shipped.iter().zip(decoded.named.values()) {
+            let mut hasher = Sha256Hasher::new();
+            hasher.update(bytes);
+            assert_eq!(object.sha256, Sha256(hasher.finalize().into()), "{path} is recorded under its own hash");
+            assert_eq!(object.size, bytes.len() as u64, "{path} is recorded at its own size");
+            let disk = fs::read(out.join("pack").join("objects").join(object.sha256.to_hex()));
+            assert_eq!(disk.expect("the object's file exists under its sha256"), *bytes, "{path}");
+        }
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn named_objects_refuse_a_taken_path_and_a_file_that_cannot_be_a_path() {
+        // Two authored entries resolving to one path would ship one and drop
+        // the other, and a file whose name cannot be a path would be
+        // unreadable once shipped; both fail the run naming the files, and
+        // nothing is skipped.
+        use std::fs;
+
+        let dir = named_scratch("refuse");
+        fs::write(dir.join("boot.wasm"), [0x00, 0x61, 0x73, 0x6d, 1]).expect("write boot wasm");
+        fs::write(dir.join("squares").join("top.bin"), b"top").expect("write a directory file");
+        let unused = Path::new("unused-for-prebuilt");
+        let resolve = |named: &str| {
+            let spec_path = dir.join("depot.json");
+            let spec = format!(r#"{{ "components": [ {{ "wasm": "boot.wasm" }} ], "named": [ {named} ] }}"#);
+            fs::write(&spec_path, spec).expect("write spec");
+            resolve_named(&spec_plan(&spec_path).expect("resolve spec plan"), unused, Profile::Release)
+        };
+
+        let taken = resolve(
+            r#"{ "dir": { "from": "squares", "under": "world" } },
+               { "wasm": { "file": "boot.wasm", "path": "world/top.bin" } }"#,
+        )
+        .expect_err("a path two entries resolve to is refused")
+        .to_string();
+        assert!(taken.contains("top.bin") && taken.contains("boot.wasm"), "both source files are named: {taken}");
+
+        fs::write(dir.join("squares").join("50").join("Upper.bin"), b"x").expect("write an uppercase file");
+        let unshippable = resolve(r#"{ "dir": { "from": "squares", "under": "world" } }"#)
+            .expect_err("a file whose path is not a namespace path is refused")
+            .to_string();
+        assert!(unshippable.contains("Upper.bin"), "the file is named: {unshippable}");
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -448,16 +590,9 @@ mod tests {
             export: None,
             replicas: None,
         }];
-        emit_depot(
-            &out,
-            &dir,
-            &chassis_src,
-            "aether-desktop",
-            &components,
-            ChassisSettings::default(),
-            Some(&dir.join("assets")),
-        )
-        .expect("emit depot with assets");
+        let contents = boot_only(&components, ChassisSettings::default());
+        emit_depot(&out, &dir, &chassis_src, "aether-desktop", contents, Some(&dir.join("assets")))
+            .expect("emit depot with assets");
 
         let root = package_assets_root(&out).expect("the chassis boot finds the asset root");
         assert_eq!(fs::read(root.join("teapot.dsl")).expect("the root asset shipped"), b"; teapot");
@@ -471,8 +606,8 @@ mod tests {
         // No `--assets` ships no asset root, so a depot that never named one
         // keeps the ordinary beside-the-binary default at boot.
         let bare = dir.join("bare-depot");
-        emit_depot(&bare, &dir, &chassis_src, "aether-desktop", &components, ChassisSettings::default(), None)
-            .expect("emit depot without assets");
+        let contents = boot_only(&components, ChassisSettings::default());
+        emit_depot(&bare, &dir, &chassis_src, "aether-desktop", contents, None).expect("emit depot without assets");
         assert!(package_assets_root(&bare).is_none(), "no --assets means no shipped root");
 
         fs::remove_dir_all(&dir).ok();
@@ -501,8 +636,8 @@ mod tests {
         fs::write(&chassis_src, b"chassis-binary-bytes").expect("write fake chassis binary");
 
         let out = dir.join("depot");
-        emit_depot(&out, &dir, &chassis_src, "aether-desktop", &[], ChassisSettings::default(), None)
-            .expect("emit depot");
+        let contents = boot_only(&[], ChassisSettings::default());
+        emit_depot(&out, &dir, &chassis_src, "aether-desktop", contents, None).expect("emit depot");
 
         for file in DEPOT_LICENSE_FILES {
             let shipped = fs::read(out.join(file)).unwrap_or_else(|_| panic!("{file} shipped into the depot root"));

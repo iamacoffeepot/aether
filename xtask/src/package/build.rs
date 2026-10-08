@@ -1,8 +1,11 @@
+use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use aether_chassis::autoload::{actor_lineage, selectable_exports};
 use aether_chassis::encode_config_json;
+use aether_chassis::package::NamespacePath;
 use aether_data::ActorLineageRecord;
 use anyhow::{Context, Result, bail};
 use cargo_metadata::Metadata;
@@ -33,6 +36,17 @@ pub(super) enum ComponentSource {
     Package(String),
     /// A prebuilt `.wasm` artifact supplied by path.
     Prebuilt(PathBuf),
+}
+
+/// One authored entry of a plan's named objects: what ships for a running
+/// engine to read by path, without being loaded at boot.
+#[derive(Debug)]
+pub(super) enum PlannedObject {
+    /// One object from `source`, shipped at `path`.
+    Single { source: ComponentSource, path: NamespacePath },
+    /// Every file beneath the directory `from`, each shipped at
+    /// `<under>/<its relative path>`.
+    Dir { from: PathBuf, under: NamespacePath },
 }
 
 /// The discover-everything dev sweep component set: build every
@@ -99,27 +113,7 @@ pub(super) fn build_planned_components(
 ) -> Result<Vec<PackComponent>> {
     let mut components = Vec::new();
     for component in &plan.components {
-        let wasm_path = match &component.source {
-            ComponentSource::Package(package) => {
-                let mut wasm_cmd = build_command(profile);
-                wasm_cmd.args(["--target", WASM_TARGET, "-p", package]);
-                run_status(wasm_cmd, &format!("build component wasm for {package}"))?;
-                let stem = package.replace('-', "_");
-                let wasm = target_dir.join(WASM_TARGET).join(profile.as_str()).join(format!("{stem}.wasm"));
-                if !wasm.exists() {
-                    bail!(
-                        "component wasm for {package} not found at {} \
-                         (packages bundle their lib cdylib; pass a prebuilt \
-                         .wasm path for [[example]] cdylibs)",
-                        wasm.display(),
-                    );
-                }
-                wasm
-            }
-            ComponentSource::Prebuilt(path) => {
-                fs::canonicalize(path).with_context(|| format!("locate prebuilt component wasm {}", path.display()))?
-            }
-        };
+        let wasm_path = locate_wasm(&component.source, target_dir, profile)?;
         let wasm = fs::read(&wasm_path).with_context(|| format!("read component wasm {}", wasm_path.display()))?;
         let config = match (&component.config, &component.config_json) {
             (Some(path), _) => {
@@ -143,6 +137,109 @@ pub(super) fn build_planned_components(
         });
     }
     Ok(components)
+}
+
+/// The wasm file `source` names: a workspace package is built for wasm32
+/// first, in its own cargo invocation, and a prebuilt artifact is located.
+fn locate_wasm(source: &ComponentSource, target_dir: &Path, profile: Profile) -> Result<PathBuf> {
+    match source {
+        ComponentSource::Package(package) => {
+            let mut wasm_cmd = build_command(profile);
+            wasm_cmd.args(["--target", WASM_TARGET, "-p", package]);
+            run_status(wasm_cmd, &format!("build component wasm for {package}"))?;
+            let stem = package.replace('-', "_");
+            let wasm = target_dir.join(WASM_TARGET).join(profile.as_str()).join(format!("{stem}.wasm"));
+            if !wasm.exists() {
+                bail!(
+                    "component wasm for {package} not found at {} \
+                     (packages bundle their lib cdylib; pass a prebuilt \
+                     .wasm path for [[example]] cdylibs)",
+                    wasm.display(),
+                );
+            }
+            Ok(wasm)
+        }
+        ComponentSource::Prebuilt(path) => {
+            fs::canonicalize(path).with_context(|| format!("locate prebuilt component wasm {}", path.display()))
+        }
+    }
+}
+
+/// Resolve the plan's named objects to each shipped path and the file whose
+/// bytes ship there: a single object is built or located as a boot
+/// component's wasm is, and a directory contributes every file beneath it.
+/// Two entries resolving to one path fail the run naming both files.
+pub(super) fn resolve_named(
+    plan: &PackagePlan,
+    target_dir: &Path,
+    profile: Profile,
+) -> Result<BTreeMap<NamespacePath, PathBuf>> {
+    let mut named = BTreeMap::new();
+    for object in &plan.named {
+        match object {
+            PlannedObject::Single { source, path } => {
+                insert_named(&mut named, path.clone(), locate_wasm(source, target_dir, profile)?)?;
+            }
+            PlannedObject::Dir { from, under } => insert_named_directory(&mut named, from, under)?,
+        }
+    }
+    Ok(named)
+}
+
+/// Add every file beneath `from` to `named` at `<under>/<its relative
+/// path>`. A file whose resulting path is not a [`NamespacePath`] fails the
+/// run naming the file; nothing is skipped.
+///
+/// Iterative, as the asset copy is: the tree's depth is the author's.
+fn insert_named_directory(
+    named: &mut BTreeMap<NamespacePath, PathBuf>,
+    from: &Path,
+    under: &NamespacePath,
+) -> Result<()> {
+    let root = fs::canonicalize(from).with_context(|| format!("locate named-object directory {}", from.display()))?;
+    let mut pending = vec![root.clone()];
+
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
+            let entry = entry.with_context(|| format!("read an entry of {}", dir.display()))?;
+            let file = entry.path();
+            if entry.file_type().with_context(|| format!("stat {}", file.display()))?.is_dir() {
+                pending.push(file);
+                continue;
+            }
+            let relative = file.strip_prefix(&root).expect("every walked file is under the directory's root");
+            insert_named(named, path_under(under, relative, &file)?, file)?;
+        }
+    }
+    Ok(())
+}
+
+/// The path `file` ships at: `under`, then each component of its path
+/// `relative` to the authored directory, joined by `/`.
+fn path_under(under: &NamespacePath, relative: &Path, file: &Path) -> Result<NamespacePath> {
+    let mut text = under.as_str().to_owned();
+    for component in relative.components() {
+        let segment = component
+            .as_os_str()
+            .to_str()
+            .with_context(|| format!("named file {} has a name that is not UTF-8", file.display()))?;
+        text.push('/');
+        text.push_str(segment);
+    }
+    NamespacePath::new(&text).with_context(|| format!("named file {} cannot ship at {text:?}", file.display()))
+}
+
+/// Record that `file` ships at `path`, refusing a path already taken.
+fn insert_named(named: &mut BTreeMap<NamespacePath, PathBuf>, path: NamespacePath, file: PathBuf) -> Result<()> {
+    match named.entry(path) {
+        Entry::Vacant(slot) => {
+            slot.insert(file);
+            Ok(())
+        }
+        Entry::Occupied(taken) => {
+            bail!("named object {} is supplied by both {} and {}", taken.key(), taken.get().display(), file.display())
+        }
+    }
 }
 
 #[cfg(test)]

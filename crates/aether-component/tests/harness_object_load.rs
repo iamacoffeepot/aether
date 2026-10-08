@@ -1,23 +1,22 @@
 //! Issue 7629: a guest pages a module in from the `objects` file namespace.
 //!
-//! The `test.object.loader` fixture reads a package object by its lowercase
-//! hex sha256, publishes the blob the read answers with, and spawns a type
-//! from it, answering its requester with the spawn's `SpawnResult`. The
-//! harness roots `objects` at the test sandbox, where the object is a file
-//! named by its hash, as it is under a package's `pack/objects`.
+//! The `test.object.loader` fixture reads an object by its path, publishes
+//! the blob the read answers with, and spawns a type from it, answering its
+//! requester with the spawn's `SpawnResult`. The harness has no package, so
+//! `objects` reads the test sandbox as a plain directory, where the object
+//! is a file at its path; a packaged engine answers the same request from
+//! its table of named objects.
 //!
 //! Skipped when the fixture wasm hasn't been built (`require_wasm`); CI
 //! pre-builds it and sets `AETHER_REQUIRE_RUNTIME=1` so the skip becomes a
 //! hard panic there.
 
-use std::fmt::Write as _;
 use std::fs;
 
-use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots, write_fixture};
+use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, SpawnResult};
 use aether_test_fixtures_kinds::ObjectSpawn;
-use sha2::{Digest, Sha256};
 
 const SUBJECT: &str = "test.republish.subject";
 
@@ -29,21 +28,17 @@ trait ObjectLoaderRow {
     fn spawn(mail: ObjectSpawn) -> SpawnResult;
 }
 
-/// The name an object takes in the store: the lowercase hex sha256 of its bytes.
-fn object_name(bytes: &[u8]) -> String {
-    let mut name = String::with_capacity(64);
-    for byte in Sha256::digest(bytes) {
-        write!(name, "{byte:02x}").expect("writing to a String never fails");
-    }
-    name
-}
+/// The path the subject module is read at: nested, as a product's paged
+/// modules are.
+const SUBJECT_PATH: &str = "modules/subject.wasm";
 
-/// The bug this catches: the `objects` namespace is not registered or not
-/// rooted where the chassis was told, or a blob a guest forwards from a read
-/// into `Publish.code` does not reach the component host as the module's
-/// code. Either leaves the loader answering `SpawnResult::Err`.
+/// The bug this catches: the `objects` namespace is not registered, is not
+/// rooted where the chassis was told, or refuses a nested path, or a blob a
+/// guest forwards from a read into `Publish.code` does not reach the
+/// component host as the module's code. Each leaves the loader answering
+/// `SpawnResult::Err`.
 #[test]
-fn a_guest_reads_an_object_by_hash_then_publishes_and_spawns_it() {
+fn a_guest_reads_an_object_by_path_then_publishes_and_spawns_it() {
     let Some(loader_path) = require_wasm("object_loader") else {
         return;
     };
@@ -57,8 +52,8 @@ fn a_guest_reads_an_object_by_hash_then_publishes_and_spawns_it() {
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
         .expect("boot");
-    let subject_wasm = fs::read(subject_path).expect("read subject wasm");
-    let hash = write_fixture(&object_name(&subject_wasm), &subject_wasm);
+    fs::create_dir_all(sandbox.join("modules")).expect("create the modules directory");
+    fs::copy(subject_path, sandbox.join(SUBJECT_PATH)).expect("place the subject wasm at its path");
     let loader_wasm = fs::read(loader_path).expect("read loader wasm");
     let (loader, _) = harness
         .load_any(&LoadComponent { wasm: loader_wasm, name: None, config: Vec::new(), export: None })
@@ -68,7 +63,10 @@ fn a_guest_reads_an_object_by_hash_then_publishes_and_spawns_it() {
     let spawned = harness
         .execute(vec![(
             "spawn",
-            HarnessOp::send_and_await_reply(&loader, &ObjectSpawn { hash, namespace: SUBJECT.to_owned() }),
+            HarnessOp::send_and_await_reply(
+                &loader,
+                &ObjectSpawn { path: SUBJECT_PATH.to_owned(), namespace: SUBJECT.to_owned() },
+            ),
         )])
         .expect("ObjectSpawn to the loader")
         .reply::<SpawnResult>("spawn")
