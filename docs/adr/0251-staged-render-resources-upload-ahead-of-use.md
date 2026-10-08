@@ -101,13 +101,19 @@ default is 32 pieces per frame. The allowance is a count and not bytes or
 time, because the measured cost follows the number of device objects, and a
 fixed count needs no clock.
 
-### 3. An array's unwritten layers are written by the queue
+### 3. An array's unwritten layers are cleared by the queue
 
-A texture array is resident only when every layer has been written on the
-device. A layer no mail has written is written with zeros, as a piece like
-any other, behind the layers that were staged. An array therefore reaches the
-device whole over several frames, and no later draw is the first use of an
-unwritten layer.
+A texture array is resident only when every layer has been written or
+cleared on the device. A layer no mail has written is cleared, as a piece
+like any other, behind the layers that were staged. An array therefore
+reaches the device whole over several frames, and no later draw is the first
+use of an unwritten layer.
+
+How a layer is cleared is the implementation's choice. A clear issued on the
+device, which sends no bytes, is the first thing to try; uploading zeros is
+the fallback. Whichever is used must leave wgpu with nothing to clear at
+first use, which the implementation shows by measuring the first-draw
+submit.
 
 ### 4. First use still uploads
 
@@ -181,7 +187,7 @@ again.
   the square is ready.
 - Every sender's resources upload ahead of use, including senders that never
   ask. A sender that does not ask pays nothing on its side.
-- A texture array costs its full size in uploads even when few layers are
+- Every layer of a texture array is written or cleared even when few are
   used. A scene that reserves far more layers than it writes pays for that
   over frames, where today it pays in one submit.
 - With no device or no frames, nothing uploads and no request is answered,
