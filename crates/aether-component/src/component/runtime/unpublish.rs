@@ -2,15 +2,14 @@
 //!
 //! An `Unpublish` names a single row of the publication table. The host
 //! refuses it while the namespace is unpublishing or republishing, is native,
-//! is unpublished, has a load or a first publish in flight, or still has a
-//! live instance, then stages one owner batch carrying the hash it saw, so a
+//! is unpublished, has a load or a first publish in flight, or still holds a
+//! guest it loaded that is not dropped, then stages one owner batch carrying the hash it saw, so a
 //! concurrent republish cannot be withdrawn under the caller. The commit
 //! answers `Ok` once the row is gone; a publish that waited on the namespace
 //! then runs as a first publish.
 
 use aether_actor::ReplyMode;
 use aether_data::name_inventory::native_type_entries;
-use aether_data::{ErasedActorPath, MailboxCategory};
 use aether_kinds::{Unpublish, UnpublishResult};
 use aether_substrate::actor::native::{Held, RegistryBatch, RegistryBatchResult};
 
@@ -36,7 +35,8 @@ impl ComponentHostCapabilityState {
     /// Withdraw the publication of `payload`'s namespace, or refuse it. The
     /// refusals run in order: an unpublish or republish already holding it, a
     /// native namespace, a namespace no module publishes, a load or staged
-    /// first-publish of it in flight, and a live instance of it still running.
+    /// first-publish of it in flight, and a guest of it the host has not been asked
+    /// to drop. Any other live instance is refused by the registry owner's apply.
     pub(super) fn begin_unpublish<M: ReplyMode>(
         &mut self,
         ctx: &mut HostCtx<'_, M>,
@@ -76,7 +76,7 @@ impl ComponentHostCapabilityState {
             held.answer(ctx, &UnpublishResult::Err { error });
             return;
         }
-        let live = self.live_paths(ctx, &namespace);
+        let live = self.undropped_paths(ctx, &namespace);
         if !live.is_empty() {
             let error = format!("{namespace} still has live instances: {}; drop them first", live.join(", "));
             held.answer(ctx, &UnpublishResult::Err { error });
@@ -113,34 +113,20 @@ impl ComponentHostCapabilityState {
         self.release_queued_publishes(ctx);
     }
 
-    /// Every live instance of `namespace`, by path, in path order so refusals
-    /// read the same on every run: the host's loaded guests plus the inline
-    /// children beneath a parent the host never loaded, read from the registry
-    /// inventory the way the republish pre-checks read them.
-    fn live_paths<M: ReplyMode>(&self, ctx: &HostCtx<'_, M>, namespace: &str) -> Vec<String> {
+    /// The host's own guests of `namespace` whose drop has not been requested,
+    /// by path, in path order so refusals read the same on every run. The drop
+    /// table is exact: an entry leaves when its drop is requested. Every other
+    /// instance is left to the registry owner's apply of the withdrawal, which
+    /// runs in order after any drop already queued and refuses with the live
+    /// paths; the published inventory lags that queue, so it is not read here.
+    fn undropped_paths<M: ReplyMode>(&self, ctx: &HostCtx<'_, M>, namespace: &str) -> Vec<String> {
         let mut live: Vec<String> = self
             .drop_targets
             .iter()
             .filter(|(_, guest)| guest.namespace.as_str() == namespace)
             .map(|(actor, _)| ctx.actor_path(*actor).to_string())
             .collect();
-        live.extend(
-            self.subscription()
-                .inventory()
-                .mailboxes
-                .into_iter()
-                .filter(|mailbox| mailbox.category == Some(MailboxCategory::Trampoline))
-                .filter(|mailbox| names_instance_of(&mailbox.name, namespace))
-                .map(|mailbox| mailbox.name),
-        );
         live.sort();
-        live.dedup();
         live
     }
-}
-
-/// Whether the inventory name `name` is the path of an instance of
-/// `namespace`. A name that is no actor path names no instance.
-fn names_instance_of(name: &str, namespace: &str) -> bool {
-    ErasedActorPath::new(name).is_ok_and(|path| path.leaf_namespace() == namespace)
 }

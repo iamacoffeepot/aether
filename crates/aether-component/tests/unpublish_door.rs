@@ -67,10 +67,11 @@ fn unpublish(harness: &mut SubstrateHarness, namespace: &str) -> UnpublishResult
     host_call(harness, &Unpublish { namespace: namespace.to_owned() })
 }
 
-/// Poll `ListComponents` until `absent` leaves the live set. The host's
-/// unpublish reads the same registry-inventory snapshot this lists, and that
-/// snapshot refreshes on its own wake after a drop commits, so an unpublish
-/// sent straight after `DropResult::Ok` could still see the dropped route.
+/// Poll `ListComponents` until `absent` leaves the live set. `DropResult::Ok`
+/// is answered before the close tail queues the route's `DropMailbox` to the
+/// registry owner, so an unpublish sent straight after it can reach the owner
+/// ahead of that drop and be refused for the instance; the listing leaves the
+/// set once the owner has applied the drop.
 fn await_absent(harness: &mut SubstrateHarness, absent: &str) {
     for _ in 0..100 {
         let listed: ListComponentsResult = host_call(harness, &ListComponents {});
