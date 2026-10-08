@@ -1,9 +1,14 @@
 //! [`Sha256`] and [`NamedObject`]: the identity of a package object and the
-//! row a package's table of named objects holds for one (ADR-0163 §1).
+//! row a package's table of named objects holds for one (ADR-0163 §1), and
+//! [`nested_object_paths`], the check that no object's path is also a
+//! directory of another.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::fmt::Write as _;
+
+use crate::NamespacePath;
 
 /// A sha256 content address — the identity of a package object (ADR-0163
 /// §1). Encoded on the wire as its 32 raw bytes; rendered as lowercase hex
@@ -98,9 +103,56 @@ pub struct NamedObject {
     pub size: u64,
 }
 
+/// Two paths of one table where the first names an object and is also an
+/// ancestor of the second, which a real directory cannot mirror.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NestedObjectPaths<'table> {
+    /// The path that names an object and is also an ancestor of another.
+    pub object: &'table NamespacePath,
+    /// The path of an object under it.
+    pub beneath: &'table NamespacePath,
+}
+
+/// The first pair in `named` where one path is a proper ancestor, at a `/`
+/// boundary, of another, or `None` when no directory-shaped conflict exists.
+///
+/// A directory cannot hold a file and a directory under one name, so a table
+/// with such a pair cannot be mirrored by one.
+#[must_use]
+pub fn nested_object_paths<V>(named: &BTreeMap<NamespacePath, V>) -> Option<NestedObjectPaths<'_>> {
+    named.keys().find_map(|beneath| {
+        ancestors(beneath.as_str())
+            .find_map(|ancestor| named.get_key_value(ancestor))
+            .map(|(object, _)| NestedObjectPaths { object, beneath })
+    })
+}
+
+/// The text before each `/` of `path`, shortest first.
+fn ancestors(path: &str) -> impl Iterator<Item = &str> {
+    path.match_indices('/').map(|(index, _)| &path[..index])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each case is a bug in a plausible shortcut: comparing only neighbouring
+    /// keys misses `a`, `a/b` because `a-b` and `a.b` sort between them;
+    /// a byte-prefix test with no `/` boundary refuses `a` beside `ab/c`; and
+    /// checking only the parent misses `a/b` above `a/b/c/d`.
+    #[test]
+    fn nested_object_paths_finds_an_ancestor_at_a_slash_boundary() {
+        let table = |paths: &[&str]| -> BTreeMap<NamespacePath, u8> {
+            paths.iter().map(|text| (NamespacePath::new(text).expect("a valid path"), 0)).collect()
+        };
+        let found = |paths: &[&str]| {
+            nested_object_paths(&table(paths)).map(|nested| (nested.object.to_string(), nested.beneath.to_string()))
+        };
+
+        assert_eq!(found(&["a", "a-b", "a.b", "a/b"]), Some(("a".to_string(), "a/b".to_string())));
+        assert_eq!(found(&["a", "a-b", "a.b", "ab/c"]), None);
+        assert_eq!(found(&["a/b", "a/b/c/d"]), Some(("a/b".to_string(), "a/b/c/d".to_string())));
+    }
 
     #[test]
     fn sha256_hex_round_trips() {
