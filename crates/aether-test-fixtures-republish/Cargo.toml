@@ -52,6 +52,9 @@ publish = false
 # - `object_loader` (issue 7629): a guest that reads a package object by hash
 #   from the `objects` file namespace, publishes the blob, and spawns a type
 #   from it. It names no type of the lib.
+# - `memory_reader` (issue 7622): a guest that asks the inventory cap for the
+#   engine's memory report and answers its requester with it. It names no type
+#   of the lib.
 [lib]
 crate-type = ["rlib"]
 
@@ -68,6 +71,8 @@ aether-component = { path = "../aether-component", default-features = false }
 # `object_loader` reads the `objects` namespace through `aether.fs`. Identity
 # face only.
 aether-fs = { path = "../aether-fs", default-features = false }
+# `memory_reader` asks the inventory cap for memory. Identity face only.
+aether-inventory = { path = "../aether-inventory", default-features = false }
 aether-kinds = { path = "../aether-kinds" }
 
 [[example]]
@@ -124,6 +129,10 @@ crate-type = ["cdylib"]
 
 [[example]]
 name = "object_loader"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "memory_reader"
 crate-type = ["cdylib"]
 
 [[example]]

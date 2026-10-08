@@ -75,12 +75,14 @@
 
 #![forbid(unsafe_code)]
 
-// Handler-signature kinds must be importable at module root because
-// `#[actor]` emits `impl HandlesKind<K> for InventoryCapability { type Sender = aether_actor::Anyone; }`
-// markers always-on, outside the `feature = "runtime"` gate. The reply
-// kinds are named only by the gated handler bodies, so they ride the
-// runtime gate below.
-use kinds::{ListHandlers, ListKinds, ListMemory, Manifest, Resolve, ResolveAddress};
+// `#[actor]` names both the request kinds (the `HandlesKind` markers) and the
+// single-reply kinds (the reply markers and `Contract` rows) on every target,
+// outside the `feature = "runtime"` gate, so a guest build, a transport-only
+// native build, and a runtime build all need every one in scope at module root.
+use kinds::{
+    HandlersResult, ListHandlers, ListKinds, ListKindsResult, ListMemory, ListMemoryResult, Manifest, ManifestResult,
+    Resolve, ResolveAddress, ResolveAddressResult, ResolveResult,
+};
 
 use aether_actor::actor;
 
@@ -105,15 +107,6 @@ pub mod kinds;
 /// event channel or pinning one registry instance at `init`.
 #[actor(singleton, root)]
 pub struct InventoryCapability;
-
-// The reply kinds ride the native gate (not `runtime`): the `#[actor]`
-// macro's ADR-0109 `HandlerEntry` inventory submission — emitted on every
-// native build, runtime or not — names each handler's reply kind `::ID`,
-// so a transport-only build must still see them. The wire-projection
-// helpers, the `aether_substrate`-typed imports, and the state struct
-// sit behind the one `feature = "runtime"` gate.
-#[cfg(not(target_family = "wasm"))]
-use kinds::{HandlersResult, ListKindsResult, ListMemoryResult, ManifestResult, ResolveAddressResult, ResolveResult};
 
 // The runtime half — the `aether_substrate`-typed imports, the state
 // struct, the `#[runtime] impl`, and the cap's tests — lives under the
