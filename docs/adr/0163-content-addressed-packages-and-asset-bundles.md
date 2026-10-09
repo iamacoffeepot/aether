@@ -8,6 +8,7 @@
 - **Amended:** 2026-10-07 — Section 4: the load-window door is replaced by the module model (ADR-0250): a `Spawn` carries no bytes, and a spawn of a published type always builds an instance that can read its assets, in every hook, from its own module.
 - **Amended:** 2026-10-07 — Sections 1 and 4: a running engine reads the object store through the read-only `objects` file namespace, read by path, so an actor can read an object and publish it; "no runtime payload fetch" is narrowed to a live instance's payload (issue 7629).
 - **Amended:** 2026-10-07 — Sections 1 and 4: the manifest gains a table of named objects, the objects a package ships that boot checks for and does not load, each under the path a running engine reads it at; the `objects` namespace reads by that path, against a package's table or a plain directory of files, and the manifest format goes to version 3 (issue 7631).
+- **Amended:** 2026-10-09 — Section 4: the reference bundle actor lives in the fixtures module `aether-test-fixtures-bundle` as `test.asset_resident`, and `aether-kit` embeds no asset (issue 7660).
 
 ## Context
 

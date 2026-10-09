@@ -1,4 +1,4 @@
-//! `aether-kit` — the common standalone actors (camera, mesh viewer, asset bundle).
+//! `aether-kit` — the common standalone actors (camera, camera controller, mesh viewer).
 //!
 //! Reusable game-building actors that run on the substrate. Each system is
 //! one module under the crate root that co-locates the actor with its own
@@ -20,11 +20,6 @@
 //!   to the render sink, selected by the `aether_kit@aether.kit.mesh`
 //!   export. Its `aether.kit.mesh.load` kind and its config, which names the
 //!   camera whose eye its outlines face, live in [`mesh`].
-//! - [`bundle::BundleComponent`] — the reference asset bundle (ADR-0163 §4):
-//!   carries a tile in a wasm custom section, makes it an engine resident in
-//!   `wire`, draws it every frame, and destroys it symmetrically on
-//!   teardown. Selected by the `aether_kit@aether.kit.bundle` export;
-//!   it has no driver kinds, so no `kinds` submodule.
 //!
 //! The terrain-authoring stack — the mark / world / terra / mover actors and
 //! their `CellPos` / `WorldPoint` / octimeter position vocabulary — was
@@ -45,19 +40,15 @@
 
 extern crate alloc;
 
-pub mod bundle;
 pub mod camera;
 pub mod mesh;
 
 // A cdylib carries one `export!` (the shared init/receive FFI entry); the
 // macro emits the wasm32 FFI shims and the `aether.kinds` custom section for
 // every listed actor. The kit is a subsystem library — a grab-bag of
-// independently loaded actors (camera, camera controller, mesh viewer, asset
-// bundle) with no unselected entry (a load or spawn names its namespace, ADR-0241
-// §9), so this holds for every export here: each is reached by `module@actor` selector, never by
-// list position. The shelved terrain / sim / workbench siblings each owned
+// independently loaded actors (camera, camera controller, mesh viewer) with no
+// unselected entry (a load or spawn names its namespace, ADR-0241 §9), so this
+// holds for every export here: each is reached by `module@actor` selector, never
+// by list position. The shelved terrain / sim / workbench siblings each owned
 // their own cdylib while they were in the workspace.
-aether_actor::export!(
-    public =
-        [camera::CameraComponent, camera::controller::CameraController, mesh::MeshViewer, bundle::BundleComponent,]
-);
+aether_actor::export!(public = [camera::CameraComponent, camera::controller::CameraController, mesh::MeshViewer,]);

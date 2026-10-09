@@ -18,6 +18,7 @@
 //! at every load of its module, so it lives in `aether-test-fixtures-fs-demux`.
 
 mod asset_instance;
+mod asset_resident;
 mod clock_probe;
 mod contract_replace;
 mod correlation_carry;
@@ -46,6 +47,7 @@ mod ui_widget;
 mod wire_fault;
 
 pub use asset_instance::AssetInstance;
+pub use asset_resident::AssetResident;
 pub use clock_probe::ClockProbe;
 pub use contract_replace::{ContractBase, ContractChanged, ContractDropped, ContractExtended, ContractFallback};
 pub use correlation_carry::{CarryRequester, ReplyHolder};
@@ -89,6 +91,7 @@ aether_actor::export!(
         PaintProbe,
         QuietProbe,
         AssetInstance,
+        AssetResident,
         RootManager,
         Panel,
         ParentPeerCaller,

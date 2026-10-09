@@ -182,7 +182,7 @@ does not require the development hub.
 
 A component that carries payload bytes in a wasm custom section, transforms them
 into an engine resident, usually in `wire`, and afterwards holds only
-the handle (ADR-0163 §4). `aether.kit.bundle` is the reference actor. Distinct
+the handle (ADR-0163 §4). `test.asset_resident`, in `aether-test-fixtures-bundle`, is the reference actor. Distinct
 from the package depot above, which is a shipping layout rather than an actor.
 
 ## Frames, rendering, and I/O
