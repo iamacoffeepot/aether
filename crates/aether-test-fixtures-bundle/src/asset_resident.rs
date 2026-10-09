@@ -10,10 +10,6 @@
 //! in the top-left corner. A raw-pixel asset carries no header, so the
 //! dimensions are constants here, and the actor links no image decoder.
 
-// Handler payloads follow the by-value dispatch ABI even when the body only
-// borrows their fields.
-#![allow(clippy::needless_pass_by_value)]
-
 use aether_actor::{ActorInitError, Assets, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
 use aether_data::Blob;
 use aether_kinds::{QuadSpace, Tick};
