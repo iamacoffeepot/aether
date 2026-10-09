@@ -23,7 +23,9 @@ crate-type = ["cdylib", "rlib"]
 # `export!` entry surface: one `export!` emits
 # the FFI entries per wasm module, so the entry-free rlib face keeps the actor
 # impls without a second `receive_p32` / `init` colliding with the embedder's own
-# `export!` at link. Non-default, so kit's own wasm build still emits.
+# `export!` at link. It also leaves out the kit's embedded tile asset, so the
+# embedder's module carries none of the kit's. Non-default, so kit's own wasm
+# build still emits.
 library = []
 
 [dependencies]

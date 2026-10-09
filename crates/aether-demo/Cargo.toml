@@ -39,6 +39,8 @@ aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture
 # The scenario opens the `main` window the demo's camera follows.
 aether-window = { path = "../aether-window", default-features = false }
 serde_json = { workspace = true }
+# `tests/kit_asset_absent.rs` walks the built demo wasm's custom sections.
+wasmparser = "0.246"
 
 [lints]
 workspace = true

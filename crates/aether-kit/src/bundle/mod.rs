@@ -15,7 +15,9 @@
 //!
 //! - **Cold** — the tile ships as raw RGBA8 bytes in the
 //!   `aether.asset.tile.rgba` custom section, emitted by
-//!   [`export_asset!`](aether_actor::export_asset). Never instantiated
+//!   [`export_asset!`](aether_actor::export_asset) in the kit's own module.
+//!   A module that takes the kit under the `library` feature carries no tile,
+//!   and embeds its own if it exports [`BundleComponent`]. Never instantiated
 //!   into linear memory; addressable only host-side at publish.
 //! - **The door** — `wire` pulls the bytes through [`Assets::asset`],
 //!   hands them to `aether.render.create_texture`, and keeps only the
@@ -80,7 +82,10 @@ const DRAW_SIZE_PIXELS: f32 = 128.0;
 // ADR-0163 §2: embed the tile in the `aether.asset.tile.rgba` custom
 // section. The path resolves relative to this source file, so the bytes
 // are `src/bundle/tile.rgba`. Emitted on the wasm build; on the host
-// rlib build it reduces to a compile-checked `include_bytes!` const.
+// rlib build it reduces to a compile-checked `include_bytes!` const. Left out
+// under `library`, where the kit ships no module of its own, so a module that
+// links the kit for its kinds does not carry the kit's tile.
+#[cfg(not(feature = "library"))]
 aether_actor::export_asset!("tile.rgba");
 
 /// The warm-tier state a resident tile survives `wire` as: the

@@ -470,6 +470,7 @@ dependencies = [
  "aether-window",
  "serde_json",
  "tracing",
+ "wasmparser 0.246.2",
 ]
 
 [[package]]
