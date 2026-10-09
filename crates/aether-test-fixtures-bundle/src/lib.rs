@@ -48,7 +48,7 @@ mod wire_fault;
 pub use asset_instance::AssetInstance;
 pub use clock_probe::ClockProbe;
 pub use contract_replace::{ContractBase, ContractChanged, ContractDropped, ContractExtended, ContractFallback};
-pub use correlation_carry::{CarryRequester, ReplyHolder};
+pub use correlation_carry::{CarryRequester, ClosingRequester, ReplyHolder};
 pub use cube::Cube;
 pub use dependent_probe::DependentProbe;
 pub use handler_set::{AnswerSet, HandlerSetAdopter};
@@ -127,6 +127,7 @@ aether_actor::export!(
         DependentProbe,
         HandlerSetAdopter,
         CarryRequester,
+        ClosingRequester,
         ReplyHolder,
         HeldRequester,
         HeldRelay,

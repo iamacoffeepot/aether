@@ -65,9 +65,10 @@
 //!   `on_dehydrate` and is kept. The candidate takes over the correlation
 //!   cursor and reply table, rehydrates, and wires with its outbox held.
 //!   While the slot is prepared, mail for the guest waits at the inbox gate
-//!   in arrival order. `Commit` unwires the old guest, installs the
-//!   candidate, sends its held mail on the commit's chain, and delivers the
-//!   gated mail to it; `Abort` unwires the candidate exactly when it wired,
+//!   in arrival order. `Commit` raises the old guest's cursor past the
+//!   candidate's, unwires the old guest, raises the candidate's cursor past
+//!   what that `unwire` minted, installs the candidate, sends its held mail
+//!   on the commit's chain, and delivers the gated mail to it; `Abort` unwires the candidate exactly when it wired,
 //!   discards it and its mail, reinstates the old guest, still wired, with
 //!   its cursor and reply table, hands it back the state it saved, and
 //!   delivers the gated mail to it, with no re-wire.

@@ -130,7 +130,11 @@ impl WasmTrampolineState {
         }
     }
 
-    /// Install the prepared candidate. The old guest runs its `unwire` first,
+    /// Install the prepared candidate. The old guest's correlation cursor is
+    /// raised to the candidate's, so its `unwire` mints past every id the
+    /// candidate's `on_rehydrate` and `wire` minted, and the candidate's is
+    /// raised to the old guest's after it, so the successor mints past every
+    /// id `unwire` minted (ADR-0139 §3). The old guest runs its `unwire`,
     /// children first, whose mail leaves at once, then drops; the
     /// candidate's held mail is sent on this turn's chain, so the chain
     /// settles only after that mail does, and its staged aliases publish.
@@ -152,7 +156,16 @@ impl WasmTrampolineState {
         };
         let PreparedSlot { mut old, saved: _, mut candidate, module, type_tag, capabilities, config, gated } = prepared;
 
+        // ADR-0139 §3 (#7662): the candidate minted request ids and reply
+        // `MailId`s in `on_rehydrate` and `wire` from the cursor it was handed
+        // at prepare, where the old guest's still stands. Raising the old
+        // guest's first keeps a request or reply its `unwire` sends off those
+        // ids; raising the candidate's after keeps the successor's next ones
+        // off what `unwire` minted. Both answers arrive at the successor,
+        // whose request contexts are keyed by id.
+        old.resume_correlations(candidate.correlation_cursor());
         old.unwire();
+        candidate.resume_correlations(old.correlation_cursor());
         // The retired guest drops here: the `Component`'s own `Drop` releases
         // its wasm store.
         drop(old);
@@ -278,7 +291,9 @@ impl WasmTrampolineState {
     /// Move what belongs to the mailbox from the old guest to the candidate,
     /// after the old guest's `on_dehydrate` and before the candidate's
     /// `on_rehydrate` and every delivery. It moves on a refusal too: the
-    /// reinstatement moves it back.
+    /// reinstatement moves it back. The correlation cursor is copied, not
+    /// moved: the old guest keeps its own, which the commit raises past the
+    /// candidate's before the old guest's `unwire` mints from it.
     fn hand_over(old: &mut Component, candidate: &mut Component) {
         // ADR-0139 §3 (#6400, #6422, #6409): after `on_dehydrate`, the
         // candidate continues the mailbox's correlation and reply-lineage

@@ -21,10 +21,17 @@
 //! Issue 6422: a third scenario has the holder answer once before the replace
 //! and once after, so the two replies' trace `MailId`s differ only when the
 //! replacement's reply-lineage counter continues past its predecessor's.
+//!
+//! Issue 7662: `ClosingRequester` also sends a request from `wire` and one
+//! from `unwire`, so a republish has the retiring guest and its successor
+//! both mint an id between prepare and commit. A fourth scenario republishes
+//! it and sends one more request: every reply but the one to the `unwire`
+//! request matches only when the retiring guest mints past its successor's
+//! `wire` and the successor then mints past the retiring guest's `unwire`.
 
 use aether_actor::{
     ActorInitError, Anyone, Erased, OutboundReply, PriorState, ReplyHandle, Unchecked, WasmActor, WasmCtx, WasmDropCtx,
-    WasmInitCtx, actor,
+    WasmInitCtx, WireCtx, actor,
 };
 use aether_test_fixtures_kinds::{
     CarriedReplyMatched, CarriedRequest, CarriedRequestResult, ReleaseCarried, RunCarriedRequest,
@@ -69,6 +76,63 @@ impl WasmActor for CarryRequester {
             }
             other => tracing::warn!(
                 target: "test.carry.requester",
+                reply_tag = reply.tag,
+                context_tag = ?other.map(|context| context.tag),
+                "carried reply did not recover its own request's context",
+            ),
+        }
+    }
+}
+
+/// The tag of the request `ClosingRequester` sends from `wire`.
+const WIRE_TAG: u32 = 0x7662_0001;
+
+/// The tag of the request `ClosingRequester` sends from `unwire`.
+const UNWIRE_TAG: u32 = 0x7662_0002;
+
+/// A requester that also sends one request from `wire` and one from `unwire`,
+/// each with a context of its own tag, so a republish has both of its guests
+/// mint a request id before the commit ends.
+pub struct ClosingRequester;
+
+#[actor(root, depends(ReplyHolder, SubstrateHarnessObserver))]
+impl WasmActor for ClosingRequester {
+    const NAMESPACE: &'static str = "test.carry.closing_requester";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(ClosingRequester)
+    }
+
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
+        let _ =
+            ctx.send_with_context::<ReplyHolder>(&CarriedRequest { tag: WIRE_TAG }, CarriedContext { tag: WIRE_TAG });
+        Ok(())
+    }
+
+    /// The context stored here dies with this guest: the answer reaches
+    /// whichever guest holds the mailbox then, under an id that guest never
+    /// stored.
+    fn unwire(&mut self, ctx: &mut WasmCtx<'_>) {
+        let _ = ctx
+            .send_with_context::<ReplyHolder>(&CarriedRequest { tag: UNWIRE_TAG }, CarriedContext { tag: UNWIRE_TAG });
+    }
+
+    #[handler::tell]
+    fn on_run(&mut self, ctx: &mut WasmCtx<'_>, run: RunCarriedRequest) {
+        let _ = ctx.send_with_context::<ReplyHolder>(&CarriedRequest { tag: run.tag }, CarriedContext { tag: run.tag });
+    }
+
+    #[handler::response]
+    fn on_reply(&mut self, ctx: &mut WasmCtx<'_>, reply: CarriedRequestResult, context: Option<CarriedContext>) {
+        match context {
+            Some(context) if context.tag == reply.tag => {
+                ctx.send::<SubstrateHarnessObserver>(&CarriedReplyMatched);
+            }
+            // The answer to a predecessor's `unwire` request: its context
+            // died with the predecessor.
+            None if reply.tag == UNWIRE_TAG => {}
+            other => tracing::warn!(
+                target: "test.carry.closing_requester",
                 reply_tag = reply.tag,
                 context_tag = ?other.map(|context| context.tag),
                 "carried reply did not recover its own request's context",
