@@ -16,6 +16,10 @@
 //! request context the old guest carries is refused, and the old guest keeps
 //! the context (ADR-0139 §4).
 //!
+//! Issue 7662: at a republish's commit the retiring guest's `unwire` and its
+//! successor's `wire` both mint request ids, and neither reuses the other's
+//! (ADR-0139 §3).
+//!
 //! A republish moves every live instance of its module together (ADR-0241
 //! §7), so the holder and the requester, which share a module, swap as one.
 //!
@@ -67,6 +71,15 @@ const BUNDLE: Family = Family {
     module: "aether_test_fixtures_bundle",
     holder: "test.carry.holder",
     requester: "test.carry.requester",
+    replacement: None,
+};
+
+/// The bundle's holder with the requester that also sends a request from
+/// `wire` and one from `unwire`, republished with its own code.
+const CLOSING: Family = Family {
+    module: "aether_test_fixtures_bundle",
+    holder: "test.carry.holder",
+    requester: "test.carry.closing_requester",
     replacement: None,
 };
 
@@ -156,6 +169,29 @@ fn a_replaced_group_keeps_its_request_ids_and_carried_reply_handles() {
         harness.count_observed(CarriedReplyMatched::NAME),
         2,
         "both replies must answer and recover their own request's context across the replace; observed kinds: {:?}",
+        harness.observed_kinds(),
+    );
+}
+
+#[test]
+fn a_retiring_guest_and_its_successor_never_mint_the_same_request_id() {
+    // Catches: the commit running the retiring guest's `unwire` on the cursor
+    // it held at prepare, so its request takes the id its successor's `wire`
+    // already minted, the holder answers the `unwire` request first, and that
+    // answer takes the successor's `wire` context; or the commit leaving the
+    // successor's cursor where its `wire` left it, so request 2 takes the id
+    // the `unwire` request minted and loses its context to that answer; or
+    // the two raises swapped, which is both. Each leaves three matches.
+    let Some((harness, _, swap)) = release_across_swap(&CLOSING, false) else {
+        return;
+    };
+    assert_replaced(&swap);
+
+    assert_eq!(
+        harness.count_observed(CarriedReplyMatched::NAME),
+        4,
+        "the first guest's wire request, request 1, the successor's wire request and request 2 must each recover \
+         their own context; observed kinds: {:?}",
         harness.observed_kinds(),
     );
 }
