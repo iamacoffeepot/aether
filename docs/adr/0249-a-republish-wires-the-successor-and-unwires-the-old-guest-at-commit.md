@@ -87,7 +87,7 @@ Three kit components show it.
   would have failed the birth, because "a rehydrate cannot refuse".
 - `aether.kit.camera` repeats `follow_window` in `on_rehydrate` for the same
   reason.
-- `aether.kit.bundle` creates its texture in `wire` and destroys it in
+- `test.asset_resident` creates its texture in `wire` and destroys it in
   `unwire`, and overrides neither replace hook. A republish destroys the
   texture and never creates one. This follows from the code as read; it was
   not reproduced on a running engine.
@@ -725,7 +725,7 @@ first:
   never has to trap, or log and run degraded, to say no.
 - A guest that fails to save its state can no longer be replaced by one that
   starts fresh.
-- `aether.kit.bundle` survives a republish with its texture.
+- `test.asset_resident` survives a republish with its texture.
 
 ### Negative
 
