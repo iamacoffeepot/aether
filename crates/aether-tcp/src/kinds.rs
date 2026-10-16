@@ -71,8 +71,9 @@ pub struct BindListener {
 /// position. The cap's handler requires [`TcpConsumer`] of its sender
 /// (ADR-0231 §11): `ctx.send::<TcpCapability>(&BindListenerSelf { .. })`
 /// builds only for an actor with silent handlers for [`SessionData`],
-/// [`SessionClosed`], and [`SessionOpened`], and a sender that reaches the cap another way, such as
-/// a relayed call, is answered `Err(Consumer(..))` without binding.
+/// [`SessionClosed`], and [`SessionOpened`], and a sender that reaches the
+/// cap another way, such as a relayed call, is answered `Err(Consumer(..))`
+/// without binding.
 /// `addr` and `name` mean what they mean on [`BindListener`].
 /// The listener and the sessions it accepts close when the sender closes,
 /// so the sender need not unbind before it does. Reply: `BindListenerResult`.
@@ -115,11 +116,10 @@ pub struct Connect {
 /// The cap's handler requires [`TcpConsumer`] of its sender (ADR-0231 §11):
 /// `ctx.send::<TcpCapability>(&ConnectSelf { .. })` builds only for an actor
 /// with silent handlers for [`SessionData`], [`SessionClosed`], and
-/// [`SessionOpened`], and a
-/// sender that reaches the cap another way, such as a relayed call, is
-/// answered `Err(Consumer(..))` without dialing. `addr` and `name` mean what
-/// they mean on [`Connect`]. The session closes when the sender closes, with
-/// no [`SessionClosed`]. Reply: [`ConnectResult`].
+/// [`SessionOpened`], and a sender that reaches the cap another way, such as
+/// a relayed call, is answered `Err(Consumer(..))` without dialing. `addr`
+/// and `name` mean what they mean on [`Connect`]. The session closes when the
+/// sender closes, with no [`SessionClosed`]. Reply: [`ConnectResult`].
 #[aether_data::kind(name = "aether.tcp.connect_self")]
 pub struct ConnectSelf {
     pub addr: String,
