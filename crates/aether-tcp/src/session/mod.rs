@@ -29,7 +29,10 @@
 //! Each session receives its consumer from its listener or outbound
 //! `Connect` request, held as a `ProtocolRef` over
 //! [`TcpConsumer`](crate::kinds::TcpConsumer) that the cap proved at
-//! receipt. The dispatcher appends read chunks to a reassembly
+//! receipt. `wire` first sends the consumer a targeted
+//! [`SessionOpened`](crate::kinds::SessionOpened) as the session, so the
+//! consumer holds a writer before the peer has sent anything, and only then
+//! releases the read sidecar. The dispatcher appends read chunks to a reassembly
 //! buffer, pops complete ADR-0072 length-prefix frames, and delivers one
 //! targeted `SessionData` mail per frame. Peer EOF and read errors produce
 //! a targeted `SessionClosed`.

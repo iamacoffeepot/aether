@@ -33,7 +33,7 @@ use aether_substrate::testing::TestChassis;
 use super::{
     BindListener, BindListenerResult, CapturedSessionMail, Connect, ConnectResult, ListListeners, ListListenersResult,
     SessionConsumer, ShutDown, TcpCapability, TcpConsumer, TcpListenerActor, address, boot_tcp_substrate_with,
-    drive_and_decode, framed_body, send_and_settle,
+    drive_and_decode, expect_opened, framed_body, send_and_settle,
 };
 
 /// Monitor the actor at `target`; the reply confirms the monitor stands.
@@ -217,7 +217,8 @@ fn a_session_closes_when_its_consumer_closes() {
 
     // Session mail is driven by the socket, not by a root this test holds, so
     // the capture channel is the only signal and its wait is time-bounded.
-    // The delivery shows the session is live and bound to the consumer.
+    // The deliveries show the session is live and bound to the consumer.
+    expect_opened(&received);
     let delivered = received.recv_timeout(Duration::from_secs(2)).expect("SessionData reaches the consumer");
     assert!(matches!(delivered, CapturedSessionMail::Data(_)), "expected SessionData, got {delivered:?}");
 

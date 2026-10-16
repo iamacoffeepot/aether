@@ -6,8 +6,8 @@
 
 use aether_actor::{ActorInitError, ProtocolRef, WasmActor, WasmCtx, WasmInitCtx, actor, protocol};
 use aether_tcp::{
-    BindListenerResult, BindListenerSelf, ConnectResult, ConnectSelf, SessionClosed, SessionData, SessionWrite,
-    TcpCapability,
+    BindListenerResult, BindListenerSelf, ConnectResult, ConnectSelf, SessionClosed, SessionData, SessionOpened,
+    SessionWrite, TcpCapability,
 };
 use aether_test_fixtures_kinds::{
     CollectTcpLoadSnapshot, ConfigureTcpLoadProbe, StartTcpConnectLoad, TcpLoadSessionSnapshot, TcpLoadSnapshot,
@@ -15,18 +15,29 @@ use aether_test_fixtures_kinds::{
 };
 
 /// What the probe sends a session: the echo of each frame it received. The
-/// session arrives only as the stamped sender of its `SessionData`, so the
-/// probe casts it to this protocol once, on its first frame (ADR-0231 §4).
+/// session arrives as the stamped sender of its `SessionOpened`, so the probe
+/// casts it to this protocol once, on that notice (ADR-0231 §4).
 #[protocol]
 trait SessionWriter {
     fn write(mail: SessionWrite);
 }
 
-/// One session the probe has seen: the snapshot it reports, and the session's
-/// writer once its first frame has arrived.
+/// One session the probe has seen: the snapshot it reports, and where its
+/// link stands.
 struct Session {
     snapshot: TcpLoadSessionSnapshot,
-    writer: Option<ProtocolRef<SessionWriter>>,
+    link: SessionLink,
+}
+
+/// Where a session's link stands.
+#[derive(Clone, Copy)]
+enum SessionLink {
+    /// An outbound session this probe asked for, whose `SessionOpened` has
+    /// not arrived.
+    Dialing,
+    /// The session opened and its sender was cast to the writer the probe
+    /// echoes through.
+    Open(ProtocolRef<SessionWriter>),
 }
 
 #[derive(Default)]
@@ -59,12 +70,12 @@ impl TcpLoadProbe {
             snapshot: TcpLoadSessionSnapshot {
                 topology,
                 session_name: session_name.to_owned(),
-                established: topology == TcpLoadTopology::Accepted,
+                established: false,
                 received_frame_count: 0,
                 received_payload_bytes: 0,
                 closed: false,
             },
-            writer: None,
+            link: SessionLink::Dialing,
         });
         self.sessions.len() - 1
     }
@@ -106,15 +117,31 @@ impl WasmActor for TcpLoadProbe {
         }
     }
 
+    /// A dial's success is recorded by its session's `SessionOpened`, which
+    /// is not ordered against this reply; only a failure is recorded here.
     #[handler::response]
     fn on_connect_result(&mut self, _ctx: &mut WasmCtx<'_>, result: ConnectResult) {
-        match result {
-            ConnectResult::Ok { session_name, .. } => {
-                let index = self.ensure_session(TcpLoadTopology::Outbound, &session_name);
-                self.sessions[index].snapshot.established = true;
-            }
-            ConnectResult::Err(error) => self.connect_failures.push(format!("{error:?}")),
+        if let ConnectResult::Err(error) = result {
+            self.connect_failures.push(format!("{error:?}"));
         }
+    }
+
+    /// Every session, dialed or accepted, opens with this notice from the
+    /// session itself: cast the sender once to the writer and keep it.
+    #[handler::tell]
+    fn on_session_opened(&mut self, ctx: &mut WasmCtx<'_>, opened: SessionOpened) {
+        let Some(sender) = ctx.sender() else {
+            return;
+        };
+        let Some(writer) = ctx.cast::<SessionWriter>(sender) else {
+            return;
+        };
+
+        let topology = self.topology_for(&opened.session_name);
+        let index = self.ensure_session(topology, &opened.session_name);
+        let session = &mut self.sessions[index];
+        session.link = SessionLink::Open(writer);
+        session.snapshot.established = true;
     }
 
     #[handler::tell]
@@ -122,7 +149,6 @@ impl WasmActor for TcpLoadProbe {
         let topology = self.topology_for(&data.session_name);
         let index = self.ensure_session(topology, &data.session_name);
         let session = &mut self.sessions[index];
-        session.snapshot.established = true;
         session.snapshot.received_frame_count += 1;
         session.snapshot.received_payload_bytes +=
             u64::try_from(data.bytes.len()).expect("tcp load payload length fits u64");
@@ -132,13 +158,9 @@ impl WasmActor for TcpLoadProbe {
         framed.extend_from_slice(&body_bytes.to_le_bytes());
         framed.extend_from_slice(&data.bytes);
 
-        // The session that delivered the frame is the stamped sender, so the
-        // echo goes back to it whichever topology spawned it. It is cast on
-        // the session's first frame and kept.
-        if session.writer.is_none() {
-            session.writer = ctx.sender().and_then(|sender| ctx.cast(sender));
-        }
-        if let Some(writer) = session.writer {
+        // The echo goes back through the writer cast from the session's
+        // `SessionOpened`, which arrives before any of its frames.
+        if let SessionLink::Open(writer) = session.link {
             ctx.send_to(writer, &SessionWrite { bytes: framed });
         }
     }
