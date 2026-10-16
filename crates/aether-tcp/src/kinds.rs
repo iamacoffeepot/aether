@@ -2,18 +2,18 @@
 //!
 //! The original 13 kind types plus the [`ListenerInfo`] helper struct
 //! were formerly defined in `aether-kinds`; they live here now per
-//! ADR-0121 (capabilities own their kinds). This module now owns 17
+//! ADR-0121 (capabilities own their kinds). This module now owns 18
 //! kinds. Kind ids are `fnv1a_64(name, schema)`, so moving declarations
 //! does not change any id or alter wire compatibility.
 
 use aether_actor::{HeldReply, PathRefused, ProtocolPath};
 use serde::{Deserialize, Serialize};
 
-/// What a tcp session delivers to its consumer: every reassembled frame and
-/// the close notice, both silent (ADR-0231 §2).
+/// What a tcp session delivers to its consumer: the opened notice, every
+/// reassembled frame, and the close notice, all three silent (ADR-0231 §2).
 ///
 /// A session holds its consumer as a `ProtocolRef<TcpConsumer>`, so its
-/// fan-out compiles only for these two kinds. The explicit `consumer` field of
+/// fan-out compiles only for these three kinds. The explicit `consumer` field of
 /// [`Connect`] and [`BindListener`] is a `ProtocolPath<TcpConsumer>`, and the
 /// handlers of the reflexive [`ConnectSelf`] and [`BindListenerSelf`] require
 /// it of their sender (ADR-0231 §11), so a consumer that would warn-drop
@@ -25,6 +25,9 @@ pub trait TcpConsumer {
     fn data(mail: SessionData);
     /// The session closed: peer EOF, read error, or frame rejection.
     fn closed(mail: SessionClosed);
+    /// The session opened: its first delivery, sent as the session so the
+    /// consumer casts its writer from the sender.
+    fn opened(mail: SessionOpened);
 }
 
 /// `aether.tcp.bind_listener` — request the singleton
@@ -38,10 +41,10 @@ pub trait TcpConsumer {
 /// `consumer` is required. It is the canonical path of the actor every
 /// accepted session delivers inbound frames and close notices to, an actor
 /// covering [`TcpConsumer`] (ADR-0231 §3): in code an `ActorPath<R>` narrowed
-/// with `.narrow::<TcpConsumer>()`, which compiles only when `R` handles both
-/// kinds silently; over MCP the `path` a component load returns. A short
+/// with `.narrow::<TcpConsumer>()`, which compiles only when `R` handles its
+/// three kinds silently; over MCP the `path` a component load returns. A short
 /// `root/:key` path is refused at decode with a warn and gets no reply; a path
-/// no route has stood at, one whose route does not publish both silent rows,
+/// no route has stood at, one whose route does not publish its silent rows,
 /// and a consumer that has closed are answered
 /// `Err(BindListenerError::Consumer(..))` without binding. A consumer binding
 /// itself sends [`BindListenerSelf`].
@@ -67,9 +70,10 @@ pub struct BindListener {
 /// is already proven, so a component binds itself without naming its own
 /// position. The cap's handler requires [`TcpConsumer`] of its sender
 /// (ADR-0231 §11): `ctx.send::<TcpCapability>(&BindListenerSelf { .. })`
-/// builds only for an actor with silent handlers for [`SessionData`] and
-/// [`SessionClosed`], and a sender that reaches the cap another way, such as
-/// a relayed call, is answered `Err(Consumer(..))` without binding.
+/// builds only for an actor with silent handlers for [`SessionData`],
+/// [`SessionClosed`], and [`SessionOpened`], and a sender that reaches the
+/// cap another way, such as a relayed call, is answered `Err(Consumer(..))`
+/// without binding.
 /// `addr` and `name` mean what they mean on [`BindListener`].
 /// The listener and the sessions it accepts close when the sender closes,
 /// so the sender need not unbind before it does. Reply: `BindListenerResult`.
@@ -111,11 +115,11 @@ pub struct Connect {
 /// already proven, so a component dials without naming its own position.
 /// The cap's handler requires [`TcpConsumer`] of its sender (ADR-0231 §11):
 /// `ctx.send::<TcpCapability>(&ConnectSelf { .. })` builds only for an actor
-/// with silent handlers for [`SessionData`] and [`SessionClosed`], and a
-/// sender that reaches the cap another way, such as a relayed call, is
-/// answered `Err(Consumer(..))` without dialing. `addr` and `name` mean what
-/// they mean on [`Connect`]. The session closes when the sender closes, with
-/// no [`SessionClosed`]. Reply: [`ConnectResult`].
+/// with silent handlers for [`SessionData`], [`SessionClosed`], and
+/// [`SessionOpened`], and a sender that reaches the cap another way, such as
+/// a relayed call, is answered `Err(Consumer(..))` without dialing. `addr`
+/// and `name` mean what they mean on [`Connect`]. The session closes when the
+/// sender closes, with no [`SessionClosed`]. Reply: [`ConnectResult`].
 #[aether_data::kind(name = "aether.tcp.connect_self")]
 pub struct ConnectSelf {
     pub addr: String,
@@ -127,7 +131,9 @@ pub struct ConnectSelf {
 /// dialed ([`ConnectError`]).
 ///
 /// A consumer actor writes to the session through the host-stamped sender
-/// of the [`SessionData`] it receives (`ctx.sender()`, then `ctx.send_to`).
+/// of the [`SessionOpened`] it receives (`ctx.sender()`, cast once, then
+/// `ctx.send_to`). That notice and this reply come from two senders, so
+/// their order is not defined.
 /// An MCP agent addresses the session by the full ADR-0099 lineage path
 /// `aether.tcp/aether.tcp.session:<session_name>` as a mail recipient address —
 /// the bare subname is not a mailbox address.
@@ -310,6 +316,21 @@ pub struct ConnectReady {}
 #[aether_data::kind(name = "aether.tcp.session_data_ready", default)]
 pub struct SessionDataReady {}
 
+/// `aether.tcp.session_opened` — the first delivery of every session,
+/// dialed or accepted, to its configured consumer. The session sends it as
+/// itself, so the host-stamped sender is the session: the consumer casts
+/// `ctx.sender()` once, here, to the protocol of the [`SessionWrite`] /
+/// [`SessionClose`] rows it needs and keeps that reference with its session
+/// state (ADR-0231 §4). It arrives before any [`SessionData`] of the same
+/// session; against the dialer's [`ConnectResult`] its order is not defined.
+/// Carries the session subname and the peer address, as [`SessionData`] and
+/// [`SessionClosed`] do.
+#[aether_data::kind(name = "aether.tcp.session_opened")]
+pub struct SessionOpened {
+    pub session_name: String,
+    pub peer: String,
+}
+
 /// `aether.tcp.session_data` — one reassembled length-prefix frame
 /// delivered by a `TcpSessionActor` to its configured consumer.
 /// Carries the session subname (`conn-N`), the peer address as a
@@ -324,7 +345,9 @@ pub struct SessionData {
 }
 
 /// `aether.tcp.session_write` — peer mails this to a
-/// `TcpSessionActor` to write `bytes` to the connected stream.
+/// `TcpSessionActor` to write `bytes` to the connected stream. A consumer
+/// actor writes through the host-stamped sender of the [`SessionOpened`] it
+/// receives, so it may write before its peer has sent anything.
 /// Fire-and-forget; the session's handler does a blocking write
 /// on the dispatcher thread (writes are typically fast and
 /// dispatcher-thread initiated, so a sidecar isn't needed for
@@ -337,8 +360,8 @@ pub struct SessionWrite {
 
 /// `aether.tcp.session_close` — peer asks the session to close
 /// gracefully. A consumer actor closes the session through the
-/// host-stamped sender of the [`SessionData`] it receives
-/// (`ctx.sender()`, then `ctx.send_to`). The session's handler calls
+/// host-stamped sender of the [`SessionOpened`] it receives
+/// (`ctx.sender()`, cast once, then `ctx.send_to`). The session's handler calls
 /// `ctx.shutdown()`, and no [`SessionClosed`] follows.
 #[aether_data::kind(name = "aether.tcp.session_close", default)]
 pub struct SessionClose {}

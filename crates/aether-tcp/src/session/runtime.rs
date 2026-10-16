@@ -29,7 +29,9 @@ use aether_actor::{ProtocolRef, runtime};
 use aether_codec::frame::pop_frame;
 // The moved handler bodies name the cap kinds backing their signatures; bring
 // them in crate-absolute, matching the style above.
-use crate::kinds::{SessionClose, SessionClosed, SessionData, SessionDataReady, SessionWrite, TcpConsumer};
+use crate::kinds::{
+    SessionClose, SessionClosed, SessionData, SessionDataReady, SessionOpened, SessionWrite, TcpConsumer,
+};
 // The `#[runtime] impl NativeActor` names the identity struct from the parent.
 use super::TcpSessionActor;
 
@@ -51,8 +53,8 @@ pub struct TcpSessionState {
     pub session_name: String,
     /// The consumer, proven by the cap at receipt to cover [`TcpConsumer`]
     /// (ADR-0230, ADR-0231 §3/§4), so a send through it compiles only for
-    /// `SessionData` and `SessionClosed`. Every delivery inherits the
-    /// handler's causal chain; a proof rather than a runtime name, because a
+    /// `SessionOpened`, `SessionData`, and `SessionClosed`. Every delivery
+    /// inherits the handler's causal chain; a proof rather than a runtime name, because a
     /// name cannot reach a nested actor such as a component loaded beneath a
     /// parent at `parent/NS:key`.
     ///
@@ -171,7 +173,17 @@ impl NativeActor for TcpSessionActor {
         })
     }
 
-    fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
+    /// Tell the consumer the session opened, as the session, then release the
+    /// read gate. The notice is held with the rest of this birth's mail until
+    /// the session is live, and any `SessionData` is sent in a later turn, so
+    /// the consumer hears `SessionOpened` first and can write before the peer
+    /// sends anything.
+    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
+        ctx.send_to(
+            state.consumer,
+            &SessionOpened { session_name: state.session_name.clone(), peer: state.peer.clone() },
+        );
+
         let sidecar = mem::replace(&mut state.read_sidecar, ReadSidecar::Stopped);
         match sidecar {
             ReadSidecar::Parked { gate, thread } => {

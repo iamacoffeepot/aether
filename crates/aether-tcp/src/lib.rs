@@ -40,7 +40,9 @@
 //! - `ListListeners` → `ListListenersResult`
 //!
 //! A consumer covers the [`TcpConsumer`] protocol: it handles
-//! [`SessionData`] and [`SessionClosed`] silently. The explicit `consumer`
+//! [`SessionOpened`], [`SessionData`], and [`SessionClosed`] silently.
+//! Every session, dialed or accepted, sends [`SessionOpened`] as its first
+//! delivery, before any [`SessionData`]. The explicit `consumer`
 //! is a `ProtocolPath<TcpConsumer>` proven at decode, a path that does not
 //! prove is answered `Err(Consumer(..))`, and a `_self` request's handler
 //! requires the protocol of its sender (ADR-0231 §11): the send builds only
@@ -77,8 +79,9 @@
 //! example) names these types directly: it sends the cap-root kinds with
 //! `ctx.send::<TcpCapability>`, covers [`TcpConsumer`], binds or dials
 //! itself as consumer with a `_self` kind, and writes framed bytes to a
-//! session through the host-stamped sender of the [`SessionData`] it
-//! receives (`ctx.sender()`, then `ctx.send_to`). That is a downward leaf→leaf dependency, not a
+//! session through the host-stamped sender of the [`SessionOpened`] it
+//! receives (`ctx.sender()`, cast once, then `ctx.send_to`), so it may write
+//! before the peer sends anything. That is a downward leaf→leaf dependency, not a
 //! facade: a downstream crate that wants TCP deps here directly, and pulls
 //! in nothing else.
 

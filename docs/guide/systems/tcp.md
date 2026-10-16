@@ -57,7 +57,9 @@ capability closes, the ledger settles every reply it still holds.
 
 TCP is a byte stream, but Aether's session surface is framed. Reader sidecars
 reassemble length-prefixed frames and notify the session actor that data is
-ready. Consumers receive `aether.tcp.session_data`; writes use
+ready. Each session's first delivery to its consumer is
+`aether.tcp.session_opened`, dialed or accepted, before any of its frames.
+Consumers then receive `aether.tcp.session_data`; writes use
 `aether.tcp.session_write`. `session_close` requests cooperative local shutdown.
 `session_closed` reports peer EOF, a read error, or frame rejection to the
 configured consumer; a local `session_close` does not synthesize that event
@@ -75,9 +77,9 @@ one peer read. Reassembly and full-write loops are native responsibilities.
 Every bind and connect names a consumer; there is no listener or session
 without one. A consumer covers the `TcpConsumer` protocol
 (`aether_tcp::TcpConsumer`): it
-handles `session_data` and `session_closed`, both silently. Each session holds
-its consumer as a `ProtocolRef<TcpConsumer>`, so its fan-out compiles only for
-those two kinds.
+handles `session_opened`, `session_data`, and `session_closed`, all three
+silently. Each session holds its consumer as a `ProtocolRef<TcpConsumer>`, so
+its fan-out compiles only for those three kinds.
 
 A consumer actor binds itself to its sessions with a `_self` kind:
 `ctx.send::<TcpCapability>(&BindListenerSelf { .. })` or
@@ -86,8 +88,8 @@ consumer from the proven sender, so the actor never names its own position.
 Both handlers require `TcpConsumer` of their sender (ADR-0231 §11), which
 each states as its ctx's sender (`NativeCtx<'_, Self, TcpConsumer>`) and
 reads as the proven `ProtocolRef<TcpConsumer>` from `ctx.sender()`: the send
-builds only for an actor with silent handlers for `session_data` and
-`session_closed`, and an actor that lacks one gets a build error naming it.
+builds only for an actor with silent handlers for `session_opened`,
+`session_data`, and `session_closed`, and an actor that lacks one gets a build error naming it.
 The engine casts the sender before the handler runs, so a `_self` kind that
 arrives another way, such as a call relayed from MCP, is answered
 `Err(Consumer(..))` naming the sender and the handler it lacks, and nothing
@@ -98,7 +100,7 @@ An agent, or a capability binding a different actor, names that actor in the
 `ProtocolPath<TcpConsumer>`: in code an `ActorPath<R>` narrowed with
 `.narrow::<TcpConsumer>()`, and over MCP the canonical `path` a component load
 returns. The path must be canonical; a short `root/:key` path is refused. Its decode proves that the route at the path, live or closed,
-publishes both silent rows. A path no route has stood at, one whose route
+publishes its three silent rows. A path no route has stood at, one whose route
 does not publish them, and a consumer that has closed are all answered
 `Err(Consumer(PathRefused { path, reason }))`, with nothing bound or dialed; a
 dial or bind that fails otherwise is `Err(Failed { addr, error })`. Sessions and listeners are addressed as
@@ -106,8 +108,8 @@ dial or bind that fails otherwise is `Err(Failed { addr, error })`. Sessions and
 `aether.tcp/aether.tcp.listener:<listener_name>`, from the names the results
 return.
 
-Each session delivers `session_data` and `session_closed` as itself, so the
-host stamps the session as the envelope sender. The consumer writes or closes
+Each session delivers `session_opened`, `session_data`, and `session_closed`
+as itself, so the host stamps the session as the envelope sender. The consumer writes or closes
 through that sender: `ctx.sender()`, cast as below, then
 `ctx.send_to(session, &SessionWrite { .. })` or `&SessionClose {}`. Accepted
 and outbound sessions are addressed the same way. There are no route helpers,
@@ -115,10 +117,16 @@ and the consumer never derives a session's mailbox from its name. Raw sockets
 stay in native state.
 
 An erased reference has no send verb (ADR-0231 §4), so the consumer casts
-the session sender once, on the session's first delivery, to a protocol with
-the `SessionWrite` / `SessionClose` rows it needs, keeps the
-`ProtocolRef<P>` with its session state, and writes through that
-([R-0044](../contributing/design-rules.md#r-0044)). A guest casts with
+the session sender once, on `session_opened`, to a protocol with the
+`SessionWrite` / `SessionClose` rows it needs, keeps the `ProtocolRef<P>`
+with its session state, and writes through that
+([R-0044](../contributing/design-rules.md#r-0044)). The session sends
+`session_opened` from its `wire`, before it starts reading, so the notice
+reaches the consumer of an accepted or a dialed session before any
+`session_data`, and a consumer can write first: a client hello, a server
+banner, or a handshake. A session whose birth fails sends no notice. The
+order of `session_opened` and a dialer's `connect_result` is not defined:
+they come from two senders. A guest casts with
 `WasmCtx::cast`; the tcp load probe fixture
 (`crates/aether-test-fixtures-bundle/src/tcp_load_probe.rs`) is the worked
 example.

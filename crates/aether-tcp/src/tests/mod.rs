@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use super::{
     BindListener, BindListenerError, BindListenerResult, BindListenerSelf, Connect, ConnectError, ConnectResult,
-    ListListeners, ListListenersResult, SessionClosed, SessionData, SessionWrite, TcpCapability, TcpConsumer,
-    TcpListenerActor, TcpSessionActor, UnbindListener, UnbindListenerResult,
+    ListListeners, ListListenersResult, SessionClosed, SessionData, SessionOpened, SessionWrite, TcpCapability,
+    TcpConsumer, TcpListenerActor, TcpSessionActor, UnbindListener, UnbindListenerResult,
 };
 use aether_actor::{
     ActorPath, Addressable, Anyone, ErasedActorRef, PathRefusal, PathRefused, ProtocolPath, Unchecked, Undeclared,
@@ -104,6 +104,7 @@ fn next_reply<R: Kind>(rx: &mpsc::Receiver<EgressEvent>, what: &str) -> (Session
 
 #[derive(Debug)]
 enum CapturedSessionMail {
+    Opened(SessionOpened),
     Data(SessionData),
     Closed(SessionClosed),
 }
@@ -130,6 +131,11 @@ impl NativeActor for SessionConsumer {
 
     fn init(captures: mpsc::Sender<CapturedSessionMail>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { captures })
+    }
+
+    #[handler::tell]
+    fn on_session_opened(&mut self, _ctx: &mut NativeCtx<'_>, mail: SessionOpened) {
+        let _ = self.captures.send(CapturedSessionMail::Opened(mail));
     }
 
     #[handler::tell]
@@ -322,6 +328,18 @@ fn framed_body(body: &[u8]) -> Vec<u8> {
     frame.extend_from_slice(&body_len.to_le_bytes());
     frame.extend_from_slice(body);
     frame
+}
+
+/// Take a session's first delivery, which is its opened notice. Session mail
+/// is driven by the socket, not by a root the test holds, so the capture
+/// channel is the only signal and its wait is time-bounded.
+fn expect_opened(captures: &mpsc::Receiver<CapturedSessionMail>) -> SessionOpened {
+    let first = captures.recv_timeout(Duration::from_secs(2)).expect("SessionOpened arrives");
+    let CapturedSessionMail::Opened(opened) = first else {
+        panic!("expected SessionOpened as the session's first delivery, got {first:?}");
+    };
+
+    opened
 }
 
 fn register_route_collision(registry: &Registry, canonical_name: &str) -> ErasedActorRef {
@@ -703,8 +721,10 @@ fn connect_roundtrip_spawns_writable_session() {
     let peer = peer.parse::<SocketAddr>().expect("connect result peer is a socket address");
     assert_eq!(peer.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST), "connect result peer should be on 127.0.0.1");
 
-    // Session mail is driven by the socket, not by a root this test holds, so
-    // the capture channel is the only signal and its wait is time-bounded.
+    let opened = expect_opened(&consumer_rx);
+    assert_eq!(opened.session_name, session_name);
+    assert_eq!(opened.peer, peer.to_string());
+
     let received = consumer_rx.recv_timeout(Duration::from_secs(2)).expect("connect consumer receives SessionData");
     let CapturedSessionMail::Data(received) = received else {
         panic!("expected SessionData, got {received:?}");
@@ -975,13 +995,15 @@ fn session_reassembles_frames_for_bound_consumer_and_reports_eof() {
     first_write.extend_from_slice(&second_frame[..second_split]);
     client.write_all(&first_write).expect("write first frame and partial second frame");
 
-    // Session mail is driven by the socket, not by a root this test holds, so
-    // the capture channel is the only signal and its wait is time-bounded.
+    let opened = expect_opened(&consumer_rx);
+    assert_eq!(opened.session_name, "conn-0");
+
     let first = consumer_rx.recv_timeout(Duration::from_secs(2)).expect("first SessionData arrives");
     let CapturedSessionMail::Data(first) = first else {
         panic!("expected first SessionData, got {first:?}");
     };
     assert_eq!(first.session_name, "conn-0");
+    assert_eq!(first.peer, opened.peer);
     assert_eq!(first.bytes, first_body);
     assert!(consumer_rx.try_recv().is_err(), "partial second frame must not be delivered");
 
@@ -1006,7 +1028,10 @@ fn session_reassembles_frames_for_bound_consumer_and_reports_eof() {
     // so there is no settlement to wait on: a short quiet window is the only
     // way to see that no further mail follows the close.
     thread::sleep(Duration::from_millis(50));
-    assert!(consumer_rx.try_recv().is_err(), "consumer must receive exactly two data mails and one close mail");
+    assert!(
+        consumer_rx.try_recv().is_err(),
+        "consumer must receive exactly one opened mail, two data mails, and one close mail"
+    );
 }
 
 /// Tripwire: a consumer that is a *nested* actor still receives its
@@ -1048,8 +1073,8 @@ fn nested_lineage_consumer_receives_session_mail() {
     let mut client = TcpStream::connect(("127.0.0.1", local_port)).expect("connect loopback client");
     client.write_all(&framed_body(body)).expect("write one complete frame");
 
-    // Session mail is driven by the socket, not by a root this test holds, so
-    // the capture channel is the only signal and its wait is time-bounded.
+    assert_eq!(expect_opened(&consumer_rx).session_name, "conn-0");
+
     let delivered = consumer_rx.recv_timeout(Duration::from_secs(2)).expect("SessionData reaches a nested consumer");
     let CapturedSessionMail::Data(delivered) = delivered else {
         panic!("expected SessionData, got {delivered:?}");
@@ -1079,8 +1104,8 @@ fn session_reports_frame_rejection_to_bound_consumer() {
     let mut client = TcpStream::connect(("127.0.0.1", local_port)).expect("connect loopback client");
     client.write_all(&u32::MAX.to_le_bytes()).expect("write oversize frame prefix");
 
-    // Session mail is driven by the socket, not by a root this test holds, so
-    // the capture channel is the only signal and its wait is time-bounded.
+    assert_eq!(expect_opened(&consumer_rx).session_name, "conn-0");
+
     let closed = consumer_rx.recv_timeout(Duration::from_secs(2)).expect("SessionClosed arrives on frame rejection");
     let CapturedSessionMail::Closed(closed) = closed else {
         panic!("expected SessionClosed, got {closed:?}");
@@ -1092,7 +1117,7 @@ fn session_reports_frame_rejection_to_bound_consumer() {
     // holds, so there is no settlement to wait on: a short quiet window is
     // the only way to see that no second close follows.
     thread::sleep(Duration::from_millis(50));
-    assert!(consumer_rx.try_recv().is_err(), "consumer must receive exactly one close mail");
+    assert!(consumer_rx.try_recv().is_err(), "consumer must receive exactly one opened mail and one close mail");
 }
 
 /// Two concurrent binds on different ports both surface in
@@ -1121,4 +1146,122 @@ fn list_enumerates_two_concurrent_listeners() {
     let mut names: Vec<String> = list.listeners.iter().map(|l| l.name.clone()).collect();
     names.sort();
     assert_eq!(names, vec!["admin".to_string(), "game".to_string()]);
+}
+
+/// What [`GreetingConsumer`] sends a session: its greeting frame.
+#[aether_actor::protocol]
+trait SessionWriter {
+    fn write(mail: SessionWrite);
+}
+
+/// A session consumer that speaks first: on each session's `opened` it casts
+/// the sender to [`SessionWriter`] and writes its config, one framed greeting,
+/// before the peer has sent anything.
+struct GreetingConsumer {
+    greeting: Vec<u8>,
+}
+
+#[actor(instanced, root)]
+impl NativeActor for GreetingConsumer {
+    const NAMESPACE: &'static str = "test.tcp.greeting_consumer";
+    type Config = Vec<u8>;
+
+    fn init(greeting: Vec<u8>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { greeting })
+    }
+
+    #[handler::tell]
+    fn on_session_opened(&mut self, ctx: &mut NativeCtx<'_>, _mail: SessionOpened) {
+        let session = ctx.sender().expect("a session sends its opened notice as itself");
+        let writer = ctx.cast::<SessionWriter>(session).expect("the opened notice's sender is a session");
+        ctx.send_to(writer, &SessionWrite { bytes: self.greeting.clone() });
+    }
+
+    #[handler::tell]
+    fn on_session_data(&mut self, _ctx: &mut NativeCtx<'_>, _mail: SessionData) {}
+
+    #[handler::tell]
+    fn on_session_closed(&mut self, _ctx: &mut NativeCtx<'_>, _mail: SessionClosed) {}
+}
+
+/// Spawn a [`GreetingConsumer`] writing `greeting` at the root instance `key`
+/// and answer its path narrowed to [`TcpConsumer`].
+fn spawn_greeting_consumer(
+    chassis: &PassiveChassis<TestChassis>,
+    key: &str,
+    greeting: Vec<u8>,
+) -> ProtocolPath<TcpConsumer> {
+    chassis
+        .spawn_actor::<GreetingConsumer>(Subname::Named(key), greeting, ())
+        .finish()
+        .expect("the greeting consumer spawns");
+
+    ActorPath::<GreetingConsumer>::instance(&LoadName::new(key).expect("a valid key")).narrow()
+}
+
+/// Read one frame of `expected.len()` bytes from a plain socket that has sent
+/// nothing. The greeting reaches it through the kernel, not through a chain
+/// the test holds; the read timeout only keeps a greeting that never comes
+/// from hanging the read.
+fn read_greeting(stream: &mut TcpStream, expected: &[u8]) -> Vec<u8> {
+    stream.set_read_timeout(Some(Duration::from_secs(5))).expect("bound the wait for the greeting");
+    let mut received = vec![0_u8; expected.len()];
+    stream.read_exact(&mut received).expect("the consumer's greeting reaches the silent peer");
+
+    received
+}
+
+/// An accepted session lets its consumer speak first: a plain client that
+/// connects and sends nothing reads the consumer's greeting frame. Fails when
+/// an accepted session sends no opened notice, sends it from a sender other
+/// than the session (the cast finds no writer), or sends it only after the
+/// peer's first frame, which never comes.
+#[test]
+fn an_accepted_session_is_written_before_its_peer_sends() {
+    let greeting = framed_body(b"server hello");
+    let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>();
+    let consumer = spawn_greeting_consumer(&chassis, "accepted-greeter", greeting.clone());
+
+    let bind: BindListenerResult = drive_and_decode(
+        &chassis,
+        &rx,
+        tcp,
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("greeting".into()), consumer },
+    );
+    let local_port = match bind {
+        BindListenerResult::Ok { local_port, .. } => local_port,
+        BindListenerResult::Err(error) => panic!("bind failed: {error:?}"),
+    };
+    let mut client = TcpStream::connect(("127.0.0.1", local_port)).expect("connect the silent client");
+
+    assert_eq!(read_greeting(&mut client, &greeting), greeting);
+}
+
+/// A dialed session lets its consumer speak first: the plain server it dials
+/// reads the consumer's greeting frame before writing anything. Fails when a
+/// dialed session sends no opened notice, sends it from a sender other than
+/// the session, or sends it only after the server's first frame, which never
+/// comes.
+#[test]
+fn a_dialed_session_is_written_before_its_peer_sends() {
+    let greeting = framed_body(b"client hello");
+    let server = TcpListener::bind("127.0.0.1:0").expect("bind the silent server");
+    let addr = server.local_addr().expect("the silent server's address");
+    let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>();
+    let consumer = spawn_greeting_consumer(&chassis, "dialed-greeter", greeting.clone());
+
+    let dialed: ConnectResult = drive_and_decode(
+        &chassis,
+        &rx,
+        tcp,
+        &Connect { addr: addr.to_string(), name: Some("greeting".into()), consumer },
+    );
+    assert!(matches!(dialed, ConnectResult::Ok { .. }), "the dial is answered with its session: {dialed:?}");
+    // The kernel completed the connection into the server's backlog when the
+    // dial was answered, so this accept returns it without waiting.
+    let (mut peer, _) = server.accept().expect("accept the dialed connection");
+
+    assert_eq!(read_greeting(&mut peer, &greeting), greeting);
 }
