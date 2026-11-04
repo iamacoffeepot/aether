@@ -227,7 +227,7 @@ getrandom = "0.3"
 unicode-normalization = { version = "0.1", default-features = false }
 syn = { version = "2", features = ["full"] }
 tracing = { version = "0.1", default-features = false }
-wasmtime = "44"
+wasmtime = "48"
 wgpu = "30.0.1"
 # ADR-0170 authored render programs: the render cap validates authored
 # WGSL and reads its uniform-block layout at register time through naga
